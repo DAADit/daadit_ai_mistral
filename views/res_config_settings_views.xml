@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="res_config_settings_view_form_inherit_daadit_ai_mistral" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.inherit.daadit_ai_mistral</field>
+        <field name="model">res.config.settings</field>
+        <!--
+            We inherit from the ai_app view (NOT the ai view) because that's
+            where the openai_provider / google_provider blocks are rendered
+            (inside <app name="ai_app"><block name="ai_providers">).
+
+            Layout strategy:
+              * Toggle + key field reproduce the OpenAI/Gemini pattern
+                exactly (flex-grow-1 div with nolabel field).
+              * Helper text for the console.mistral.ai link uses
+                ``text-muted``, the standard Odoo class for hints.
+              * Advanced fields (base URL, timeout) go inside an inner
+                <group> — Odoo's settings-aware label/field grid that
+                does not collide with the parent <setting>'s flex layout.
+                Earlier attempts using handwritten <div class="row"> with
+                <label class="col-3"> caused label/input overlap.
+              * Top-of-section info card lists every provider with a
+                direct link + 3-step "where to get the key" for each.
+                Sits OUTSIDE individual <setting> blocks because we
+                don't own ChatGPT/Gemini/Azure; injecting inside their
+                <setting> would break across Odoo Enterprise versions.
+        -->
+        <field name="inherit_id" ref="ai_app.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+
+            <!--
+                Top-of-providers help card: one place that documents
+                where every supported provider's API key comes from,
+                so the user doesn't bounce back to Google to figure
+                out "what's a Mistral console" or "where in Azure do
+                I find the key". Uses Bootstrap alert + details so
+                the card collapses out of the way once you know your
+                way around.
+            -->
+            <xpath expr="//block[@name='ai_providers']" position="before">
+                <div class="alert alert-info"
+                     groups="base.group_system">
+                    <h5 class="alert-heading">
+                        <i class="fa fa-key me-1"/>
+                        Where do I get an API key for these providers?
+                    </h5>
+                    <p class="small mb-2">
+                        Pick the provider you want to use below, then
+                        follow its steps to get a key. Most providers
+                        bill by usage; a typical Odoo + AI workload
+                        costs a few cents per agent conversation.
+                    </p>
+                    <details class="mb-1">
+                        <summary class="small fw-bold">
+                            <i class="fa fa-comment-dots me-1"/> ChatGPT (OpenAI)
+                        </summary>
+                        <ol class="small mt-1 mb-2">
+                            <li>Open <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a> and sign in (or create an account).</li>
+                            <li>Click <strong>Create new secret key</strong>, give it a name like "Odoo", and copy the key (starts with <code>sk-</code>). It is shown only once.</li>
+                            <li>Make sure you have a payment method on file: <a href="https://platform.openai.com/settings/organization/billing" target="_blank" rel="noopener">platform.openai.com/settings/organization/billing</a>. New accounts get free credits but a card is required for production use.</li>
+                            <li>Paste the key in the <em>Use your own ChatGPT account</em> field below.</li>
+                        </ol>
+                    </details>
+                    <details class="mb-1">
+                        <summary class="small fw-bold">
+                            <i class="fa fa-google me-1"/> Google Gemini
+                        </summary>
+                        <ol class="small mt-1 mb-2">
+                            <li>Open <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a> and sign in with your Google account.</li>
+                            <li>Click <strong>Create API key</strong> → choose a Google Cloud project (or accept the auto-created one) → copy the key.</li>
+                            <li>Free tier covers light testing. For production, link a billing account in Google Cloud and switch the key to a paid project — see <a href="https://ai.google.dev/pricing" target="_blank" rel="noopener">ai.google.dev/pricing</a>.</li>
+                            <li>Paste the key in the <em>Use your own Google Gemini account</em> field below.</li>
+                        </ol>
+                    </details>
+                    <details class="mb-1">
+                        <summary class="small fw-bold">
+                            <i class="fa fa-robot me-1"/> Mistral AI
+                        </summary>
+                        <ol class="small mt-1 mb-2">
+                            <li>Open <a href="https://console.mistral.ai/" target="_blank" rel="noopener">console.mistral.ai</a> and create an account (or sign in).</li>
+                            <li>Add a payment method under <strong>Workspace → Billing</strong>. Mistral requires this even on the free tier before issuing API keys.</li>
+                            <li>Go to <strong>API Keys</strong> in the left nav → <strong>Create new key</strong> → copy the key (you'll only see it once).</li>
+                            <li>Paste it in the <em>Use your own Mistral AI account</em> field below. Default API base URL <code>https://api.mistral.ai</code> works for everyone.</li>
+                        </ol>
+                    </details>
+                    <details class="mb-1">
+                        <summary class="small fw-bold">
+                            <i class="fa fa-microsoft me-1"/> Microsoft 365 Copilot (Azure OpenAI)
+                        </summary>
+                        <ol class="small mt-1 mb-2">
+                            <li>Open <a href="https://portal.azure.com/" target="_blank" rel="noopener">portal.azure.com</a> with an account that has <strong>Cognitive Services Contributor</strong> on the relevant subscription.</li>
+                            <li>If you don't have one yet: create an <strong>Azure OpenAI</strong> resource — Search bar → "Azure OpenAI" → <strong>Create</strong>. Pick a region (West Europe / Sweden Central are common for EU). Approval may take a few minutes.</li>
+                            <li>Open the resource → <strong>Resource Management → Keys and Endpoint</strong>. Copy <code>Key 1</code> and the <strong>Endpoint</strong> URL (looks like <code>https://YOUR-RESOURCE.openai.azure.com/</code>).</li>
+                            <li>Open <strong>Azure AI Studio → Deployments</strong> (<a href="https://oai.azure.com/portal" target="_blank" rel="noopener">oai.azure.com/portal</a>) and deploy a model (e.g. <code>gpt-4o</code>). The deployment name is what Odoo uses to address the model.</li>
+                            <li>Paste the key + endpoint below. Default API version <code>2024-10-21</code> works for the supported models; bump it only when Microsoft documents it for a feature you need (<a href="https://learn.microsoft.com/azure/ai-services/openai/reference" target="_blank" rel="noopener">learn.microsoft.com/azure/ai-services/openai/reference</a>).</li>
+                        </ol>
+                        <p class="small text-muted mb-0">
+                            Note: this is the <em>Azure OpenAI</em> path — using your enterprise Azure subscription. If you're looking for the consumer Microsoft 365 Copilot chat assistant, that's a different product and doesn't expose an API key here.
+                        </p>
+                    </details>
+                </div>
+            </xpath>
+
+            <xpath expr="//block[@name='ai_providers']" position="inside">
+                <setting id="mistral_provider"
+                         string="Use your own Mistral AI account"
+                         help="Provide your API key to connect with your account"
+                         groups="base.group_system">
+                    <field name="mistral_key_enabled"/>
+                    <div invisible="not mistral_key_enabled">
+                        <div class="flex-grow-1">
+                            <field name="mistral_key"
+                                   placeholder="Key"
+                                   password="True"
+                                   nolabel="1"
+                                   class="w-100"/>
+                        </div>
+                        <div class="text-muted mt8 mb8">
+                            <i class="fa fa-info-circle me-1"/>
+                            Get a key at
+                            <a href="https://console.mistral.ai/api-keys/"
+                               target="_blank" rel="noopener">console.mistral.ai/api-keys</a>
+                            (sign in → add a billing method →
+                            <strong>Create new key</strong> → copy the value
+                            shown once). See the help card above for the
+                            full step-by-step.
+                        </div>
+                        <group>
+                            <field name="mistral_base_url" string="API base URL"/>
+                            <field name="mistral_timeout" string="Request timeout (s)"/>
+                        </group>
+                    </div>
+                </setting>
+            </xpath>
+        </field>
+    </record>
+</odoo>

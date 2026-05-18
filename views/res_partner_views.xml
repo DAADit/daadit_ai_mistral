@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!--
+        GDPR Art. 17 (right to erasure) button on res.partner form for
+        the Mistral usage history.
+
+        The stock res.partner form has no <header>, so we inject one
+        before <sheet>. If `daadit_mcp_multi_tenant` is also installed,
+        it adds its own header on the same hook — Odoo merges them, so
+        the user sees both buttons side by side. Each module owns its
+        own erasure scope (MCP audit log vs Mistral usage history) for
+        clarity and zero cross-module coupling.
+    -->
+    <record id="view_res_partner_form_daadit_ai_erase" model="ir.ui.view">
+        <field name="name">res.partner.form.daadit_ai_gdpr_erase</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="before">
+                <header>
+                    <button name="action_daadit_ai_gdpr_erase"
+                            type="object"
+                            string="Erase Mistral usage (GDPR)"
+                            class="btn-warning"
+                            groups="base.group_system"
+                            confirm="This anonymises every Mistral usage row tied to this partner's user(s) — token counts and cost figures stay (no PII), only the user link is removed. This action is logged and cannot be undone. Continue?"
+                            help="GDPR Art. 17 — anonymises Mistral cost-tracking entries while keeping aggregate cost data intact. Available to system administrators only."/>
+                </header>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

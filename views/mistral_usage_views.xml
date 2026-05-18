@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <record id="view_daadit_ai_mistral_usage_list" model="ir.ui.view">
+        <field name="name">daadit_ai_mistral.usage.list</field>
+        <field name="model">daadit_ai_mistral.usage</field>
+        <field name="arch" type="xml">
+            <list string="Mistral Usage"
+                  default_order="create_date desc"
+                  decoration-danger="error">
+                <field name="create_date"/>
+                <field name="user_id"/>
+                <field name="agent_id"/>
+                <field name="kind"/>
+                <field name="model"/>
+                <field name="iterations" optional="hide"/>
+                <field name="has_tools" optional="hide" widget="boolean_toggle"/>
+                <field name="prompt_tokens" sum="prompt_tokens"/>
+                <field name="completion_tokens" sum="completion_tokens"/>
+                <field name="total_tokens" sum="total_tokens"/>
+                <field name="estimated_cost_usd" sum="estimated_cost_usd"
+                       widget="float" digits="[12, 4]"/>
+                <field name="error" optional="hide"/>
+                <field name="company_id" optional="hide" groups="base.group_multi_company"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_daadit_ai_mistral_usage_form" model="ir.ui.view">
+        <field name="name">daadit_ai_mistral.usage.form</field>
+        <field name="model">daadit_ai_mistral.usage</field>
+        <field name="arch" type="xml">
+            <form string="Mistral Usage" create="false" edit="false">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="create_date"/>
+                            <field name="user_id"/>
+                            <field name="agent_id"/>
+                            <field name="channel_id"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                        </group>
+                        <group>
+                            <field name="kind"/>
+                            <field name="model"/>
+                            <field name="iterations"/>
+                            <field name="has_tools"/>
+                        </group>
+                    </group>
+                    <group string="Tokens">
+                        <group>
+                            <field name="prompt_tokens"/>
+                            <field name="completion_tokens"/>
+                            <field name="total_tokens"/>
+                        </group>
+                        <group>
+                            <field name="unit_input_usd"/>
+                            <field name="unit_output_usd"/>
+                            <field name="estimated_cost_usd"/>
+                        </group>
+                    </group>
+                    <group string="Error" invisible="not error">
+                        <field name="error" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_daadit_ai_mistral_usage_search" model="ir.ui.view">
+        <field name="name">daadit_ai_mistral.usage.search</field>
+        <field name="model">daadit_ai_mistral.usage</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="agent_id"/>
+                <field name="user_id"/>
+                <field name="model"/>
+                <filter name="errors_only" string="Errors only"
+                        domain="[('error', '!=', False)]"/>
+                <filter name="chat" string="Chat" domain="[('kind', '=', 'chat')]"/>
+                <filter name="embedding" string="Embedding" domain="[('kind', '=', 'embedding')]"/>
+                <separator/>
+                <filter name="today" string="Today"
+                        domain="[('create_date', '&gt;=', context_today().strftime('%Y-%m-%d 00:00:00'))]"/>
+                <filter name="last_7" string="Last 7 days"
+                        domain="[('create_date', '&gt;=', (context_today() - relativedelta(days=7)).strftime('%Y-%m-%d 00:00:00'))]"/>
+                <!--
+                    Odoo 19 view-validator note: <group> inside <search>
+                    must be bare — no `string=` or `expand=` attributes,
+                    or the parser rejects the whole view with "Invalid
+                    view definition" and no context. Keep the group-by
+                    filters wrapped in a plain <group>.
+                -->
+                <group>
+                    <filter name="group_user" string="User" context="{'group_by': 'user_id'}"/>
+                    <filter name="group_agent" string="Agent" context="{'group_by': 'agent_id'}"/>
+                    <filter name="group_model" string="Model" context="{'group_by': 'model'}"/>
+                    <filter name="group_day" string="Day" context="{'group_by': 'create_date:day'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_daadit_ai_mistral_usage" model="ir.actions.act_window">
+        <field name="name">Mistral Usage</field>
+        <field name="res_model">daadit_ai_mistral.usage</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="view_daadit_ai_mistral_usage_search"/>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No Mistral API calls recorded yet.
+            </p>
+            <p>
+                Each chat completion or embedding generation routed through
+                Mistral creates a row here, with token counts and an
+                estimated cost. Use this to monitor cost and find users /
+                agents that are heaviest on the Mistral key.
+            </p>
+        </field>
+    </record>
+
+    <!-- Submenu under Settings → Technical → Mistral -->
+    <menuitem id="menu_daadit_ai_mistral_usage"
+              name="Mistral Usage"
+              parent="base.menu_administration"
+              action="action_daadit_ai_mistral_usage"
+              groups="base.group_system"
+              sequence="200"/>
+
+</odoo>

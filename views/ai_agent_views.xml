@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!--
+        Inherit the stock ai.agent form (ai_app.ai_agent_view_form) and
+        append a "Mistral provider settings" notebook tab.
+
+        Layout note: Odoo 19's view validator is strict. Embedded <list>
+        views inside a <field>, plus buttons inside <group>, plus
+        colspan attributes, were rejected in v3.9.3 with a generic
+        "Failed to load registry" (no usable traceback). v3.9.4 keeps
+        the layout as flat and conventional as possible:
+          * Default M2M widget (no inline subview) — Odoo serves the
+            standard ir.model search popup, so users still get a
+            browsable + filterable picker.
+          * Buttons in a <div class="oe_button_box"> at the top of each
+            section, NOT inside a <group>.
+          * No <colspan> anywhere.
+    -->
+
+    <record id="ai_agent_view_form_inherit_daadit_mistral" model="ir.ui.view">
+        <field name="name">ai.agent.view.form.inherit.daadit_ai_mistral</field>
+        <field name="model">ai.agent</field>
+        <field name="inherit_id" ref="ai_app.ai_agent_view_form"/>
+        <field name="arch" type="xml">
+
+            <xpath expr="//form//sheet" position="inside">
+
+                <separator string="Mistral provider settings"
+                           invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')"/>
+
+                <group invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')">
+
+                    <group string="Generation overrides">
+                        <field name="daadit_mistral_temperature_active"/>
+                        <field name="daadit_mistral_temperature"
+                               invisible="not daadit_mistral_temperature_active"/>
+                        <field name="daadit_mistral_max_tokens"/>
+                    </group>
+
+                </group>
+
+                <separator string="Allowed models"
+                           invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')"/>
+
+                <div invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')">
+                    <p class="text-muted">
+                        Empty = unrestricted (the agent can query any
+                        model the calling user has read rights on).
+                        Click "Apply suggested" to start with a curated
+                        list of common business models.
+                    </p>
+                    <div class="mb-2">
+                        <button name="action_daadit_apply_suggested_allowed_models"
+                                type="object"
+                                string="Apply suggested business models"
+                                class="btn btn-secondary"
+                                icon="fa-magic"/>
+                        <button name="action_daadit_clear_allowed_models"
+                                type="object"
+                                string="Clear (allow all)"
+                                class="btn btn-link"
+                                confirm="Clear the allowed-models list? An empty list means the agent can access any model the calling user has read rights on."/>
+                    </div>
+                    <field name="daadit_allowed_model_ids"
+                           nolabel="1"
+                           options="{'no_create': True}"
+                           widget="many2many_tags"/>
+                </div>
+
+                <separator string="Blocked models"
+                           invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')"/>
+
+                <div invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')">
+                    <p class="text-muted">
+                        Models the agent must never query, regardless
+                        of the allowed list. Blocked always wins.
+                    </p>
+                    <div class="mb-2">
+                        <button name="action_daadit_apply_default_blocked_models"
+                                type="object"
+                                string="Apply default block list"
+                                class="btn btn-secondary"
+                                icon="fa-shield"/>
+                        <button name="action_daadit_clear_blocked_models"
+                                type="object"
+                                string="Clear"
+                                class="btn btn-link"/>
+                    </div>
+                    <field name="daadit_blocked_model_ids"
+                           nolabel="1"
+                           options="{'no_create': True}"
+                           widget="many2many_tags"/>
+                </div>
+
+            </xpath>
+
+        </field>
+    </record>
+
+</odoo>

@@ -1,0 +1,1045 @@
+# -*- coding: utf-8 -*-
+"""Tool-call execution for Mistral chat completions.
+
+Stock Enterprise's ``ai.agent`` exposes a set of ``_ai_tool_*`` private
+methods that implement the actions referenced by the topic-bound
+``ir.actions.server`` records (for example "AI: Search" → calls
+``record._ai_tool_search(model_name, domain, fields, offset, limit,
+order)``). The OpenAI-side dispatch in stock executes these in a loop,
+feeds the results back to the model, and repeats until the model
+returns a final text response.
+
+For the Mistral path we have to mirror that loop ourselves because we
+hijacked ``LLMApiService.request_llm`` — stock's loop never runs for
+Mistral.
+
+This module:
+
+* Provides ``current_agent`` — a threadlocal that the ``_get_provider``
+  override on ``ai.agent`` stashes the agent record in. ``request_llm``
+  picks it back up so we know which ``ai.agent`` instance to dispatch
+  ``_ai_tool_*`` calls on.
+* ``run_tool_call(agent, tool_call)`` — given a Mistral-formatted tool
+  call dict, look up the matching ``_ai_tool_*`` method by slugified
+  name, invoke it with the JSON-decoded arguments, return the result.
+  Errors are converted to a JSON-encodable error string so the model
+  can recover.
+* ``TOOL_SCHEMAS`` — proper JSON-schema parameter definitions for the
+  ten stock AI tools, replacing the empty ``{}`` schema used in
+  v3.6.6–v3.6.8. With these, Mistral knows what args each tool takes.
+"""
+import json
+import logging
+import threading
+
+_logger = logging.getLogger(__name__)
+
+# Threadlocal where the ai.agent's _get_provider override stashes the
+# record so request_llm can pick it up. Cleared in a try/finally so
+# leftover state doesn't leak across requests on the same worker.
+current_agent = threading.local()
+
+
+# ---------------------------------------------------------------------------
+# Tool name → ai.agent method mapping
+# ---------------------------------------------------------------------------
+#
+# Stock generates tool names by slugifying the action name and prefixing
+# with the model's table name: "AI: Search" on ``ir.actions.server`` ⇒
+# ``ir_actions_server_search``. Every such tool maps to a private method
+# on ``ai.agent`` named ``_ai_tool_<suffix>``.
+#
+# We strip the prefix and prepend ``_ai_tool_`` to derive the method name.
+
+_TOOL_PREFIX = "ir_actions_server_"
+_AI_TOOL_PREFIX = "_ai_tool_"
+
+
+def _tool_name_to_method(tool_name: str) -> str:
+    """Map ``ir_actions_server_search`` ⇒ ``_ai_tool_search``."""
+    if tool_name.startswith(_TOOL_PREFIX):
+        return _AI_TOOL_PREFIX + tool_name[len(_TOOL_PREFIX):]
+    # Already in ``_ai_tool_x`` form? Pass through.
+    if tool_name.startswith(_AI_TOOL_PREFIX):
+        return tool_name
+    # Unknown — best-effort guess.
+    return _AI_TOOL_PREFIX + tool_name
+
+
+# ---------------------------------------------------------------------------
+# JSON schemas for the stock AI tools
+# ---------------------------------------------------------------------------
+#
+# Derived from the server-action ``code`` text observed on staging:
+#
+#   AI: Search          → record._ai_tool_search(model_name, domain,
+#                          fields, offset, limit, order)
+#   AI: Read group      → record._ai_tool_read_group(model_name, domain,
+#                          groupby, aggregates, having, offset, limit,
+#                          order)
+#   AI: Get Fields      → record._ai_tool_get_fields(model_name,
+#                          include_description)
+#   AI: Get Menu Details→ record._ai_tool_get_menu_details(menu_ids)
+#   AI: Open Menu Kanban→ record._ai_tool_open_menu_kanban(menu_id,
+#                          model_name, selected_filters,
+#                          selected_groupbys, search, custom_domain)
+#   AI: Open Menu List  → record._ai_tool_open_menu_list(...)   (same)
+#   AI: Open Menu Graph → record._ai_tool_open_menu_graph(menu_id,
+#                          model_name, selected_filters,
+#                          selected_groupbys, measure, mode, order,
+#                          search, stacked, cumulated, custom_domain)
+#   AI: Open Menu Pivot → record._ai_tool_open_menu_pivot(menu_id,
+#                          model_name, selected_filters, row_groupbys,
+#                          col_groupbys, measures, search, custom_domain)
+#   AI: Adjust Search   → record._ai_tool_adjust_search(model_name,
+#                          remove_facets, toggle_filters, toggle_groupbys,
+#                          apply_searches, measures, mode, order, stacked,
+#                          cumulated, custom_domain, switch_view_type)
+#   AI: Compute Report Measures → record._ai_tool_compute_report_measures(
+#                          action_id, model_name)
+
+
+def _domain_schema():
+    # Stock's _ai_tool_search has signature ``domain=''`` and runs
+    # ``json.loads(domain)`` internally. So this MUST be a JSON-encoded
+    # string (a string that contains a JSON array), not a JSON array.
+    # Discovered from staging logs (v3.7.2):
+    #   ValueError: Invalid JSON format for custom domain
+    #   TypeError: the JSON object must be str, bytes or bytearray, not list
+    return {
+        "type": "string",
+        "description": (
+            "Odoo domain filter as a JSON-encoded STRING (not an array). "
+            "Stock parses this with json.loads internally, so wrap your "
+            "filter array in quotes and JSON-escape its contents. "
+            "Examples (literal strings): "
+            "no filter → \"[]\", "
+            "single condition → \"[[\\\"state\\\", \\\"=\\\", \\\"posted\\\"]]\", "
+            "multiple ANDed → \"[[\\\"state\\\", \\\"=\\\", \\\"posted\\\"], "
+            "[\\\"amount_total\\\", \\\">\\\", 1000]]\", "
+            "OR clause → \"[\\\"|\\\", [\\\"state\\\", \\\"=\\\", \\\"draft\\\"], "
+            "[\\\"state\\\", \\\"=\\\", \\\"posted\\\"]]\". "
+            "Operators: '=', '!=', '>', '<', '>=', '<=', 'like', 'ilike', "
+            "'in', 'not in', 'child_of'. Logical: '|' for OR over the "
+            "next two terms, '&' for AND (default), '!' for NOT."
+        ),
+        "default": "[]",
+    }
+
+
+def _string_array(desc, default=None):
+    schema = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": desc,
+    }
+    if default is not None:
+        schema["default"] = default
+    return schema
+
+
+TOOL_SCHEMAS = {
+    "ir_actions_server_search": {
+        "description": (
+            "Search records of an Odoo model. Returns a list of dicts "
+            "with the requested fields. Prefer this when answering "
+            "factual questions about specific records."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model_name": {
+                    "type": "string",
+                    "description": "Technical model name, e.g. 'res.partner', 'account.move', 'sale.order'.",
+                },
+                "domain": _domain_schema(),
+                "fields": _string_array(
+                    "Field names to read. Keep this short — 3–6 fields "
+                    "is usually enough."
+                ),
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 80,
+                          "description": "Max records to return (cap at 200)."},
+                "order": {
+                    "type": "string",
+                    "description": "Sort spec like 'name asc, id desc'. Optional.",
+                },
+            },
+            "required": ["model_name"],
+        },
+    },
+    "ir_actions_server_read_group": {
+        "description": (
+            "Aggregate (count, sum, avg) records of a model, grouped "
+            "by one or more fields. Use this for questions like "
+            "'how many invoices', 'total revenue per month', "
+            "'top customers by sales'. "
+            "For a simple total count with NO grouping, pass "
+            "groupby=[] and aggregates=['__count']."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model_name": {"type": "string",
+                    "description": "Technical model name. Common ones: "
+                    "'account.move' (invoices/bills), 'sale.order', "
+                    "'purchase.order', 'product.template', 'res.partner', "
+                    "'stock.picking', 'crm.lead', 'project.task'."},
+                "domain": _domain_schema(),
+                "groupby": _string_array(
+                    "JSON array of field names to group by. "
+                    "Empty array [] = no grouping (single-row result). "
+                    "Date fields can have an interval suffix: "
+                    "['create_date:month'], ['create_date:year']. "
+                    "Examples: [], ['state'], ['partner_id'], "
+                    "['create_date:month']."
+                ),
+                "aggregates": _string_array(
+                    "JSON array of aggregations as 'field:operator' "
+                    "strings, except '__count' which counts records. "
+                    "Operators: 'sum', 'avg', 'min', 'max', "
+                    "'count_distinct'. "
+                    "Examples: ['__count'], ['amount_total:sum'], "
+                    "['amount_total:avg', '__count'], "
+                    "['partner_id:count_distinct']."
+                ),
+                "having": _domain_schema(),
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 80},
+                "order": {"type": "string",
+                    "description": "Sort spec on aggregates, e.g. "
+                    "'amount_total desc' to find biggest values first."},
+            },
+            "required": ["model_name", "groupby", "aggregates"],
+        },
+    },
+    "ir_actions_server_get_fields": {
+        "description": (
+            "Introspect a model: return the list of available fields "
+            "with their types. Use this if you need to know what fields "
+            "exist before searching or grouping."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model_name": {"type": "string"},
+                "include_description": {"type": "boolean", "default": False},
+            },
+            "required": ["model_name"],
+        },
+    },
+    "ir_actions_server_get_menu_details": {
+        "description": "Return menu metadata (model, default views, etc.) for one or more menu IDs.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "menu_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "List of menu IDs to inspect.",
+                },
+            },
+            "required": ["menu_ids"],
+        },
+    },
+    "ir_actions_server_open_menu_kanban": {
+        "description": "Open a menu's kanban view in the UI with optional filters.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "menu_id": {"type": "integer"},
+                "model_name": {"type": "string"},
+                "selected_filters": _string_array("Names of search filters to apply.", default=[]),
+                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
+                "search": {"type": "string", "description": "Free-text search.", "default": ""},
+                "custom_domain": _domain_schema(),
+            },
+            "required": ["menu_id", "model_name"],
+        },
+    },
+    "ir_actions_server_open_menu_list": {
+        "description": "Open a menu's list view in the UI with optional filters.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "menu_id": {"type": "integer"},
+                "model_name": {"type": "string"},
+                "selected_filters": _string_array("Names of search filters to apply.", default=[]),
+                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
+                "search": {"type": "string", "description": "Free-text search.", "default": ""},
+                "custom_domain": _domain_schema(),
+            },
+            "required": ["menu_id", "model_name"],
+        },
+    },
+    "ir_actions_server_open_menu_graph": {
+        "description": "Open a menu's graph view (bar/line/pie) with grouping and measure config.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "menu_id": {"type": "integer"},
+                "model_name": {"type": "string"},
+                "selected_filters": _string_array("Names of search filters to apply.", default=[]),
+                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
+                "measure": {"type": "string", "description": "Measure to plot, e.g. 'amount_total:sum'."},
+                "mode": {"type": "string", "enum": ["bar", "line", "pie"], "default": "bar"},
+                "order": {"type": "string", "default": ""},
+                "search": {"type": "string", "default": ""},
+                "stacked": {"type": "boolean", "default": False},
+                "cumulated": {"type": "boolean", "default": False},
+                "custom_domain": _domain_schema(),
+            },
+            "required": ["menu_id", "model_name"],
+        },
+    },
+    "ir_actions_server_open_menu_pivot": {
+        "description": "Open a menu's pivot view (cross-tab) with row/column groupings and measures.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "menu_id": {"type": "integer"},
+                "model_name": {"type": "string"},
+                "selected_filters": _string_array("Filters to apply.", default=[]),
+                "row_groupbys": _string_array("Row group-by fields.", default=[]),
+                "col_groupbys": _string_array("Column group-by fields.", default=[]),
+                "measures": _string_array("Measures to compute, e.g. ['amount_total:sum'].", default=[]),
+                "search": {"type": "string", "default": ""},
+                "custom_domain": _domain_schema(),
+            },
+            "required": ["menu_id", "model_name"],
+        },
+    },
+    "ir_actions_server_adjust_search": {
+        "description": (
+            "Adjust filters / groupings / measures of the currently-open view. "
+            "Use only when the user is already looking at a view and asks to "
+            "filter, sort, group, or change the chart settings."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model_name": {"type": "string"},
+                "remove_facets": _string_array("Active facets to remove.", default=[]),
+                "toggle_filters": _string_array("Filters to toggle.", default=[]),
+                "toggle_groupbys": _string_array("Groupbys to toggle.", default=[]),
+                "apply_searches": _string_array("Free-text searches to add.", default=[]),
+                "measures": _string_array("Measures to apply.", default=[]),
+                "mode": {"type": "string", "default": ""},
+                "order": {"type": "string", "default": ""},
+                "stacked": {"type": "boolean", "default": False},
+                "cumulated": {"type": "boolean", "default": False},
+                "custom_domain": _domain_schema(),
+                "switch_view_type": {"type": "string", "description": "Switch to 'list', 'kanban', 'graph', 'pivot', etc.", "default": ""},
+            },
+            "required": ["model_name"],
+        },
+    },
+    "ir_actions_server_compute_report_measures": {
+        "description": "Get the list of available measures for a report action (used before plotting).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action_id": {"type": "integer"},
+                "model_name": {"type": "string"},
+            },
+            "required": ["action_id", "model_name"],
+        },
+    },
+}
+
+
+def annotate_tools(tool_names):
+    """Given a list of tool name strings, return Mistral tool definitions
+    backed by ``TOOL_SCHEMAS`` for known names and a stub schema for
+    unknowns. The model gets real parameter docs for the standard 10
+    AI tools and at least a name+description for anything else.
+    """
+    out = []
+    for name in tool_names or []:
+        if not isinstance(name, str):
+            continue
+        schema = TOOL_SCHEMAS.get(name)
+        if schema is not None:
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": schema["description"],
+                    "parameters": schema["parameters"],
+                },
+            })
+        else:
+            out.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": name.replace("_", " ").strip(),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
+            })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tool-call execution
+# ---------------------------------------------------------------------------
+
+
+def _safe_jsonable(value, depth=0):
+    """Coerce arbitrary Python values to something json-encodable so we
+    can stuff a tool result into the conversation as a 'tool' message."""
+    if depth > 6:
+        return f"<truncated {type(value).__name__}>"
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _safe_jsonable(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_jsonable(v, depth + 1) for v in value]
+    if hasattr(value, "_name") and hasattr(value, "ids"):
+        # Odoo recordset
+        try:
+            return {
+                "_model": getattr(value, "_name", None),
+                "ids": list(value.ids),
+            }
+        except Exception:  # noqa: BLE001
+            return f"<recordset {value!r}>"
+    return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Tool-result size cap + binary-field strip (introduced v19.0.3.13.2)
+# ---------------------------------------------------------------------------
+#
+# Without these, a single tool call that returns large records (most
+# commonly ``ir_actions_server_search`` on ``product.product`` when the
+# model omitted the ``fields`` argument and Odoo returned every column
+# including ``image_1920`` as base64) can stuff hundreds of thousands of
+# tokens into the next message and trigger Mistral's HTTP 400
+# "prompt too large for model with 131072 maximum context length".
+#
+# Three layers, in order of activation:
+#
+#   1. Default ``fields=['id', 'display_name']`` for search calls when
+#      the LLM omits ``fields`` (see ``run_tool_call``). Prevents the
+#      problem at the source by making "give me ALL columns" the
+#      explicit opt-in instead of the default.
+#   2. Binary-field strip — recursively drops keys that conventionally
+#      hold base64/raw bytes (``image_<n>``, ``avatar_<n>``, ``datas``,
+#      ``raw``, ``db_datas``, ``*_binary``). Those bytes are useless in
+#      chat context and routinely 50-500KB per record.
+#   3. Hard size cap — after strip, if the JSON-serialised result still
+#      exceeds ``_MAX_TOOL_RESULT_CHARS`` we replace it with an error
+#      dict that explains how to scope down. The LLM can re-call.
+
+# Cap is in CHARACTERS (cheap to measure). 50_000 chars is roughly
+# 12-15k tokens for typical English/Dutch JSON — well below the 131k
+# Mistral medium context, leaving room for system prompt, conversation
+# history, and additional tool calls in the same turn.
+_MAX_TOOL_RESULT_CHARS = 50_000
+
+
+def _is_binary_key(key):
+    """True iff ``key`` matches a known Odoo binary/base64 field name.
+
+    Matches:
+      * Exact: ``image``, ``avatar``, ``datas``, ``raw``, ``db_datas``
+      * Sized: ``image_128`` / ``image_256`` / ``image_512`` /
+        ``image_1024`` / ``image_1920`` (and same for ``avatar_``)
+      * Suffix: any key ending in ``_binary`` (covers custom modules)
+    """
+    if not isinstance(key, str):
+        return False
+    if key in {"image", "avatar", "datas", "raw", "db_datas"}:
+        return True
+    if key.endswith("_binary"):
+        return True
+    parts = key.split("_", 1)
+    if (
+        len(parts) == 2
+        and parts[0] in {"image", "avatar"}
+        and parts[1].isdigit()
+    ):
+        return True
+    return False
+
+
+def _strip_binary_fields(value):
+    """Recursively drop binary-keyed entries from a JSON-safe value.
+
+    Operates on the output of ``_safe_jsonable`` — values are already
+    plain dicts / lists / primitives, so no exotic recursion guards
+    needed. Returns a new structure; does not mutate input.
+    """
+    if isinstance(value, dict):
+        return {
+            k: _strip_binary_fields(v)
+            for k, v in value.items()
+            if not _is_binary_key(k)
+        }
+    if isinstance(value, list):
+        return [_strip_binary_fields(v) for v in value]
+    return value
+
+
+def _enforce_result_size_cap(safe, fn_name):
+    """If ``safe`` (a JSON-safe value) is too large, return an error
+    dict instructing the LLM to scope down. Otherwise return ``safe``
+    unchanged.
+
+    Sized in characters of the JSON encoding — measuring tokens would
+    require the model's tokenizer, and char-count is a good-enough
+    proxy at this scale (Mistral / OpenAI tokenisers run ~3-4 chars
+    per token for mixed JSON content).
+    """
+    try:
+        serialized = json.dumps(safe, default=str)
+    except Exception:  # noqa: BLE001
+        serialized = str(safe)
+    n = len(serialized)
+    if n <= _MAX_TOOL_RESULT_CHARS:
+        return safe
+    _logger.warning(
+        "daadit_ai_mistral.tool_dispatch: result for %s exceeded cap "
+        "(%d chars > %d) — returning error to LLM",
+        fn_name, n, _MAX_TOOL_RESULT_CHARS,
+    )
+    return {
+        "error": (
+            f"Tool result too large ({n} chars; cap is "
+            f"{_MAX_TOOL_RESULT_CHARS}). Re-call with a narrower scope: "
+            f"pass an explicit short `fields` list (e.g. "
+            f"['id', 'name', 'list_price']), tighten the `domain`, or "
+            f"lower `limit`. Binary fields (image_*, datas, raw) are "
+            f"already stripped server-side, so over-cap means the "
+            f"non-binary content alone is too big."
+        ),
+        "tool_name": fn_name,
+        "result_chars": n,
+        "cap_chars": _MAX_TOOL_RESULT_CHARS,
+    }
+
+
+# Stock methods whose parameter is a JSON-string (stock json.loads-es it
+# internally). Discovered from staging logs (v3.7.2):
+#   _ai_tool_search(model_name, domain='', ...)
+#   _ai_tool_*(... custom_domain='', ...)
+# Mistral naturally sends these as arrays — we encode them to strings
+# before calling the method.
+_JSON_STRING_PARAMS = ("domain", "having", "custom_domain")
+
+# Wrapper-keys Mistral sometimes puts the real arguments inside —
+# observed on staging:
+#   {"params": {"model": "account.move", "domain": [...], ...}}
+# We unwrap when the kwargs dict has exactly one key from this set
+# AND its value is itself a dict.
+_WRAPPER_KEYS = ("params", "body", "payload", "data", "arguments",
+                 "input", "request", "kwargs")
+
+# Parameter-name aliases. Mistral picks the most "natural" name from
+# the tool description and sometimes that doesn't match the stock
+# Python argument name. Map them here so the call survives.
+_PARAM_ALIASES = {
+    "model": "model_name",          # Mistral's preferred name
+    "model_id": "model_name",
+    "model_technical_name": "model_name",
+    "ir_model": "model_name",
+    "modelName": "model_name",
+}
+
+
+def _coerce_args(raw_args):
+    """Parse Mistral's tool-call ``arguments`` field into a kwargs dict.
+
+    Coercions, in order:
+
+    1. **Top-level JSON parse.** Mistral returns ``arguments`` as a JSON
+       string — we json.loads it once.
+
+    2. **Wrapper unwrap.** Sometimes Mistral wraps the real arguments
+       under a single key like ``{"params": {…}}`` or ``{"body": {…}}``.
+       Detected on staging::
+
+           {"params": {"model": "account.move",
+                       "domain": [["move_type","=","out_invoice"]], …}}
+
+       If the dict has exactly one key from ``_WRAPPER_KEYS`` and its
+       value is itself a dict, we unwrap one level. Recursively, in case
+       the model double-wraps.
+
+    3. **Per-value JSON re-decode.** Mistral sometimes stringifies
+       arrays/objects when its first attempt failed (a defensive habit).
+       For each string value beginning with ``[`` or ``{``, try
+       ``json.loads`` so a domain like
+       ``"[[\\"state\\",\\"=\\",\\"posted\\"]]"`` becomes a real list.
+
+    4. **Stock JSON-string expectations.** For parameter names in
+       ``_JSON_STRING_PARAMS`` (``domain``, ``having``,
+       ``custom_domain``), stock's own implementation expects a
+       JSON-encoded STRING. We re-encode lists/dicts back to strings so
+       stock's internal ``json.loads`` succeeds.
+
+    5. **Parameter-name aliasing.** Map common Mistral choices like
+       ``model`` → ``model_name`` so the dispatched method's signature
+       is satisfied.
+    """
+    if isinstance(raw_args, dict):
+        kwargs = dict(raw_args)
+    elif isinstance(raw_args, str):
+        kwargs = json.loads(raw_args) if raw_args.strip() else {}
+    else:
+        kwargs = dict(raw_args)
+
+    if not isinstance(kwargs, dict):
+        return kwargs
+
+    # --- 2. Unwrap single-key wrappers (recursively, max 3 levels) ---
+    for _ in range(3):
+        if (
+            len(kwargs) == 1
+            and next(iter(kwargs)) in _WRAPPER_KEYS
+            and isinstance(next(iter(kwargs.values())), dict)
+        ):
+            kwargs = dict(next(iter(kwargs.values())))
+        else:
+            break
+
+    # --- 3 + 4 + 5 -----------------------------------------------------
+    out = {}
+    for k, v in kwargs.items():
+        # 5. Apply parameter-name aliases.
+        target_key = _PARAM_ALIASES.get(k, k)
+
+        # 3. Best-effort decode JSON-shaped strings.
+        if isinstance(v, str) and v and v[0] in "[{":
+            try:
+                v = json.loads(v)
+            except (ValueError, TypeError):
+                pass
+
+        # 4. For parameters that stock expects as JSON-strings,
+        # re-encode lists/dicts back to strings.
+        if target_key in _JSON_STRING_PARAMS:
+            if isinstance(v, (list, dict)):
+                try:
+                    v = json.dumps(v)
+                except Exception:  # noqa: BLE001
+                    v = "[]"
+            elif v is None or v == "":
+                v = "[]"
+            elif not isinstance(v, str):
+                v = str(v)
+
+        # If aliasing collides with an explicit key already present,
+        # prefer the explicit one (don't overwrite).
+        if target_key in out and target_key != k:
+            continue
+        out[target_key] = v
+    return out
+
+
+def _build_signature_hint(method, fn_name):
+    """Return a one-line summary of the method's signature so the model
+    can self-correct on TypeError. Drops ``self``; shows defaults."""
+    try:
+        import inspect
+        sig = inspect.signature(method)
+        # method is bound (agent._ai_tool_xxx) so self is already
+        # excluded by inspect.signature on a bound method.
+        return f"Expected signature: {fn_name}{sig}"
+    except (TypeError, ValueError):
+        return ""
+
+
+_LOG_TOOL_FLAG_ICP = "daadit_ai_mistral.log_tool_results"
+
+# SEC M2: when the PII-logging flag is on, surface a one-shot WARNING
+# every time a worker handles its first tool dispatch. The warning is
+# loud enough to nudge admins who flipped the flag for debugging and
+# forgot to flip it back.
+_LOG_TOOL_FLAG_WARNED = False
+
+
+def _result_logging_enabled(env):
+    """Return True iff tool-call args + results should be persisted to
+    ``ir.logging``. Default False because tool args/results may contain
+    customer PII (partner names, amounts, free-text fields). Operators
+    who explicitly want full audit logs can flip the ICP::
+
+        daadit_ai_mistral.log_tool_results = True
+
+    SEC M2: when the flag is on, log a per-worker WARNING the first
+    time we observe it, so admins who flipped the flag for a debug
+    session can see in the logs that PII is being persisted to
+    ir.logging — and remember to flip it off after they're done.
+    """
+    global _LOG_TOOL_FLAG_WARNED
+    try:
+        flag = env["ir.config_parameter"].sudo().get_param(
+            _LOG_TOOL_FLAG_ICP, default="False"
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    on = str(flag).strip().lower() in ("1", "true", "t", "yes", "y")
+    if on and not _LOG_TOOL_FLAG_WARNED:
+        _LOG_TOOL_FLAG_WARNED = True
+        _logger.warning(
+            "daadit_ai_mistral: PII-logging flag is ENABLED — every "
+            "Mistral tool call's arguments and results (capped at "
+            "1500 chars) are being persisted to ir.logging. This is "
+            "intended only for short-lived debugging sessions. Set "
+            "ir.config_parameter %r to False to disable.",
+            _LOG_TOOL_FLAG_ICP,
+        )
+    return on
+
+
+def _record_in_ir_logging(env, level, name, message):
+    """Write a row to ``ir.logging`` so the call is visible from
+    XML-RPC. Best-effort — swallow any error so a logging hiccup never
+    breaks the chat flow.
+
+    Errors (level ERROR / WARNING) are *always* logged so we can
+    diagnose problems. Successful calls (level INFO) are gated behind
+    ``daadit_ai_mistral.log_tool_results`` because the args/result
+    payload tends to contain user data we shouldn't archive without
+    consent.
+    """
+    if level == "INFO" and not _result_logging_enabled(env):
+        return
+    try:
+        env["ir.logging"].sudo().create({
+            "name": name,
+            "type": "server",
+            "level": level,
+            "message": message[:8000],
+            "path": "daadit_ai_mistral",
+            "func": "run_tool_call",
+            "line": "0",
+        })
+        # ir.logging writes are inside a transaction — savepoint so
+        # they survive a later rollback if the chat handler aborts.
+        env.cr.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def run_tool_call(agent, tool_call):
+    """Execute one Mistral tool call against an ``ai.agent`` record.
+
+    ``agent`` is the recordset on which to dispatch (singleton).
+    ``tool_call`` is a dict shaped like::
+
+        {"id": "call_…", "type": "function",
+         "function": {"name": "ir_actions_server_search",
+                      "arguments": "<json>"}}
+
+    Returns a JSON-serialisable result, or ``{"error": "…"}`` on
+    failure (so the conversation can continue and the model can react
+    to the error message). Each call is also persisted to
+    ``ir.logging`` so the args + outcome are inspectable post-hoc.
+    """
+    if not tool_call or not isinstance(tool_call, dict):
+        return {"error": "Invalid tool_call object"}
+
+    fn = tool_call.get("function") or {}
+    fn_name = fn.get("name") or ""
+    raw_args = fn.get("arguments") or "{}"
+    env = getattr(agent, "env", None)
+
+    try:
+        kwargs = _coerce_args(raw_args)
+    except (ValueError, TypeError) as exc:
+        _logger.warning(
+            "daadit_ai_mistral.tool_dispatch: could not parse arguments "
+            "for %s: %s | raw=%r", fn_name, exc, str(raw_args)[:300],
+        )
+        if env is not None:
+            _record_in_ir_logging(
+                env, "WARNING", "daadit_ai_mistral.tool_dispatch",
+                f"PARSE_ERROR fn={fn_name} raw={str(raw_args)[:500]} "
+                f"err={exc}",
+            )
+        return {"error": (
+            f"Could not parse tool arguments as JSON: {exc}. "
+            f"Pass arguments as a JSON object whose values are typed "
+            f"(arrays as JSON arrays, not strings)."
+        )}
+
+    method_name = _tool_name_to_method(fn_name)
+    method = getattr(agent, method_name, None)
+    if not callable(method):
+        _logger.warning(
+            "daadit_ai_mistral.tool_dispatch: unknown tool %r → %s "
+            "(method not on ai.agent)", fn_name, method_name,
+        )
+        if env is not None:
+            _record_in_ir_logging(
+                env, "WARNING", "daadit_ai_mistral.tool_dispatch",
+                f"UNKNOWN_TOOL fn={fn_name} method={method_name}",
+            )
+        return {"error": f"Unknown tool: {fn_name}"}
+
+    if not isinstance(kwargs, dict):
+        return {"error": (
+            f"Tool {fn_name} arguments must be a JSON object, got "
+            f"{type(kwargs).__name__}."
+        )}
+
+    # ----- Per-agent model access control -----------------------------
+    # If the tool call carries a ``model_name`` and the agent has
+    # allowed/blocked lists configured, gate it BEFORE dispatch. We
+    # return a structured error to Mistral so the model can
+    # re-strategize ("the agent can only access X, Y, Z — try those
+    # instead") rather than treating the failure as a generic crash.
+    requested_model = kwargs.get("model_name")
+    if requested_model and hasattr(agent, "_daadit_is_model_allowed"):
+        try:
+            allowed = agent._daadit_is_model_allowed(requested_model)
+        except Exception:  # noqa: BLE001
+            allowed = True  # fail-open on bug in our check (don't break chat)
+            _logger.exception(
+                "daadit_ai_mistral.tool_dispatch: model-allow check raised "
+                "for agent=%s model=%s — falling back to allow",
+                agent.id, requested_model,
+            )
+        if not allowed:
+            allowed_list = sorted(
+                agent.daadit_allowed_model_ids.mapped("model")
+            ) if agent.daadit_allowed_model_ids else []
+            blocked_list = sorted(
+                agent.daadit_blocked_model_ids.mapped("model")
+            ) if agent.daadit_blocked_model_ids else []
+            _logger.info(
+                "daadit_ai_mistral.tool_dispatch: ACCESS_DENIED "
+                "agent=%s tool=%s model=%s (allowed=%s, blocked=%s)",
+                agent.id, fn_name, requested_model,
+                allowed_list, blocked_list,
+            )
+            if env is not None:
+                _record_in_ir_logging(
+                    env, "WARNING", "daadit_ai_mistral.tool_dispatch",
+                    f"ACCESS_DENIED fn={fn_name} model={requested_model} "
+                    f"agent={agent.id} allowed={allowed_list} "
+                    f"blocked={blocked_list}",
+                )
+            hint = ""
+            if allowed_list:
+                hint = (
+                    f" This agent can only query the following models: "
+                    f"{', '.join(allowed_list)}."
+                )
+            elif blocked_list and requested_model in blocked_list:
+                hint = (
+                    f" Model '{requested_model}' is on this agent's "
+                    f"block list."
+                )
+            # NOTE: ``_daadit_access_denied`` is the sentinel that
+            # ``llm_api_patch._request_llm_mistral`` watches for. When
+            # set, the dispatch loop short-circuits and surfaces a
+            # user-facing message *directly*, instead of feeding the
+            # error back to Mistral (which tends to mis-paraphrase it
+            # as a generic "I made a mistake" recovery — confusing for
+            # the end user who actually hit an admin policy).
+            return {
+                "_daadit_access_denied": True,
+                "tool_name": fn_name,
+                "model_name": requested_model,
+                "allowed_models": allowed_list,
+                "blocked_models": blocked_list,
+                "error": (
+                    f"Access denied: agent is not permitted to query "
+                    f"model '{requested_model}'.{hint}"
+                ),
+            }
+
+    # ------------------------------------------------------------------
+    # Field-level privacy gate (introduced in 19.0.3.10.0; expanded in
+    # 19.0.3.11.0).
+    # Reject domain conditions, groupby values, or aggregate clauses
+    # that reference a blocked field BEFORE we spend an Odoo read on
+    # them — otherwise an LLM could binary-search the blocked value
+    # via filter conditions or recover it via grouped aggregation
+    # (e.g. group by `vat` and look at row keys).
+    # ------------------------------------------------------------------
+    _model_for_priv = kwargs.get("model_name") or kwargs.get("model") or ""
+    if _model_for_priv:
+        # Domain check
+        if kwargs.get("domain") is not None:
+            try:
+                bad_field = agent._daadit_domain_uses_blocked_field(
+                    _model_for_priv, kwargs.get("domain"),
+                )
+            except Exception:  # noqa: BLE001
+                bad_field = ""
+            if bad_field:
+                return {"error": (
+                    f"Filtering on '{bad_field}' is forbidden by this "
+                    f"agent's privacy policy on '{_model_for_priv}'. "
+                    "That field is on the field-level blocklist — it can't "
+                    "be used in domain conditions because that would let "
+                    "the LLM binary-search the value through filter clauses."
+                )}
+        # SEC M1: groupby / aggregates check.
+        # ``read_group`` lets the model recover blocked values by
+        # grouping on them — the result rows are keyed by the field's
+        # actual values. Block any ``groupby`` / ``having`` /
+        # ``aggregates`` entry that references a blocked field, with
+        # or without a ``:operator`` suffix.
+        try:
+            blocked_fields = agent._daadit_blocked_field_set(_model_for_priv)
+        except Exception:  # noqa: BLE001
+            blocked_fields = set()
+        if blocked_fields:
+            def _strip_suffix(s):
+                # 'create_date:month' → 'create_date'; 'amount_total:sum'
+                # → 'amount_total'. Handles both interval and aggregate
+                # operator suffixes.
+                if not isinstance(s, str):
+                    return ""
+                return s.split(":", 1)[0].strip()
+
+            for arg_name in ("groupby", "aggregates"):
+                values = kwargs.get(arg_name)
+                if not values:
+                    continue
+                if isinstance(values, str):
+                    values = [values]
+                for v in values:
+                    field_part = _strip_suffix(v)
+                    if field_part in blocked_fields:
+                        return {"error": (
+                            f"Using '{field_part}' in {arg_name} is "
+                            f"forbidden by this agent's privacy policy "
+                            f"on '{_model_for_priv}'. Grouping or "
+                            "aggregating on a field-level-blocked field "
+                            "would let the value be reconstructed from "
+                            "the result rows."
+                        )}
+            # ``having`` is a sub-domain over the aggregated rows — same
+            # binary-search risk as ``domain``. Reuse the domain checker.
+            if kwargs.get("having") is not None:
+                try:
+                    bad_having = agent._daadit_domain_uses_blocked_field(
+                        _model_for_priv, kwargs.get("having"),
+                    )
+                except Exception:  # noqa: BLE001
+                    bad_having = ""
+                if bad_having:
+                    return {"error": (
+                        f"Filtering on '{bad_having}' in having is "
+                        f"forbidden by this agent's privacy policy on "
+                        f"'{_model_for_priv}'."
+                    )}
+
+    # ------------------------------------------------------------------
+    # Default fields for search calls (v19.0.3.13.2 — fix C of three)
+    # ------------------------------------------------------------------
+    # When the LLM omits ``fields`` on ``ir_actions_server_search``,
+    # Odoo returns EVERY field including ``image_1920`` as base64. On
+    # ``product.product`` etc. that blows the next LLM message past
+    # the Mistral 131k-token context window. The tool schema nudges
+    # toward "3-6 fields" but doesn't enforce — we do, server-side.
+    # Read-side fix (fields B + A in this commit) still apply on top
+    # as defence-in-depth for tools that don't take ``fields``.
+    if fn_name == "ir_actions_server_search" and not kwargs.get("fields"):
+        kwargs["fields"] = ["id", "display_name"]
+        _logger.info(
+            "daadit_ai_mistral.tool_dispatch: injected default "
+            "fields=['id','display_name'] for %s on %s "
+            "(LLM omitted the fields argument)",
+            fn_name, requested_model or "<unknown>",
+        )
+
+    try:
+        result = method(**kwargs)
+    except TypeError as exc:
+        sig_hint = _build_signature_hint(method, fn_name)
+        _logger.warning(
+            "daadit_ai_mistral.tool_dispatch: %s(**%r) raised TypeError: %s",
+            method_name, kwargs, exc,
+        )
+        if env is not None:
+            _record_in_ir_logging(
+                env, "WARNING", "daadit_ai_mistral.tool_dispatch",
+                f"TYPEERROR fn={fn_name} args={json.dumps(kwargs, default=str)[:1500]} "
+                f"err={exc} | {sig_hint}",
+            )
+        return {"error": (
+            f"Tool {fn_name} signature error: {exc}. {sig_hint} "
+            f"Send required args as a JSON object."
+        )}
+    except Exception as exc:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.tool_dispatch: %s raised", method_name,
+        )
+        if env is not None:
+            _record_in_ir_logging(
+                env, "ERROR", "daadit_ai_mistral.tool_dispatch",
+                f"RAISED fn={fn_name} args={json.dumps(kwargs, default=str)[:1500]} "
+                f"err_type={type(exc).__name__} err={exc}",
+            )
+        return {"error": (
+            f"Tool {fn_name} raised {type(exc).__name__}: {exc}. "
+            f"Check the argument types — domain must be a JSON array of "
+            f"triples, e.g. [[\"state\", \"=\", \"posted\"]]."
+        )}
+
+    # ------------------------------------------------------------------
+    # Field-level privacy gate (response side).
+    # Scrub blocked keys from the tool result before the LLM ever sees
+    # them. No-op when daadit_field_blocklist is empty or when the
+    # result shape isn't dict / list-of-dicts.
+    # ------------------------------------------------------------------
+    if _model_for_priv and result is not None:
+        try:
+            result = agent._daadit_scrub_result(_model_for_priv, result)
+        except Exception:  # noqa: BLE001
+            # Defensive: a scrub failure must never break the call —
+            # log and forward the unscrubbed result.
+            _logger.exception(
+                "daadit_ai_mistral.tool_dispatch: scrub_result failed for "
+                "%s on model %s", method_name, _model_for_priv,
+            )
+
+    safe = _safe_jsonable(result)
+    # ------------------------------------------------------------------
+    # Binary-field strip (v19.0.3.13.2 — fix B of three).
+    # Drops image_*, avatar_*, datas, raw, db_datas, *_binary keys
+    # recursively. Base64 binary content has no use in chat context
+    # and routinely 50-500KB per record. Done BEFORE size measurement
+    # so a model that explicitly asked for image fields still gets
+    # the rest of the record back instead of a hard error.
+    # ------------------------------------------------------------------
+    safe = _strip_binary_fields(safe)
+    # ------------------------------------------------------------------
+    # Hard size cap (v19.0.3.13.2 — fix A of three).
+    # If the JSON-serialised result still exceeds the cap after the
+    # binary strip, swap it out for an actionable error dict so the
+    # LLM can re-call with a tighter scope. Without this, an oversized
+    # tool result lands in the next request and trips Mistral's
+    # "prompt too large" HTTP 400.
+    # ------------------------------------------------------------------
+    safe = _enforce_result_size_cap(safe, fn_name)
+    _logger.info(
+        "daadit_ai_mistral.tool_dispatch: %s ok (args_keys=%s, "
+        "result_type=%s)",
+        method_name, list(kwargs.keys()), type(result).__name__,
+    )
+    if env is not None:
+        # Cap result size in the log row so we don't fill up the table.
+        try:
+            result_summary = json.dumps(safe, default=str)[:1500]
+        except Exception:  # noqa: BLE001
+            result_summary = str(safe)[:1500]
+        _record_in_ir_logging(
+            env, "INFO", "daadit_ai_mistral.tool_dispatch",
+            f"OK fn={fn_name} args={json.dumps(kwargs, default=str)[:1500]} "
+            f"result={result_summary}",
+        )
+    return safe

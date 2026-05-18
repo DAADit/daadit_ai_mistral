@@ -1,0 +1,114 @@
+# Translation of DAADit AI — Mistral Provider into Dutch.
+# Maintained by DAADit. License: LGPL-3.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: daadit_ai_mistral 19.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-08 22:00+0000\n"
+"PO-Revision-Date: 2026-05-08 22:00+0000\n"
+"Last-Translator: DAADit\n"
+"Language-Team: Dutch <nl@daadit.group>\n"
+"Language: nl\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+# ----------------------------------------------------------------------
+# Access-denied message (services/llm_api_patch.py)
+# ----------------------------------------------------------------------
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/llm_api_patch.py:0
+msgid "**🔒 Access blocked by your administrator.**"
+msgstr "**🔒 Toegang geblokkeerd door je beheerder.**"
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/llm_api_patch.py:0
+msgid "This AI agent is not permitted to query the model `%(model)s`."
+msgstr "Deze AI-agent mag het model `%(model)s` niet bevragen."
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/llm_api_patch.py:0
+msgid ""
+"It is on the **block list** for this agent — admins have explicitly "
+"chosen to keep this data out of AI responses."
+msgstr ""
+"Het staat op de **blokkeerlijst** voor deze agent — beheerders "
+"hebben er bewust voor gekozen deze gegevens buiten AI-antwoorden te "
+"houden."
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/llm_api_patch.py:0
+msgid ""
+"The administrator has restricted this agent to the following models:"
+msgstr ""
+"De beheerder heeft deze agent beperkt tot de volgende modellen:"
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/llm_api_patch.py:0
+msgid ""
+"If you need information about something else, contact your system "
+"administrator to request access — they can extend the agent's "
+"permitted models."
+msgstr ""
+"Heb je informatie over iets anders nodig? Neem dan contact op met "
+"je systeembeheerder om toegang aan te vragen — die kan de "
+"toegestane modellen van de agent uitbreiden."
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/llm_api_patch.py:0
+msgid "Contact your system administrator if you believe this is wrong."
+msgstr "Neem contact op met je systeembeheerder als je denkt dat dit onterecht is."
+
+# ----------------------------------------------------------------------
+# Fallback placeholders
+# ----------------------------------------------------------------------
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/llm_api_patch.py:0
+msgid ""
+"_(Mistral wanted to call a function but I couldn't find the AI "
+"Agent record to dispatch it. Try sending the message from inside "
+"the AI chat panel.)_"
+msgstr ""
+"_(Mistral wilde een functie aanroepen, maar ik kon het AI Agent-"
+"record niet vinden om het uit te voeren. Probeer het bericht "
+"vanuit het AI-chatpaneel te sturen.)_"
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/llm_api_patch.py:0
+msgid "_(Empty response from Mistral.)_"
+msgstr "_(Leeg antwoord van Mistral.)_"
+
+# ----------------------------------------------------------------------
+# Mistral API error wrapper (services/mistral_client.py)
+# ----------------------------------------------------------------------
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/mistral_client.py:0
+msgid ""
+"Mistral API rejected the request (HTTP %(status)s): %(detail)s"
+msgstr ""
+"Mistral API heeft het verzoek geweigerd (HTTP %(status)s): %(detail)s"
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/mistral_client.py:0
+msgid ""
+"No Mistral API key is configured. Enable 'Use your own Mistral AI "
+"account' in General Settings → AI and paste your key from "
+"console.mistral.ai."
+msgstr ""
+"Er is geen Mistral API-sleutel geconfigureerd. Schakel 'Gebruik je "
+"eigen Mistral AI-account' in onder Algemene instellingen → AI en "
+"plak je sleutel van console.mistral.ai."
+
+#. module: daadit_ai_mistral
+#: code:addons/daadit_ai_mistral/services/mistral_client.py:0
+msgid ""
+"Mistral API key is not enabled. Toggle 'Use your own Mistral AI "
+"account' in General Settings → AI."
+msgstr ""
+"De Mistral API-sleutel is niet ingeschakeld. Zet 'Gebruik je eigen "
+"Mistral AI-account' aan onder Algemene instellingen → AI."

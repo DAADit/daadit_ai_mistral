@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+
+    <!--
+        Record rules for daadit_ai_mistral.usage.
+
+        Behavior:
+          * Internal users see only their OWN usage rows. This avoids
+            user A reading user B's questions (which can be embedded in
+            error fields).
+          * Settings (Administration / Settings) users see everything
+            in their company (or all companies if multi-company is
+            disabled), so they can audit cost.
+          * Multi-company isolation: usage rows carry company_id and
+            are filtered by it. The Settings rule respects
+            allowed_company_ids so a user switching company-context
+            sees only the relevant rows.
+    -->
+
+    <record id="rule_daadit_ai_mistral_usage_user_own" model="ir.rule">
+        <field name="name">Mistral usage: user sees own rows</field>
+        <field name="model_id" ref="model_daadit_ai_mistral_usage"/>
+        <field name="domain_force">[('user_id', '=', user.id)]</field>
+        <field name="groups" eval="[(4, ref('base.group_user'))]"/>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="False"/>
+        <field name="perm_create" eval="False"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+
+    <record id="rule_daadit_ai_mistral_usage_system_company" model="ir.rule">
+        <field name="name">Mistral usage: settings users see own company</field>
+        <field name="model_id" ref="model_daadit_ai_mistral_usage"/>
+        <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+
+</odoo>
