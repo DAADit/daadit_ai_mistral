@@ -28,9 +28,12 @@ This module:
   ten stock AI tools, replacing the empty ``{}`` schema used in
   v3.6.6–v3.6.8. With these, Mistral knows what args each tool takes.
 """
+import ast
 import json
 import logging
+import re
 import threading
+from datetime import date, datetime, timedelta
 
 _logger = logging.getLogger(__name__)
 
@@ -553,6 +556,176 @@ _PARAM_ALIASES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Domain normalisation (v19.0.3.13.4)
+# ---------------------------------------------------------------------------
+#
+# Stock ``_ai_tool_search`` / ``_ai_tool_read_group`` run ``json.loads``
+# on the ``domain`` / ``having`` / ``custom_domain`` string internally.
+# Mistral does NOT reliably emit JSON for these — staging logs (v13.2/13.3)
+# showed it sending, repeatedly:
+#
+#   [('stage_id.is_close', '=', False)]            ← Python tuples + single
+#                                                     quotes → JSONDecodeError
+#   ['sla_deadline', '<', 'datetime.now() + timedelta(days=1)']
+#                                                  ← Python date expression
+#                                                     as a domain value →
+#                                                     Odoo "Invalid term"
+#
+# Both make every search fail until the model gives up (MAX_ITER). We
+# repair these BEFORE handing the string to stock:
+#
+#   * Python-literal domains (single quotes, tuples, True/False/None)
+#     are parsed with ``ast.literal_eval`` and re-encoded as JSON.
+#   * Relative-date string leaves are evaluated against a tiny safe
+#     whitelist (``datetime``/``date``/``timedelta``) to a concrete
+#     ``YYYY-MM-DD[ HH:MM:SS]`` so Odoo's domain parser accepts them.
+#
+# Everything is best-effort: if a value can't be parsed we return it
+# unchanged so behaviour never regresses versus no normalisation.
+
+_REL_DATE_TOKEN_RE = re.compile(
+    r"\b(datetime|date|timedelta|relativedelta|fields|now|today)\b"
+)
+
+# Names allowed inside a relative-date expression after normalisation.
+_REL_DATE_ALLOWED_NAMES = frozenset(
+    {"datetime", "date", "timedelta", "now", "today"}
+)
+
+
+def _eval_relative_date(expr):
+    """Best-effort: evaluate a relative-date Python expression to a
+    concrete Odoo-compatible string. Returns ``None`` when ``expr`` is
+    not a recognised, safe date expression.
+
+    Recognises the spellings the LLM actually emits, e.g.
+    ``datetime.now() + timedelta(days=1)``, ``date.today()``,
+    ``fields.Datetime.now()``, bare ``today`` / ``now``.
+    """
+    if not isinstance(expr, str):
+        return None
+    s = expr.strip()
+    if not s or not _REL_DATE_TOKEN_RE.search(s):
+        return None
+    norm = (
+        s.replace("fields.Datetime.now()", "datetime.now()")
+         .replace("fields.Datetime.today()", "datetime.now()")
+         .replace("fields.Date.today()", "date.today()")
+         .replace("fields.Date.context_today()", "date.today()")
+         .replace("datetime.datetime.now()", "datetime.now()")
+         .replace("datetime.date.today()", "date.today()")
+    )
+    low = norm.lower()
+    if low in ("now", "now()"):
+        norm = "datetime.now()"
+    elif low == "today":
+        norm = "date.today()"
+    try:
+        code = compile(norm, "<reldate>", "eval")
+    except SyntaxError:
+        return None
+    # SECURITY: the co_names whitelist below is the boundary. The
+    # expression may ONLY reference these five names — anything else
+    # (``__import__``, ``eval``, ``os``, ``__class__``, attribute
+    # walks, …) shows up in ``co_names`` and is rejected here, before
+    # eval runs. With that guard in place it is safe to let Python
+    # inject the real builtins (needed because CPython's
+    # ``date.today()`` does an internal import and fails under an
+    # empty ``__builtins__``).
+    for name in code.co_names:
+        if name not in _REL_DATE_ALLOWED_NAMES:
+            return None
+    try:
+        value = eval(  # noqa: S307 - co_names allowlist is the sandbox
+            code,
+            {},
+            {"datetime": datetime, "date": date, "timedelta": timedelta},
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    return None
+
+
+def _coerce_domain_obj(obj):
+    """Recursively normalise a parsed domain: tuples → lists, and
+    relative-date string leaves → concrete timestamps. Returns a
+    JSON-safe structure."""
+    if isinstance(obj, (list, tuple)):
+        return [_coerce_domain_obj(x) for x in obj]
+    if isinstance(obj, str):
+        rel = _eval_relative_date(obj)
+        return rel if rel is not None else obj
+    return obj
+
+
+def _normalize_json_string_param(v):
+    """Return a JSON-encoded STRING for the domain/having/custom_domain
+    params, which stock parses with ``json.loads`` internally.
+
+    Accepts and repairs:
+      * list / dict                 → json.dumps (after reldate coercion)
+      * JSON string                 → canonical re-encode (+ reldate)
+      * Python-literal string        → ast.literal_eval → json.dumps
+        (single quotes, tuples,       (this is the case that was failing
+        True/False/None)              in production)
+      * '' / None                   → '[]'
+
+    Falls back to the original value if nothing parses, so this can
+    only ever make a previously-failing call succeed, never the
+    reverse.
+    """
+    if v is None or v == "":
+        return "[]"
+    obj = None
+    if isinstance(v, (list, dict)):
+        obj = v
+    elif isinstance(v, str):
+        s = v.strip()
+        try:
+            obj = json.loads(s)
+        except (ValueError, TypeError):
+            try:
+                obj = ast.literal_eval(s)
+            except (ValueError, TypeError, SyntaxError):
+                obj = None
+    if obj is None:
+        # Structurally unparseable. Last resort: a bare relative-date
+        # expression passed as the whole value.
+        if isinstance(v, str):
+            rel = _eval_relative_date(v)
+            if rel is not None:
+                return json.dumps(rel)
+            return v
+        return "[]"
+    try:
+        return json.dumps(_coerce_domain_obj(obj))
+    except Exception:  # noqa: BLE001
+        return "[]"
+
+
+# Tools whose stock method takes a required ``model_name`` first arg.
+# Mistral periodically omits it (staging logs: repeated
+# "_ai_tool_search() missing 1 required positional argument:
+# 'model_name'"), burning tool-loop iterations on a TypeError. We
+# pre-validate and return a crisp instruction instead.
+_MODEL_REQUIRED_TOOLS = frozenset({
+    "ir_actions_server_search",
+    "ir_actions_server_read_group",
+    "ir_actions_server_get_fields",
+    "ir_actions_server_compute_report_measures",
+    "ir_actions_server_open_menu_kanban",
+    "ir_actions_server_open_menu_list",
+    "ir_actions_server_open_menu_graph",
+    "ir_actions_server_open_menu_pivot",
+    "ir_actions_server_adjust_search",
+})
+
+
 def _coerce_args(raw_args):
     """Parse Mistral's tool-call ``arguments`` field into a kwargs dict.
 
@@ -623,17 +796,11 @@ def _coerce_args(raw_args):
                 pass
 
         # 4. For parameters that stock expects as JSON-strings,
-        # re-encode lists/dicts back to strings.
+        # normalise + re-encode. Handles Python-literal domains
+        # (single quotes / tuples) and relative-date expressions that
+        # stock's internal json.loads + Odoo's domain parser reject.
         if target_key in _JSON_STRING_PARAMS:
-            if isinstance(v, (list, dict)):
-                try:
-                    v = json.dumps(v)
-                except Exception:  # noqa: BLE001
-                    v = "[]"
-            elif v is None or v == "":
-                v = "[]"
-            elif not isinstance(v, str):
-                v = str(v)
+            v = _normalize_json_string_param(v)
 
         # If aliasing collides with an explicit key already present,
         # prefer the explicit one (don't overwrite).
@@ -789,6 +956,23 @@ def run_tool_call(agent, tool_call):
         return {"error": (
             f"Tool {fn_name} arguments must be a JSON object, got "
             f"{type(kwargs).__name__}."
+        )}
+
+    # ----- Required-arg pre-validation --------------------------------
+    # Return a crisp instruction instead of letting the dispatch raise
+    # TypeError("missing 1 required positional argument: 'model_name'")
+    # and burning a tool-loop iteration on a confusing signature error.
+    if fn_name in _MODEL_REQUIRED_TOOLS and not kwargs.get("model_name"):
+        _logger.info(
+            "daadit_ai_mistral.tool_dispatch: %s called without "
+            "model_name (args_keys=%s) — returning instruction",
+            fn_name, list(kwargs.keys()),
+        )
+        return {"error": (
+            f"Tool {fn_name} requires a 'model_name' argument: the "
+            f"technical Odoo model name as a string (e.g. "
+            f"'helpdesk.ticket', 'res.partner', 'sale.order'). "
+            f"Re-call this tool with model_name set."
         )}
 
     # ----- Per-agent model access control -----------------------------
