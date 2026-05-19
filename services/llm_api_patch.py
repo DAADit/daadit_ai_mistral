@@ -603,7 +603,19 @@ _LANGUAGE_MIRROR_INSTRUCTION = (
     "recent message. If the user writes in Dutch, reply in Dutch. If "
     "the user writes in French, reply in French. Do NOT translate "
     "technical identifiers inside backticks (such as `account.move`, "
-    "`res.partner`, field names like `stage_id`)."
+    "`res.partner`, field names like `stage_id`).\n\n"
+    "CRITICAL — TOOL CALLS: When invoking a function/tool, the "
+    "`name` field of the tool call MUST be the exact, literal "
+    "identifier you were given in the tools list — typically an "
+    "ASCII snake_case string starting with `ir_actions_server_` "
+    "(for example `ir_actions_server_search`, "
+    "`ir_actions_server_get_fields`, "
+    "`ir_actions_server_read_group`). NEVER translate, localise, "
+    "or paraphrase a tool name. Translated names (e.g. "
+    "`ir_actions_server_velden_oproepen`, `..._zoeken`) do not "
+    "exist and will be rejected as 'Unknown tool'. If a tool you "
+    "need isn't in the provided tools list, do not invent one — "
+    "tell the user in plain language which capability is missing."
 )
 
 
