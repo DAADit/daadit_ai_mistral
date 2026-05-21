@@ -348,6 +348,124 @@ TOOL_SCHEMAS = {
             "required": ["action_id", "model_name"],
         },
     },
+    # --- DAADit write-side tools (v19.0.4.0.0) --------------------------
+    "ir_actions_server_assign_user": {
+        "description": (
+            "WRITE TOOL — assign a user to a record by setting its "
+            "'user_id' field. Use this when an agent must take ownership "
+            "of a record (e.g. assign an unassigned helpdesk ticket to "
+            "the right salesperson). Target model must have a 'user_id' "
+            "many2one to res.users; assignee must be an active internal "
+            "user. Returns {'ok': true, ...} on success, {'error': '...'} "
+            "on validation failure, or {'ok': true, 'skipped': true, "
+            "'reason': 'already_assigned'} if the user was already set."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model_name": {
+                    "type": "string",
+                    "description": (
+                        "Technical model name of the record, e.g. "
+                        "'helpdesk.ticket', 'crm.lead', 'sale.order'."
+                    ),
+                },
+                "record_id": {
+                    "type": "integer",
+                    "description": "Database id of the record to assign.",
+                },
+                "user_id": {
+                    "type": "integer",
+                    "description": (
+                        "Database id of the res.users record to set as "
+                        "'user_id'. Must be an active internal user."
+                    ),
+                },
+            },
+            "required": ["model_name", "record_id", "user_id"],
+        },
+    },
+    "ir_actions_server_schedule_activity": {
+        "description": (
+            "WRITE TOOL — schedule a mail.activity on a record (e.g. "
+            "'follow up on overdue ticket'). Idempotent: if an open "
+            "activity with the same type, summary and assignee already "
+            "exists on the record, no new one is created. Target model "
+            "must inherit mail.activity.mixin (most business models do). "
+            "Returns {'ok': true, 'activity_id': N, ...} on success, "
+            "{'ok': true, 'skipped': true, 'reason': 'duplicate', "
+            "'existing_activity_id': N} when an equivalent activity "
+            "already exists, or {'error': '...'} on validation failure."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "model_name": {
+                    "type": "string",
+                    "description": (
+                        "Technical model name of the record, e.g. "
+                        "'helpdesk.ticket', 'crm.lead', 'sale.order'."
+                    ),
+                },
+                "record_id": {
+                    "type": "integer",
+                    "description": "Database id of the record.",
+                },
+                "activity_type_xmlid": {
+                    "type": "string",
+                    "description": (
+                        "XML id of the mail.activity.type, e.g. "
+                        "'mail.mail_activity_data_todo' (To Do), "
+                        "'mail.mail_activity_data_call' (Call), "
+                        "'mail.mail_activity_data_email' (Email). "
+                        "Optional — defaults to 'mail.mail_activity_data_todo'."
+                    ),
+                },
+                "activity_type_id": {
+                    "type": "integer",
+                    "description": (
+                        "Database id of the mail.activity.type. "
+                        "Alternative to activity_type_xmlid; if both "
+                        "given, the id wins."
+                    ),
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "Short title for the activity (e.g. 'SLA "
+                        "verstreken — direct oppakken'). Used for "
+                        "idempotence: an existing activity with the "
+                        "same summary + type + assignee won't be "
+                        "duplicated."
+                    ),
+                },
+                "note": {
+                    "type": "string",
+                    "description": (
+                        "HTML body of the activity. Optional; defaults "
+                        "to empty."
+                    ),
+                },
+                "date_deadline": {
+                    "type": "string",
+                    "description": (
+                        "Deadline as 'YYYY-MM-DD'. Optional; defaults "
+                        "to today."
+                    ),
+                },
+                "user_id": {
+                    "type": "integer",
+                    "description": (
+                        "Database id of the user the activity is "
+                        "assigned to. Optional; defaults to the "
+                        "record's existing user_id if set, otherwise "
+                        "the calling user."
+                    ),
+                },
+            },
+            "required": ["model_name", "record_id"],
+        },
+    },
 }
 
 
@@ -723,6 +841,11 @@ _MODEL_REQUIRED_TOOLS = frozenset({
     "ir_actions_server_open_menu_graph",
     "ir_actions_server_open_menu_pivot",
     "ir_actions_server_adjust_search",
+    # DAADit write-side tools (v19.0.4.0.0) — both take a model_name
+    # so the agent's allow/block list is enforced by tool_dispatch
+    # before _ai_tool_* runs.
+    "ir_actions_server_assign_user",
+    "ir_actions_server_schedule_activity",
 })
 
 

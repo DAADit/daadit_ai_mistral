@@ -7,6 +7,62 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.0.0 — 2026-05-21
+
+Adds two write-side AI tools so autonomous agents (e.g. the
+helpdesk SLA-agent driven by `daadit_ai_agent_schedule`) can
+actually ACT, not just report. Stock Odoo Enterprise's `ai` module
+ships only read-only AI tools (Search, Read group, Get Fields,
+Open Menu *) — without a write tool an autonomous agent is gated
+at the dispatch layer regardless of how the prompt is written.
+
+### New AI tools
+
+* **`AI: Assign User`** — sets `user_id` on a record. Validates the
+  target model has a `user_id` many2one to `res.users`, that the
+  assignee is an active internal user, and short-circuits with
+  `{'skipped': True, 'reason': 'already_assigned'}` when the user
+  was already set (idempotent on retries).
+* **`AI: Schedule Activity`** — creates a `mail.activity` on a
+  record via `mail.activity.mixin`. Idempotent: if an open
+  activity with the same activity_type + summary + assignee
+  already exists on the record, returns
+  `{'skipped': True, 'reason': 'duplicate', ...}` instead of
+  duplicating. Defaults `activity_type` to
+  `mail.mail_activity_data_todo`, deadline to today, assignee to
+  the record's current `user_id` (or the calling user).
+
+Both tools take `model_name`, so the agent's
+`daadit_allowed_model_ids` / `daadit_blocked_model_ids` /
+`daadit_field_blocklist` gates apply unchanged — the same access
+controls that protect read tools now cover writes.
+
+### Files changed
+
+* `__manifest__.py` — version bump 19.0.3.14.0 → 19.0.4.0.0; new
+  `data/ai_tools.xml` added to the data list.
+* `data/ai_tools.xml` (new) — `ir.actions.server` records for both
+  tools on `ai.model_ai_agent` with `noupdate="1"` so admins can
+  attach them to custom `ai.topic`s without upgrade reverts.
+* `models/ai_agent.py` — adds `_ai_tool_assign_user` and
+  `_ai_tool_schedule_activity` on `ai.agent`. Returns
+  `{'error': '...'}` JSON on validation failure so the LLM can
+  recover; never raises into the chat loop.
+* `services/tool_dispatch.py` — adds `TOOL_SCHEMAS` entries for
+  both tools (Mistral needs proper parameter docs to call them
+  correctly) and extends `_MODEL_REQUIRED_TOOLS` so missing
+  `model_name` returns a crisp instruction instead of a TypeError.
+
+### Why this is in `daadit_ai_mistral` (and not in a Helpdesk-specific module)
+
+The two tools are intentionally generic: they take a `model_name`,
+not a hardcoded model. Helpdesk is the immediate driver but any
+agent over any model that has a `user_id` field / supports
+activities can use them (CRM leads, sales orders, project tasks,
+field-service tasks, …). Putting them next to the existing read
+tools — backed by the same dispatch / allow-list / scrub gates
+— keeps the surface area in one module.
+
 ## 19.0.3.14.0 — 2026-05-23
 
 AI Fields & non-agent provider routing. Triggered by a real-world bug:

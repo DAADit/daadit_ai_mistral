@@ -32,7 +32,7 @@ in their respective files. Multiple candidate names are wrapped to survive
 across Odoo versions; verify against the installed Enterprise source on your
 Odoo.sh dev branch before relying on this in production.
 """,
-    "version": "19.0.3.14.0",
+    "version": "19.0.4.0.0",
     "category": "Productivity/Discuss",
     "author": "DAADit",
     "website": "https://daadit.group",
@@ -48,6 +48,7 @@ Odoo.sh dev branch before relying on this in production.
     "data": [
         "security/ir.model.access.csv",
         "security/mistral_usage_security.xml",
+        "data/ai_tools.xml",
         "views/res_config_settings_views.xml",
         "views/mistral_usage_views.xml",
         "views/ai_agent_views.xml",
@@ -57,6 +58,13 @@ Odoo.sh dev branch before relying on this in production.
         # action ``code`` blocks, so the introspection actions can't be
         # loaded at install time. The diagnostics module (UserError
         # trace tap + register-hook bytecode scan) covers what they did.
+        #
+        # data/ai_tools.xml (v19.0.4.0.0) adds two write-side AI tools
+        # backed by ai.agent._ai_tool_assign_user and
+        # ai.agent._ai_tool_schedule_activity. Their slugified action
+        # names (ir_actions_server_assign_user / ir_actions_server_
+        # schedule_activity) match the dispatch mapping in
+        # services/tool_dispatch.py.
     ],
     "pre_init_hook": "pre_init_hook",
     "uninstall_hook": "uninstall_hook",

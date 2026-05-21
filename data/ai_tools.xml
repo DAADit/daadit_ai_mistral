@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    DAADit AI — write-side AI tools.
+
+    Stock Odoo Enterprise's ``ai`` module ships only read-only AI
+    tools (Search, Read group, Get Fields, Open Menu *). The records
+    below add write-side tools backed by ``ai.agent._ai_tool_*``
+    methods in ``models/ai_agent.py``.
+
+    Naming convention: tool dispatch in
+    ``services/tool_dispatch.py`` slugifies the action name into
+    ``ir_actions_server_<slug>`` and routes it to
+    ``ai.agent._ai_tool_<slug>``. The slug-to-method mapping is what
+    keeps the data file and the Python implementation linked — change
+    one, change the other.
+
+    Why ``noupdate="1"``: once installed, operators may want to attach
+    these tools to custom ``ai.topic`` records or rename them per the
+    site's conventions. ``noupdate`` keeps that customisation across
+    module upgrades.
+-->
+<odoo>
+    <data noupdate="1">
+
+        <record id="ir_actions_server_assign_user" model="ir.actions.server">
+            <field name="name">AI: Assign User</field>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="code">ai['result'] = record._ai_tool_assign_user(
+    model_name=model_name,
+    record_id=record_id,
+    user_id=user_id,
+)</field>
+        </record>
+
+        <record id="ir_actions_server_schedule_activity" model="ir.actions.server">
+            <field name="name">AI: Schedule Activity</field>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="code">ai['result'] = record._ai_tool_schedule_activity(
+    model_name=model_name,
+    record_id=record_id,
+    activity_type_xmlid=activity_type_xmlid,
+    activity_type_id=activity_type_id,
+    summary=summary,
+    note=note,
+    date_deadline=date_deadline,
+    user_id=user_id,
+)</field>
+        </record>
+
+    </data>
+</odoo>

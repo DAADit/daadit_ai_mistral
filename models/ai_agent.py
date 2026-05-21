@@ -867,6 +867,336 @@ class AIAgent(models.Model):
             raise
 
     # ------------------------------------------------------------------ #
+    # DAADit AI write-tools (v19.0.4.0.0)                                #
+    #                                                                    #
+    # The stock ``ai`` module ships only read-only AI tools (Search,     #
+    # Read group, Get Fields, Open Menu *, …). Without a write-side      #
+    # tool an autonomous agent can REPORT but cannot ACT — the helpdesk  #
+    # use case (assign tickets, schedule SLA-overdue activities) is then #
+    # blocked at the dispatch layer regardless of prompt quality.        #
+    #                                                                    #
+    # These two methods are the underlying implementations behind the    #
+    # ``AI: Assign User`` and ``AI: Schedule Activity`` server-actions   #
+    # defined in ``data/ai_tools.xml``. Tool-name slugging follows the   #
+    # standard pattern (``ir_actions_server_<slug>`` → ``_ai_tool_       #
+    # <slug>``) so the existing ``tool_dispatch.run_tool_call`` routes   #
+    # them with no special-casing.                                       #
+    #                                                                    #
+    # Security                                                           #
+    # --------                                                           #
+    # * Each method runs as ``self.env.user`` — i.e. the schedule's      #
+    #   "Run as" user when invoked from a scheduled run. All standard    #
+    #   Odoo ACLs and record rules therefore apply.                      #
+    # * The dispatcher already gated ``model_name`` through              #
+    #   ``_daadit_is_model_allowed`` before calling us; we don't repeat  #
+    #   that check here (one place to maintain).                         #
+    # * Failures return ``{"error": "<reason>"}`` JSON so the LLM can    #
+    #   recover and try again — never raise into the chat loop.          #
+    # ------------------------------------------------------------------ #
+
+    def _ai_tool_assign_user(self, model_name=None, record_id=None,
+                             user_id=None, **_extra):
+        """Assign a user to a record by setting its ``user_id`` field.
+
+        Parameters
+        ----------
+        model_name : str
+            Technical model name of the target record (e.g.
+            ``'helpdesk.ticket'``). Validated against the agent's
+            allow/block lists by ``tool_dispatch`` before we run.
+        record_id : int
+            Database id of the record to assign.
+        user_id : int
+            Database id of the ``res.users`` to set as ``user_id`` on
+            the record. Must be an active internal user.
+
+        Returns
+        -------
+        dict
+            ``{'ok': True, 'model_name': ..., 'record_id': ...,
+            'user_id': ..., 'user_name': ...}`` on success;
+            ``{'error': '<reason>'}`` on any validation failure.
+        """
+        self.ensure_one()
+        if not model_name or not isinstance(model_name, str):
+            return {"error": "model_name is required (technical model "
+                             "name as a string, e.g. 'helpdesk.ticket')."}
+        try:
+            record_id = int(record_id) if record_id is not None else 0
+            user_id = int(user_id) if user_id is not None else 0
+        except (TypeError, ValueError):
+            return {"error": "record_id and user_id must be integers."}
+        if not record_id:
+            return {"error": "record_id is required (integer)."}
+        if not user_id:
+            return {"error": "user_id is required (integer)."}
+        if model_name not in self.env:
+            return {"error": "Unknown model '%s'." % model_name}
+        Model = self.env[model_name]
+        field = Model._fields.get("user_id")
+        if (
+            field is None
+            or getattr(field, "type", None) != "many2one"
+            or getattr(field, "comodel_name", None) != "res.users"
+        ):
+            return {"error": (
+                "Model '%s' has no 'user_id' many2one to res.users; "
+                "cannot assign a user via this tool." % model_name
+            )}
+        user = self.env["res.users"].browse(user_id).exists()
+        if not user:
+            return {"error": "User id %s does not exist." % user_id}
+        if not user.active:
+            return {"error": (
+                "User id %s ('%s') is archived; refusing to assign an "
+                "inactive user." % (user_id, user.name)
+            )}
+        if user.share:
+            return {"error": (
+                "User id %s ('%s') is a portal/public user; only "
+                "internal users can be assigned." % (user_id, user.name)
+            )}
+        record = Model.browse(record_id).exists()
+        if not record:
+            return {"error": (
+                "Record id %s on '%s' does not exist." % (record_id, model_name)
+            )}
+        previous_user = record.user_id
+        if previous_user.id == user.id:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "already_assigned",
+                "model_name": model_name,
+                "record_id": record_id,
+                "user_id": user.id,
+                "user_name": user.name,
+            }
+        try:
+            record.write({"user_id": user.id})
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "daadit_ai_mistral._ai_tool_assign_user: write failed "
+                "on %s(%s) → user_id=%s as user=%s: %s",
+                model_name, record_id, user.id, self.env.user.id, exc,
+            )
+            return {"error": (
+                "Could not assign user: %s. Check that the calling "
+                "user has write rights on '%s'." % (exc, model_name)
+            )}
+        return {
+            "ok": True,
+            "model_name": model_name,
+            "record_id": record_id,
+            "user_id": user.id,
+            "user_name": user.name,
+            "previous_user_id": previous_user.id or None,
+        }
+
+    def _ai_tool_schedule_activity(self, model_name=None, record_id=None,
+                                   activity_type_xmlid=None,
+                                   activity_type_id=None,
+                                   summary=None, note=None,
+                                   date_deadline=None, user_id=None,
+                                   **_extra):
+        """Create a ``mail.activity`` on a record.
+
+        Idempotent: if an OPEN activity with the same activity type,
+        summary and assignee already exists on the record, no new
+        activity is created. Lets the helpdesk agent re-run safely
+        within the same SLA window without piling up duplicates.
+
+        Parameters
+        ----------
+        model_name : str
+            Technical model name of the record (e.g.
+            ``'helpdesk.ticket'``). Model must inherit
+            ``mail.activity.mixin``.
+        record_id : int
+            Database id of the record.
+        activity_type_xmlid : str, optional
+            XML id of the ``mail.activity.type`` to use, e.g.
+            ``'mail.mail_activity_data_todo'``. One of
+            ``activity_type_xmlid`` or ``activity_type_id`` should be
+            given; if both are missing we fall back to
+            ``mail.mail_activity_data_todo`` (the standard "To Do"
+            type).
+        activity_type_id : int, optional
+            Database id of the ``mail.activity.type``.
+        summary : str, optional
+            Short title for the activity.
+        note : str, optional
+            HTML body for the activity (defaults to empty).
+        date_deadline : str, optional
+            ISO date ``'YYYY-MM-DD'`` (or ``'YYYY-MM-DD HH:MM:SS'``,
+            time part is ignored). Defaults to today.
+        user_id : int, optional
+            Database id of the user the activity is assigned to.
+            Defaults to ``record.user_id`` if it exists, otherwise the
+            calling user.
+
+        Returns
+        -------
+        dict
+            ``{'ok': True, 'activity_id': <id>, ...}`` on success;
+            ``{'ok': True, 'skipped': True, 'reason': 'duplicate',
+            'existing_activity_id': <id>, ...}`` when an equivalent
+            open activity already exists;
+            ``{'error': '<reason>'}`` on validation failure.
+        """
+        self.ensure_one()
+        if not model_name or not isinstance(model_name, str):
+            return {"error": "model_name is required (technical model "
+                             "name as a string)."}
+        try:
+            record_id = int(record_id) if record_id is not None else 0
+        except (TypeError, ValueError):
+            return {"error": "record_id must be an integer."}
+        if not record_id:
+            return {"error": "record_id is required (integer)."}
+        if model_name not in self.env:
+            return {"error": "Unknown model '%s'." % model_name}
+        Model = self.env[model_name]
+        if not hasattr(Model, "activity_schedule"):
+            return {"error": (
+                "Model '%s' does not support activities (it does not "
+                "inherit mail.activity.mixin)." % model_name
+            )}
+        record = Model.browse(record_id).exists()
+        if not record:
+            return {"error": (
+                "Record id %s on '%s' does not exist." % (record_id, model_name)
+            )}
+
+        # --- Resolve activity type (xmlid > id > fallback to "To Do") --
+        ActivityType = self.env["mail.activity.type"].sudo()
+        act_type = ActivityType.browse()
+        if activity_type_id:
+            try:
+                act_type = ActivityType.browse(int(activity_type_id)).exists()
+            except (TypeError, ValueError):
+                act_type = ActivityType.browse()
+        if not act_type and activity_type_xmlid:
+            try:
+                act_type = self.env.ref(activity_type_xmlid, raise_if_not_found=False)
+                if act_type and act_type._name != "mail.activity.type":
+                    act_type = ActivityType.browse()
+            except Exception:  # noqa: BLE001
+                act_type = ActivityType.browse()
+        if not act_type:
+            act_type = self.env.ref(
+                "mail.mail_activity_data_todo", raise_if_not_found=False,
+            )
+        if not act_type:
+            return {"error": (
+                "Could not resolve a mail.activity.type. Pass a valid "
+                "activity_type_xmlid or activity_type_id, or ensure the "
+                "'mail.mail_activity_data_todo' fallback exists."
+            )}
+
+        # --- Resolve assignee -----------------------------------------
+        assignee = None
+        if user_id:
+            try:
+                assignee = self.env["res.users"].browse(int(user_id)).exists()
+            except (TypeError, ValueError):
+                return {"error": "user_id must be an integer."}
+            if not assignee:
+                return {"error": "User id %s does not exist." % user_id}
+            if not assignee.active or assignee.share:
+                return {"error": (
+                    "User id %s is archived or a portal user; cannot "
+                    "assign an activity to them." % user_id
+                )}
+        if assignee is None:
+            # Default: existing user_id on the record, else the caller.
+            record_user = getattr(record, "user_id", None)
+            if record_user and record_user.id:
+                assignee = record_user
+            else:
+                assignee = self.env.user
+
+        # --- Parse deadline -------------------------------------------
+        deadline = None
+        if date_deadline:
+            from datetime import datetime as _dt
+            raw = str(date_deadline).strip()
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    deadline = _dt.strptime(raw, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if deadline is None:
+                return {"error": (
+                    "date_deadline %r is not a valid date. Use "
+                    "'YYYY-MM-DD'." % date_deadline
+                )}
+        if deadline is None:
+            deadline = fields.Date.context_today(self)
+
+        target_summary = (summary or "").strip()
+        target_note = note or ""
+
+        # --- Idempotence: skip if an equivalent open activity exists ---
+        existing_domain = [
+            ("res_model", "=", model_name),
+            ("res_id", "=", record.id),
+            ("activity_type_id", "=", act_type.id),
+            ("user_id", "=", assignee.id),
+        ]
+        if target_summary:
+            existing_domain.append(("summary", "=", target_summary))
+        existing = self.env["mail.activity"].search(existing_domain, limit=1)
+        if existing:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "duplicate",
+                "model_name": model_name,
+                "record_id": record.id,
+                "activity_id": existing.id,
+                "existing_activity_id": existing.id,
+                "activity_type_id": act_type.id,
+                "user_id": assignee.id,
+            }
+
+        # --- Create the activity ---------------------------------------
+        try:
+            res_model_id = self.env["ir.model"]._get_id(model_name)
+            activity = self.env["mail.activity"].create({
+                "activity_type_id": act_type.id,
+                "res_model": model_name,
+                "res_model_id": res_model_id,
+                "res_id": record.id,
+                "summary": target_summary,
+                "note": target_note,
+                "date_deadline": deadline,
+                "user_id": assignee.id,
+            })
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "daadit_ai_mistral._ai_tool_schedule_activity: create "
+                "failed on %s(%s) as user=%s: %s",
+                model_name, record_id, self.env.user.id, exc,
+            )
+            return {"error": (
+                "Could not schedule activity: %s. Check that the calling "
+                "user has rights to create activities on '%s'." % (exc, model_name)
+            )}
+        return {
+            "ok": True,
+            "model_name": model_name,
+            "record_id": record.id,
+            "activity_id": activity.id,
+            "activity_type_id": act_type.id,
+            "summary": target_summary or act_type.name or "",
+            "date_deadline": deadline.strftime("%Y-%m-%d"),
+            "user_id": assignee.id,
+            "user_name": assignee.name,
+        }
+
+    # ------------------------------------------------------------------ #
     # Diagnostic introspection — temporary helper                        #
     #                                                                    #
     # When iterating against a closed-source Enterprise module without   #
