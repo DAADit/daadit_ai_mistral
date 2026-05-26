@@ -7,6 +7,89 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.3.14.0 — 2026-05-23
+
+AI Fields & non-agent provider routing. Triggered by a real-world bug:
+Studio AI Fields and "Update with AI" automation rules ignored the
+selected Mistral agent entirely and unconditionally hit
+`api.openai.com`, surfacing as either:
+
+* `NotImplementedError` at
+  `enterprise/ai/utils/llm_api_service.py:550` (the internal
+  `_request_llm` dispatcher has no Mistral branch), or
+* `Oeps, het antwoord kon niet worden verwerkt` (AI Fields parses the
+  response as JSON; Mistral returned prose because we never asked for
+  JSON-mode output).
+
+Five hookpoints in `enterprise/ai/`'s production code call
+`LLMApiService(...)` directly. Only one — `ai.agent._get_provider()` —
+was covered by the previous patch. The other four (the bare
+`LLMApiService(request.env)` in `controllers/agent.py`, the
+`AI_PROVIDER = "openai"` constant in `ir_actions_server.py`, and two
+embedding-call sites) all bypassed Mistral entirely. Plus the AI
+Fields path lives in a separate `enterprise/ai_fields/` module that
+hardcodes `llm_model="gpt-4o"`.
+
+### Patch
+
+* **`LLMApiService.__init__` wrapper now supports force-mode.** New
+  system parameter `daadit_ai_mistral.force_provider` with values
+  `off` / `auto` / `always`. In `auto` (recommended) any caller that
+  passes no provider or `"openai"` is redirected to Mistral; explicit
+  `"google"` keeps working. This routes AI Fields, automation
+  actions, embedding lookups and any future direct caller through
+  Mistral with one hook instead of patching each call site.
+* **`LLMApiService._request_llm` (internal dispatcher) is now also
+  patched.** The previous version only patched the public
+  `request_llm`. AI Fields and any direct caller skip that and use
+  the internal one — which on stock falls into
+  `raise NotImplementedError()` for non-OpenAI/non-Google providers.
+  The patched internal dispatcher routes to `_request_llm_mistral`
+  when `self.provider == "mistral"` and returns a 4-tuple so callers
+  unpacking `response, *__ = llm_api._request_llm(...)` (AI Fields)
+  and 4-tuple-style callers both work.
+* **AI Fields' `llm_model="gpt-4o"` is auto-substituted.** When the
+  caller passes a non-Mistral model name and we are on the Mistral
+  route, fall back to `daadit_ai_mistral.default_chat_model` (system
+  parameter) or `mistral-medium-latest`.
+* **Plural prompt kwargs supported.** AI Fields passes
+  `system_prompts=[...]` and `user_prompts=[...]` as lists. The
+  extractor now reads plural and singular forms, joining list items
+  with double newlines before sending to Mistral.
+* **JSON schema enforcement.** When the caller passes `schema=`
+  (or `json_schema=`, `response_schema=`, `output_schema=`) we build
+  Mistral's `response_format` payload. For `mistral-large-*`,
+  `mistral-medium-*` and `ministral-*` we use strict
+  `json_schema` mode with the caller's schema. For other models we
+  degrade to `json_object` (valid JSON, no schema enforcement) and
+  inject the schema into the system prompt as a hint. Tools are
+  dropped when JSON mode is active because Mistral 400s when both
+  are set simultaneously.
+
+### Configuration
+
+After upgrade, set the following system parameter to enable
+non-agent routing:
+
+* `daadit_ai_mistral.force_provider` = `auto` (recommended)
+
+Optional:
+
+* `daadit_ai_mistral.default_chat_model` = `mistral-medium-latest`
+  (the Mistral model substituted when callers hardcode `gpt-4o`)
+* `daadit_ai_mistral.force_provider_name` = `mistral` (only needed
+  if a future addon installs another provider you want to use)
+
+### Known limitations
+
+* `web_grounding=True` (AI Fields) is silently dropped. Mistral has
+  no built-in web search.
+* Embeddings still go to OpenAI under `auto` mode (the embedding
+  callers pass `provider="openai"` explicitly). Set
+  `force_provider=always` to route embeddings through Mistral too,
+  but verify your Mistral embedding pipeline works first — it is
+  thinner-tested than the chat path.
+
 ## 19.0.3.13.2 — 2026-05-13
 
 Tool-call context-explosion fix. Triggered by an end-user prompt

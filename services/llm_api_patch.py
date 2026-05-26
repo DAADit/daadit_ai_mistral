@@ -90,14 +90,81 @@ def patch_llm_api_service() -> bool:
 
     original_init = LLMApiService.__init__
     original_request_llm = getattr(LLMApiService, "request_llm", None)
+    # AI Fields (enterprise/ai_fields/tools.py) and any other low-level
+    # caller use `_request_llm` (underscore-prefixed), NOT the public
+    # `request_llm`. We must patch both, otherwise force_provider works
+    # but the internal dispatcher still falls into stock's
+    # `raise NotImplementedError()` at the bottom of `_request_llm`.
+    original_request_llm_internal = getattr(LLMApiService, "_request_llm", None)
+
+    def _resolve_force_provider(env):
+        """Read the system parameter that forces a non-stock provider.
+
+        Returns the provider string ("mistral", etc.) when force mode is
+        active, or None to mean "leave provider alone".
+
+        Force mode values:
+            "off" or absent  -> no override (stock behaviour)
+            "auto"           -> override only when caller passed no provider
+                                 or provider == "openai" (the stock default).
+                                 Caller-specified "google" is respected.
+            "always"         -> override every call regardless of what the
+                                 caller asked for. Use with care: this also
+                                 reroutes embeddings, which Mistral may not
+                                 support for every model.
+
+        Reading the parameter is wrapped in a try/except because __init__ is
+        sometimes hit outside a normal request context (e.g. early registry
+        load, scheduled actions before cron-cursor is fully ready); the safe
+        fallback is to skip the override.
+        """
+        if env is None:
+            return None
+        try:
+            icp = env["ir.config_parameter"].sudo()
+            mode = (icp.get_param("daadit_ai_mistral.force_provider") or "").strip().lower()
+            forced = (icp.get_param("daadit_ai_mistral.force_provider_name") or "mistral").strip().lower()
+        except Exception:  # noqa: BLE001
+            return None
+        if mode in ("off", "", "no", "0", "false"):
+            return None
+        if mode in ("auto", "always") and forced:
+            return (mode, forced)
+        return None
 
     def _patched_init(api_self, env=None, provider=None, *args, **kwargs):
+        # Step 1: honor an existing "mistral" call exactly like before.
         if provider == "mistral":
-            # Skip stock's provider-validation that raises NotImplementedError
-            # and set up the bare minimum state Mistral routing needs.
             api_self.env = env
             api_self.provider = "mistral"
             return None
+
+        # Step 2: optional force-mode. Lets a non-agent code path (AI
+        # Fields button, automation server actions, embeddings controller,
+        # the bare `LLMApiService(request.env)` in agent.py) be redirected
+        # to Mistral without us having to hook each call site.
+        resolved = _resolve_force_provider(env)
+        if resolved:
+            mode, forced = resolved
+            should_override = (
+                mode == "always"
+                or (mode == "auto" and provider in (None, "openai"))
+            )
+            if should_override and forced == "mistral":
+                _logger.info(
+                    "daadit_ai_mistral.llm_api_patch: force_provider=%s — "
+                    "rerouting LLMApiService(provider=%r) to 'mistral'",
+                    mode, provider,
+                )
+                api_self.env = env
+                api_self.provider = "mistral"
+                return None
+            if should_override and forced != "mistral":
+                # Future-proof: lets the user point force_provider_name at
+                # some other custom provider another addon installs.
+                provider = forced
+
+        # Step 3: stock path.
         return original_init(api_self, env=env, provider=provider,
                              *args, **kwargs)
 
@@ -124,17 +191,61 @@ def patch_llm_api_service() -> bool:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _patched_request_llm_internal(api_self, *args, **kwargs):
+        """Low-level dispatcher patch.
+
+        Stock's `_request_llm` body (regel 540 in
+        enterprise/ai/utils/llm_api_service.py):
+
+            if self.provider == 'openai':
+                return self._request_llm_openai(...)
+            if self.provider == 'google':
+                return self._request_llm_google(...)
+            raise NotImplementedError()
+
+        AI Fields (enterprise/ai_fields/tools.py:182) calls this internal
+        method directly with kwargs `llm_model=`, `system_prompts=`,
+        `user_prompts=`, etc., and unpacks the result as
+        `response, *__ = llm_api._request_llm(...)` — so the caller
+        expects a tuple where the first element is the list of text
+        responses. Our Mistral pipeline already returns a list of
+        strings; we wrap it in a tuple so unpacking works.
+        """
+        if getattr(api_self, "provider", None) != "mistral":
+            if original_request_llm_internal is None:
+                raise AttributeError(
+                    "LLMApiService._request_llm not found on stock; "
+                    "cannot delegate non-Mistral call."
+                )
+            return original_request_llm_internal(api_self, *args, **kwargs)
+        try:
+            adapted = _request_llm_mistral(api_self, *args, **kwargs)
+        finally:
+            try:
+                tool_dispatch.current_agent.record = None
+            except Exception:  # noqa: BLE001
+                pass
+        # Stock `_request_llm_openai`/`_google` return a 4-tuple
+        # (response, to_call, next_inputs, request_token_usage) — see
+        # `_request_llm_openai_helper` at line 367. We return the same
+        # arity so any caller (AI Fields uses `response, *__ = ...`,
+        # request_llm-loop uses 4-tuple) can unpack uniformly.
+        return (adapted, [], [], {})
+
     LLMApiService.__init__ = _patched_init
     if original_request_llm is not None:
         LLMApiService.request_llm = _patched_request_llm
+    if original_request_llm_internal is not None:
+        LLMApiService._request_llm = _patched_request_llm_internal
     LLMApiService._daadit_mistral_patched = True
     LLMApiService._daadit_original_init = original_init
     LLMApiService._daadit_original_request_llm = original_request_llm
+    LLMApiService._daadit_original_request_llm_internal = original_request_llm_internal
 
     _PATCHED = True
     _logger.info(
-        "daadit_ai_mistral.llm_api_patch: LLMApiService.__init__/request_llm "
-        "patched to support provider='mistral' "
+        "daadit_ai_mistral.llm_api_patch: LLMApiService.__init__/"
+        "request_llm/_request_llm patched to support provider='mistral' "
         "(class: %s.%s)",
         LLMApiService.__module__, LLMApiService.__name__,
     )
@@ -728,29 +839,118 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 )
 
     # --- 4. prompt / system_prompt ⇒ assemble messages ---------------
+    # AI Fields and other ai_fields/tools.py-style callers pass plural
+    # kwargs as lists: `system_prompts=[...]`, `user_prompts=[...]`.
+    # The legacy singular form (`prompt=`, `system_prompt=`) is also
+    # supported. Lists get joined into one block per role; strings are
+    # used as-is.
     if not messages:
-        prompt = next(
-            (kwargs.get(k) for k in _PROMPT_KEYS if kwargs.get(k)),
-            None,
-        )
-        system = next(
-            (kwargs.get(k) for k in _SYSTEM_KEYS if kwargs.get(k)),
-            None,
-        )
+        def _collect(kwargs_dict, keys_singular, keys_plural):
+            # Plural variant first: build per-key list (could be list or str).
+            collected = []
+            for k in keys_plural:
+                val = kwargs_dict.get(k)
+                if not val:
+                    continue
+                if isinstance(val, (list, tuple)):
+                    for item in val:
+                        if item:
+                            collected.append(str(item))
+                else:
+                    collected.append(str(val))
+            if collected:
+                return "\n\n".join(collected)
+            # Singular fallback.
+            for k in keys_singular:
+                val = kwargs_dict.get(k)
+                if val:
+                    return str(val)
+            return None
+
+        # _PROMPT_KEYS / _SYSTEM_KEYS contain the singular forms. The
+        # plural forms are AI Fields-specific so we list them inline.
+        _USER_PROMPT_KEYS_PLURAL = ("user_prompts", "user_messages", "prompts")
+        _SYSTEM_PROMPT_KEYS_PLURAL = ("system_prompts", "system_messages",
+                                      "instructions_list")
+        prompt = _collect(kwargs, _PROMPT_KEYS, _USER_PROMPT_KEYS_PLURAL)
+        system = _collect(kwargs, _SYSTEM_KEYS, _SYSTEM_PROMPT_KEYS_PLURAL)
         if prompt or system:
             messages = []
             if system:
-                messages.append({"role": "system", "content": str(system)})
+                messages.append({"role": "system", "content": system})
             if prompt:
-                messages.append({"role": "user", "content": str(prompt)})
+                messages.append({"role": "user", "content": prompt})
+
+    # --- 5. JSON schema enforcement (AI Fields, structured prompts) --
+    # AI Fields (enterprise/ai_fields/tools.py:182) passes `schema=`
+    # alongside the prompts and then calls `json.loads(response[0])`
+    # on the result. Without telling Mistral to constrain output to
+    # JSON, it returns prose ("Hier is mijn analyse: ..."), the parse
+    # fails, and the user sees "Oeps, het antwoord kon niet worden
+    # verwerkt".
+    #
+    # Mistral's strict structured outputs use this body shape:
+    #   response_format = {
+    #     "type": "json_schema",
+    #     "json_schema": {"name": "...", "strict": True, "schema": {...}},
+    #   }
+    # mistral-medium-latest / -large-latest accept it. Smaller models
+    # may not, so we degrade gracefully to "json_object" mode, which
+    # at minimum guarantees the response is valid JSON of *some*
+    # shape (client-side validation handles the rest).
+    schema = None
+    for k in ("schema", "json_schema", "response_schema", "output_schema"):
+        if kwargs.get(k):
+            schema = kwargs[k]
+            break
+
+    response_format_extra = None
+    if schema and isinstance(schema, dict):
+        # Models that have documented strict json_schema support.
+        STRICT_JSON_SCHEMA_MODELS = (
+            "mistral-large-latest", "mistral-medium-latest",
+            "mistral-large-", "mistral-medium-", "ministral-",
+        )
+        # We hand the schema + the model-allowlist to the call site;
+        # the final response_format dict is built there once `model`
+        # is fully resolved (it may still be substituted below).
+        response_format_extra = {
+            "_schema": schema,
+            "_strict_models_prefix": STRICT_JSON_SCHEMA_MODELS,
+        }
 
     # --- Defaults / hard validation ----------------------------------
-    if not model:
-        _logger.warning(
-            "daadit_ai_mistral.llm_api_patch: no 'model' found in "
-            "request_llm call; falling back to mistral-medium-latest"
-        )
-        model = "mistral-medium-latest"
+    # Two ways `model` can be wrong here:
+    #   (a) absent — caller didn't include any model kwarg
+    #   (b) present but not a Mistral model — AI Fields hardcodes
+    #       `llm_model="gpt-4o"` even when we route the call to Mistral
+    # Both → substitute a Mistral default. Reading the system parameter
+    # makes the default configurable per-deployment.
+    if not model or not is_mistral_model(model):
+        try:
+            icp = api_self.env["ir.config_parameter"].sudo()
+            mistral_default = (
+                icp.get_param("daadit_ai_mistral.default_chat_model")
+                or "mistral-medium-latest"
+            ).strip()
+        except Exception:  # noqa: BLE001
+            mistral_default = "mistral-medium-latest"
+        if not is_mistral_model(mistral_default):
+            # Operator misconfigured the parameter; ignore it.
+            mistral_default = "mistral-medium-latest"
+        if model and not is_mistral_model(model):
+            _logger.info(
+                "daadit_ai_mistral.llm_api_patch: caller asked for "
+                "non-Mistral model %r (likely AI Fields hardcoded "
+                "gpt-4o) — substituting %s",
+                model, mistral_default,
+            )
+        elif not model:
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: no 'model' found in "
+                "request_llm call; falling back to %s", mistral_default,
+            )
+        model = mistral_default
 
     if not messages:
         # Don't even hit Mistral's API with an empty conversation —
@@ -826,13 +1026,59 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     access_denial = None  # set when a tool call is denied by admin policy
 
     while iteration < MAX_ITER:
+        # Build the per-call `extra` payload. When the caller passed a
+        # JSON schema (AI Fields, structured automation actions), turn
+        # it into Mistral's `response_format` and drop tools — Mistral
+        # rejects requests where both are active simultaneously.
+        chat_extra = None
+        active_tools = normalized_tools
+        active_tool_choice = tool_choice
+        if response_format_extra:
+            schema_obj = response_format_extra["_schema"]
+            use_strict = model.startswith(
+                response_format_extra["_strict_models_prefix"]
+            )
+            if use_strict:
+                chat_extra = {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "ai_response",
+                            "strict": True,
+                            "schema": schema_obj,
+                        },
+                    }
+                }
+            else:
+                # Fallback for models without strict json_schema: at
+                # least force valid JSON output. AI Fields validates
+                # client-side after parsing, so shape mismatches will
+                # still surface — but we no longer return prose.
+                chat_extra = {
+                    "response_format": {"type": "json_object"},
+                }
+                # Push the schema into the system prompt as a hint so
+                # the model has *some* structural guidance.
+                if not any(m.get("role") == "system" for m in conversation):
+                    conversation.insert(0, {
+                        "role": "system",
+                        "content": (
+                            "Return ONLY a single JSON object matching this "
+                            "schema. Do not wrap in markdown.\n\n"
+                            f"{json.dumps(schema_obj)}"
+                        ),
+                    })
+            active_tools = None
+            active_tool_choice = None
+
         response = client.chat_completion(
             model=model,
             messages=conversation,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=normalized_tools,
-            tool_choice=tool_choice,
+            tools=active_tools,
+            tool_choice=active_tool_choice,
+            extra=chat_extra,
         )
         choice = (response.get("choices") or [{}])[0]
         msg = (choice.get("message") if isinstance(choice, dict) else None) or {}
