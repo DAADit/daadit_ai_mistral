@@ -7,6 +7,32 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.2.6 — 2026-07-04
+
+Strip hallucinated fields instead of failing the whole search. Nick
+reported the Product Agent couldn't answer "who is the product owner
+of X" even though the `Product Owner` (`x_product_owner_id`) field is
+set on the form. Prod logs showed why: mistral-medium included the
+VALID `x_product_owner_id` in every search but also invented
+companions — `x_product_manager_id`, `x_technical_owner_id`,
+`x_team_ids`, … — and Odoo rejects the ENTIRE `search`/`read` on the
+first invalid field, so the valid one never gets read and the user
+gets nothing.
+
+### Patch
+
+* `run_tool_call` dispatch retry now also catches
+  `ValueError("Invalid field 'X' on 'model'")`, strips `X` from
+  `fields` / `groupby` / `aggregates` (handling the `:operator`
+  suffix), and retries — keeping the valid fields. Up to 6 attempts,
+  covering several invented fields in one call. If the offending field
+  is only in the `domain` (not the field lists), it still surfaces as
+  before.
+
+Net effect: a search that names one real field and several imaginary
+ones now returns the real data instead of an empty error, so
+"product owner of X" resolves to the actual owner.
+
 ## 19.0.4.2.5 — 2026-07-03
 
 Language-independent sub-run failure signal. With the `use_in_ai` fix

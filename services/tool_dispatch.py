@@ -1429,8 +1429,32 @@ def run_tool_call(agent, tool_call):
     # rejects (max 3, defensive) and retry instead of failing. Any
     # TypeError that is NOT an unexpected-kwarg (or survives the
     # strips) falls through to the existing handler below.
+    def _strip_invalid_field(bad_field):
+        """Remove ``bad_field`` from fields/groupby/aggregates in kwargs.
+
+        Handles the ``field:operator`` spelling on groupby/aggregates
+        (e.g. ``x_bad:sum`` → matches ``x_bad``). Returns True if
+        anything was removed, so the caller knows a retry is worthwhile.
+        """
+        removed = False
+        vals = kwargs.get("fields")
+        if isinstance(vals, list) and bad_field in vals:
+            kwargs["fields"] = [f for f in vals if f != bad_field]
+            removed = True
+        for key in ("groupby", "aggregates"):
+            vals = kwargs.get(key)
+            if isinstance(vals, list):
+                kept = [
+                    v for v in vals
+                    if (str(v).split(":", 1)[0].strip() != bad_field)
+                ]
+                if len(kept) != len(vals):
+                    kwargs[key] = kept
+                    removed = True
+        return removed
+
     def _dispatch_with_kwarg_strip():
-        for _attempt in range(4):
+        for _attempt in range(6):
             try:
                 return method(**kwargs)
             except TypeError as exc:
@@ -1438,7 +1462,7 @@ def run_tool_call(agent, tool_call):
                     r"unexpected keyword argument '([^']+)'", str(exc),
                 )
                 if (
-                    _attempt < 3
+                    _attempt < 5
                     and m_unexpected
                     and m_unexpected.group(1) in kwargs
                 ):
@@ -1448,6 +1472,29 @@ def run_tool_call(agent, tool_call):
                         "daadit_ai_mistral.tool_dispatch: %s rejected "
                         "kwarg %r — dropped it and retrying",
                         fn_name, bad_kwarg,
+                    )
+                    continue
+                raise
+            except ValueError as exc:
+                # mistral-medium routinely hallucinates extra field names
+                # alongside valid ones (prod: product.template searched
+                # with x_product_owner_id PLUS invented x_product_manager_id
+                # etc.). Odoo rejects the WHOLE call on the first invalid
+                # field, so the valid field never gets read and the user
+                # gets no answer. Strip the offending field from
+                # fields/groupby/aggregates and retry, keeping the valid
+                # ones. (v19.0.4.2.6)
+                m_field = re.search(r"Invalid field '([^']+)'", str(exc))
+                if (
+                    _attempt < 5
+                    and m_field
+                    and _strip_invalid_field(m_field.group(1))
+                ):
+                    _logger.info(
+                        "daadit_ai_mistral.tool_dispatch: %s rejected "
+                        "invalid field %r — dropped it and retrying "
+                        "(remaining fields=%s)",
+                        fn_name, m_field.group(1), kwargs.get("fields"),
                     )
                     continue
                 raise
