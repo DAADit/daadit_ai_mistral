@@ -47,6 +47,55 @@ _logger = logging.getLogger(__name__)
 _PATCHED = False
 
 
+def _diag_nonmistral_delegation(api_self, where, kwargs):
+    """Persist a structure-only record to ir.logging every time our
+    patch hands an LLM call to stock because provider != 'mistral'.
+
+    This is the exact point where a call that SHOULD have been Mistral
+    slips through to stock's openai/google path (and, with no openai
+    key, raises the 'No API key set for provider openai' dialog). We
+    log the provider value, model kwarg, and a short caller stack —
+    names only, no message content — so the slip's origin is
+    deterministic instead of guessed. (v19.0.4.2.2, diagnostic.)
+    """
+    try:
+        import sys
+        provider = getattr(api_self, "provider", None)
+        model = None
+        for k in _MODEL_KEYS:
+            if kwargs.get(k):
+                model = kwargs.get(k)
+                break
+        frames = []
+        frame = sys._getframe(2)
+        depth = 0
+        while frame is not None and depth < 18:
+            frames.append(frame.f_code.co_name)
+            frame = frame.f_back
+            depth += 1
+        env = getattr(api_self, "env", None)
+        if env is not None:
+            env["ir.logging"].sudo().create({
+                "name": "daadit_ai_mistral.nonmistral",
+                "type": "server",
+                "level": "WARNING",
+                "message": (
+                    "NONMISTRAL_DELEGATION where=%s provider=%r model=%r "
+                    "router_depth=%s stack=%s" % (
+                        where, provider, model,
+                        getattr(tool_dispatch.router_state, "depth", 0),
+                        frames,
+                    )
+                )[:8000],
+                "path": "daadit_ai_mistral",
+                "func": "_diag_nonmistral_delegation",
+                "line": "0",
+            })
+            env.cr.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def patch_llm_api_service() -> bool:
     """Install the Mistral-aware patch on ``LLMApiService``.
 
@@ -170,6 +219,7 @@ def patch_llm_api_service() -> bool:
 
     def _patched_request_llm(api_self, *args, **kwargs):
         if getattr(api_self, "provider", None) != "mistral":
+            _diag_nonmistral_delegation(api_self, "request_llm", kwargs)
             if original_request_llm is None:
                 raise AttributeError(
                     "LLMApiService.request_llm not found on stock; "
@@ -212,6 +262,7 @@ def patch_llm_api_service() -> bool:
         strings; we wrap it in a tuple so unpacking works.
         """
         if getattr(api_self, "provider", None) != "mistral":
+            _diag_nonmistral_delegation(api_self, "_request_llm", kwargs)
             if original_request_llm_internal is None:
                 raise AttributeError(
                     "LLMApiService._request_llm not found on stock; "

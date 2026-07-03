@@ -1443,6 +1443,11 @@ class AIAgent(models.Model):
 
         try:
             from odoo.addons.ai.utils.llm_api_service import LLMApiService
+            from ..services import llm_api_patch
+            # Guarantee the Mistral patch is installed before we use
+            # provider='mistral' — mirrors the schedule module, which
+            # does the same before its headless runs. Idempotent.
+            llm_api_patch.patch_llm_api_service()
         except ImportError as exc:
             return {"error": (
                 "LLM service unavailable (%s). Answer with your own "

@@ -7,6 +7,26 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.2.2 — 2026-07-03
+
+Diagnose + belt-and-suspenders for the "No API key set for provider
+'openai'" dialog that appeared on the first router test. The router's
+own try/except returns an error dict (never a dialog), so the raise
+is at the concierge/stock level — a call that should have been Mistral
+slipped through to stock's openai path. No daadit REQ row for that
+turn confirmed the failure is *before* our Mistral pipeline runs.
+
+* **Structure-only delegation trace.** `_diag_nonmistral_delegation`
+  writes one ir.logging row every time `_patched_request_llm` /
+  `_patched_request_llm_internal` hands a call to stock because
+  provider != 'mistral' — capturing provider, model kwarg, router
+  depth, and an 18-frame caller-name stack (names only, no content).
+  This pins the exact slip site on the next reproduction instead of
+  guessing.
+* **Router installs the patch explicitly** before constructing
+  `LLMApiService(provider='mistral')`, mirroring the (working)
+  schedule module. Idempotent; harmless if already installed.
+
 ## 19.0.4.2.1 — 2026-07-03
 
 Router hardening after an adversarial review of v19.0.4.2.0 (4 lenses,
