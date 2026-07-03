@@ -1352,8 +1352,40 @@ def run_tool_call(agent, tool_call):
                 fn_name, requested_model or "<unknown>",
             )
 
+    # ------------------------------------------------------------------
+    # Unexpected-kwarg strip-retry (v19.0.4.1.5)
+    # ------------------------------------------------------------------
+    # Prod log #115: the model passed ``fields=[...]`` to read_group,
+    # which doesn't take it — a whole tool-loop iteration burned on a
+    # kwarg that could simply be dropped. Strip kwargs the method
+    # rejects (max 3, defensive) and retry instead of failing. Any
+    # TypeError that is NOT an unexpected-kwarg (or survives the
+    # strips) falls through to the existing handler below.
+    def _dispatch_with_kwarg_strip():
+        for _attempt in range(4):
+            try:
+                return method(**kwargs)
+            except TypeError as exc:
+                m_unexpected = re.search(
+                    r"unexpected keyword argument '([^']+)'", str(exc),
+                )
+                if (
+                    _attempt < 3
+                    and m_unexpected
+                    and m_unexpected.group(1) in kwargs
+                ):
+                    bad_kwarg = m_unexpected.group(1)
+                    kwargs.pop(bad_kwarg)
+                    _logger.info(
+                        "daadit_ai_mistral.tool_dispatch: %s rejected "
+                        "kwarg %r — dropped it and retrying",
+                        fn_name, bad_kwarg,
+                    )
+                    continue
+                raise
+
     try:
-        result = method(**kwargs)
+        result = _dispatch_with_kwarg_strip()
     except TypeError as exc:
         sig_hint = _build_signature_hint(method, fn_name)
         _logger.warning(

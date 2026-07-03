@@ -7,6 +7,38 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.1.5 — 2026-07-03
+
+The real panel fix: reconstruct what the bare entry point doesn't
+send. Evidence from prod (16:59 UTC turn): agent resolution
+succeeded (no diagnostics row, no dispatch errors) yet the model
+produced narration-and-questions with zero tool calls — because on
+the standalone panel path the Enterprise controller passes NEITHER
+the agent's system prompt NOR its tools to the LLM service.
+Stock's OpenAI branch rebuilds those deeper down; on the Mistral
+branch that responsibility is ours.
+
+### Patch
+
+* **Tool reconstruction** — when the caller passes no tools and an
+  agent is resolved, build the tool list from
+  ``agent.topic_ids.tool_ids`` (``ai.agent``-model server actions,
+  slugged like the schedule module does) and annotate via
+  ``TOOL_SCHEMAS``.
+* **System-prompt reconstruction** — when no system message in the
+  conversation contains the agent's prompt opening (120-char
+  probe), prepend ``agent.system_prompt``. Runs before the
+  language-mirror and runtime-clock injections so they merge into
+  it as usual.
+* **Request-structure telemetry** — one INFO row per chat turn in
+  ``ir.logging``: model, agent id, threadlocal presence, message
+  count, role sequence, total system-prompt length, tool count +
+  first 12 tool names. Shape only — no content, no PII.
+* **Unexpected-kwarg strip-retry in tool dispatch** — prod log
+  #115 showed ``read_group(fields=...)`` burning an iteration on a
+  kwarg the method doesn't take. Now stripped (max 3) and retried
+  server-side.
+
 ## 19.0.4.1.4 — 2026-07-03
 
 Panel agent resolution, round two — v19.0.4.1.3's fallbacks (context

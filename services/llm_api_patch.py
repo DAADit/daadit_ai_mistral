@@ -645,6 +645,21 @@ def _translate_to_chat_language(client, model, ref_messages, text):
         return text
 
 
+def _slug_tool_name(action_name):
+    """Map an ``ir.actions.server`` display name to its dispatch slug.
+
+    Mirror of the helper in ``daadit_ai_agent_schedule`` (kept local —
+    this module must not depend on the schedule module):
+    ``"AI: Read group"`` → ``ir_actions_server_read_group``.
+    """
+    import re as _re
+    name = (action_name or "").strip()
+    if ":" in name:
+        name = name.split(":", 1)[1]
+    slug = _re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+    return "ir_actions_server_" + slug if slug else ""
+
+
 def _resolve_agent(api_self, request_kwargs=None):
     """Find the ``ai.agent`` record that triggered this chat call.
 
@@ -1247,7 +1262,37 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     #   call → if tool_calls, run each on the agent and feed back as
     #   ``role: tool`` messages → call again. Stop when the model
     #   returns a final text response OR we hit ``MAX_ITER``.
+    _had_threadlocal = bool(getattr(tool_dispatch.current_agent, "record", None))
     agent = _resolve_agent(api_self, request_kwargs=kwargs)
+
+    # ---- Reconstruct tools from agent topics (v19.0.4.1.5) ----------
+    # On the standalone AI chat-panel path the Enterprise controller
+    # calls the LLM service directly and passes NO tools — stock's
+    # OpenAI branch rebuilds them deeper down, so on the Mistral
+    # branch that responsibility is OURS. Without this, the model
+    # can only narrate ("ik ga eerst opzoeken…") and ask questions,
+    # exactly what prod showed at 16:59 UTC (zero dispatch rows in
+    # ir.logging for that turn).
+    if agent is not None and not normalized_tools:
+        try:
+            names = []
+            for action in agent.sudo().topic_ids.tool_ids:
+                if action.model_id and action.model_id.model == "ai.agent":
+                    slug = _slug_tool_name(action.name)
+                    if slug and slug not in names:
+                        names.append(slug)
+            if names:
+                normalized_tools = tool_dispatch.annotate_tools(names)
+                _logger.info(
+                    "daadit_ai_mistral.llm_api_patch: caller passed no "
+                    "tools — injected %d tool defs from agent %s topics: %s",
+                    len(names), agent.id, names,
+                )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.llm_api_patch: topic-tool "
+                "reconstruction failed; continuing without tools"
+            )
 
     # ---- Per-agent overrides ----------------------------------------
     # If the agent has explicit ``daadit_mistral_temperature`` /
@@ -1273,8 +1318,79 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             pass
 
     client = MistralClient.from_env(api_self.env)
-    conversation = _inject_language_mirror(list(messages))
+    conversation = list(messages)
+
+    # ---- Reconstruct the agent system prompt (v19.0.4.1.5) ----------
+    # Same bare-entry-point gap as the tools above: the panel path
+    # sends the raw user message without the agent's system prompt,
+    # so the model answers without persona, domain map or the
+    # act-don't-ask directive. If the resolved agent has a prompt
+    # and no system message in the conversation contains its opening
+    # (first 120 chars as probe), prepend it.
+    if agent is not None:
+        try:
+            sys_prompt = (agent.sudo().system_prompt or "").strip()
+            if sys_prompt:
+                probe = sys_prompt[:120]
+                already_there = any(
+                    isinstance(m, dict) and m.get("role") == "system"
+                    and probe in (m.get("content") or "")
+                    for m in conversation
+                )
+                if not already_there:
+                    conversation.insert(
+                        0, {"role": "system", "content": sys_prompt},
+                    )
+                    _logger.info(
+                        "daadit_ai_mistral.llm_api_patch: caller sent no "
+                        "agent system prompt — prepended %d chars from "
+                        "agent %s", len(sys_prompt), agent.id,
+                    )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.llm_api_patch: system-prompt "
+                "reconstruction failed; continuing"
+            )
+
+    conversation = _inject_language_mirror(conversation)
     conversation = _inject_runtime_context(conversation)
+
+    # ---- Request-structure telemetry (v19.0.4.1.5) -------------------
+    # One INFO row per chat turn with SHAPE only (roles, counts,
+    # tool names, booleans) — no message content, no PII. This is what
+    # turns the next "the agent behaves oddly" report into a
+    # deterministic diagnosis instead of another guessing round.
+    try:
+        roles = ",".join(
+            m.get("role", "?") for m in conversation if isinstance(m, dict)
+        )
+        sys_len = sum(
+            len(m.get("content") or "")
+            for m in conversation
+            if isinstance(m, dict) and m.get("role") == "system"
+        )
+        tool_names_dbg = [
+            t.get("function", {}).get("name", "?")
+            for t in (normalized_tools or [])
+        ][:12]
+        api_self.env["ir.logging"].sudo().create({
+            "name": "daadit_ai_mistral.request",
+            "type": "server",
+            "level": "INFO",
+            "message": (
+                f"REQ model={model} agent={agent.id if agent else None} "
+                f"threadlocal={_had_threadlocal} msgs={len(conversation)} "
+                f"roles=[{roles}] sys_len={sys_len} "
+                f"tools={len(normalized_tools or [])}:{tool_names_dbg}"
+            )[:8000],
+            "path": "daadit_ai_mistral",
+            "func": "_request_llm_mistral",
+            "line": "0",
+        })
+        api_self.env.cr.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
     iteration = 0
     MAX_ITER = 6
     response = None
