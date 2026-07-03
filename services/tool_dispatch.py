@@ -1263,6 +1263,31 @@ def run_tool_call(agent, tool_call):
             fn_name, requested_model or "<unknown>",
         )
 
+    # ------------------------------------------------------------------
+    # Default domain/having when the LLM omits them (v19.0.4.1.1)
+    # ------------------------------------------------------------------
+    # ``_normalize_json_string_param`` repairs domains that arrive
+    # empty or malformed, but it only runs for keys PRESENT in the
+    # arguments. When Mistral omits ``domain`` entirely (observed on
+    # prod: `search(model_name='crm.lead', fields=[...])` with no
+    # domain at all), stock's ``_ai_tool_search(domain='')`` runs
+    # ``json.loads('')`` → ValueError("Invalid JSON format for custom
+    # domain") and the whole tool call dies on what should be an
+    # unfiltered search. Inject the JSON-encoded empty domain for the
+    # tools whose stock implementation json.loads-es these params.
+    if fn_name in ("ir_actions_server_search",
+                   "ir_actions_server_read_group"):
+        for _dom_key in ("domain", "having"):
+            if _dom_key == "having" and fn_name == "ir_actions_server_search":
+                continue
+            if not kwargs.get(_dom_key):
+                kwargs[_dom_key] = "[]"
+                _logger.info(
+                    "daadit_ai_mistral.tool_dispatch: injected default "
+                    "%s='[]' for %s on %s (LLM omitted the argument)",
+                    _dom_key, fn_name, requested_model or "<unknown>",
+                )
+
     try:
         result = method(**kwargs)
     except TypeError as exc:

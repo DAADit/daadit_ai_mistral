@@ -7,6 +7,25 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.1.1 — 2026-07-03
+
+Hotfix: inject default `domain='[]'` (and `having='[]'` for
+read_group) when the LLM omits the argument entirely.
+
+Observed on production (Ask AI, Dutch chat "Waar komen onze leads
+deze maand vandaan..."): Mistral called
+`ir_actions_server_search(model_name='crm.lead', fields=[...])`
+with no `domain` at all. `_normalize_json_string_param` only runs
+for keys present in the arguments, so stock's
+`_ai_tool_search(domain='')` hit `json.loads('')` →
+`ValueError("Invalid JSON format for custom domain")` and the tool
+call died on what should have been an unfiltered search. The chat
+pipeline then surfaced no usable answer (user saw their own
+question echoed back).
+
+Same injection pattern as the v19.0.3.13.2 default-fields fix, one
+block lower in `run_tool_call`. Logged at INFO for visibility.
+
 ## 19.0.4.1.0 — 2026-05-25
 
 Chatter attribution for AI write-tools. Every autonomous change now
