@@ -32,7 +32,7 @@ this file to keep only the override that matches.
 """
 import logging
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 
 from ..services.mistral_client import (
     is_mistral_model,
@@ -894,6 +894,57 @@ class AIAgent(models.Model):
     #   recover and try again — never raise into the chat loop.          #
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # Chatter attribution (v19.0.4.1.0)                                  #
+    #                                                                    #
+    # Every write-side AI tool posts an internal note on the target      #
+    # record after it succeeds, attributed to this agent's own partner   #
+    # — exactly like OdooBot's own messages appear under "OdooBot".      #
+    #                                                                    #
+    # Why: without attribution, a helpdesk manager who sees              #
+    # "Assigned to Wytse" in a ticket's tracking has no way to tell      #
+    # whether Nick did that manually or a scheduled agent did it. The    #
+    # write-tools' create_uid is always the schedule's "Run as" user     #
+    # (Nick for our current setup), so tracking would misattribute       #
+    # every autonomous change to a human. The chatter note surfaces      #
+    # the agent identity while `create_uid` on the mail.message row      #
+    # keeps the real invoking user for audit.                            #
+    #                                                                    #
+    # The helper is a no-op on records that don't inherit                #
+    # ``mail.thread``, and swallows any messaging error — a logging      #
+    # hiccup must never break the tool call itself.                      #
+    # ------------------------------------------------------------------ #
+
+    def _daadit_post_agent_message(self, record, body):
+        """Post an internal note on ``record`` attributed to this agent.
+
+        Attribution: the chatter shows the agent's own partner as
+        author (like OdooBot posts appear under "OdooBot"), while
+        ``create_uid`` on the message row still records the actual
+        invoking user for a full audit trail.
+
+        No-op when the target record does not inherit ``mail.thread``.
+        Never raises — a chatter/logging failure must not break the
+        tool call.
+        """
+        self.ensure_one()
+        if not record or not hasattr(record, "message_post"):
+            return
+        author_id = self.partner_id.id if self.partner_id else False
+        try:
+            record.message_post(
+                body=body,
+                author_id=author_id or False,
+                message_type="notification",
+                subtype_xmlid="mail.mt_note",
+            )
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "daadit_ai_mistral: chatter attribution failed on "
+                "%s(%s) by agent=%s — tool result unaffected",
+                record._name, record.id, self.name,
+            )
+
     def _ai_tool_assign_user(self, model_name=None, record_id=None,
                              user_id=None, **_extra):
         """Assign a user to a record by setting its ``user_id`` field.
@@ -984,6 +1035,14 @@ class AIAgent(models.Model):
                 "Could not assign user: %s. Check that the calling "
                 "user has write rights on '%s'." % (exc, model_name)
             )}
+        self._daadit_post_agent_message(
+            record,
+            _(
+                "🤖 <strong>%(agent)s</strong> assigned this record to "
+                "<strong>%(user)s</strong>.",
+                agent=self.name, user=user.name,
+            ),
+        )
         return {
             "ok": True,
             "model_name": model_name,
@@ -1184,6 +1243,18 @@ class AIAgent(models.Model):
                 "Could not schedule activity: %s. Check that the calling "
                 "user has rights to create activities on '%s'." % (exc, model_name)
             )}
+        self._daadit_post_agent_message(
+            record,
+            _(
+                "🤖 <strong>%(agent)s</strong> scheduled activity "
+                "<strong>%(summary)s</strong> for <strong>%(user)s</strong> "
+                "on <strong>%(deadline)s</strong>.",
+                agent=self.name,
+                summary=target_summary or act_type.name or _("(no summary)"),
+                user=assignee.name,
+                deadline=deadline.strftime("%Y-%m-%d"),
+            ),
+        )
         return {
             "ok": True,
             "model_name": model_name,

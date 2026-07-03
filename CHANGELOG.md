@@ -7,6 +7,39 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.1.0 — 2026-05-25
+
+Chatter attribution for AI write-tools. Every autonomous change now
+posts an internal note on the target record's chatter, attributed to
+the agent's own partner — exactly like OdooBot's own messages appear
+under "OdooBot". Without this, an operator who saw "Assigned to
+Wytse" in a ticket's tracking had no way to tell whether Nick did
+that manually or a scheduled agent did it (the write-tools' create_uid
+is always the schedule's "Run as" user).
+
+### Minor
+
+* **`ai.agent._daadit_post_agent_message(record, body)`** — new helper
+  that calls `record.message_post(author_id=self.partner_id.id,
+  subtype_xmlid='mail.mt_note')`. No-op when the target doesn't
+  inherit `mail.thread`. Swallows messaging errors — a chatter hiccup
+  must not break the tool result.
+* **`_ai_tool_assign_user`** posts on success: *"🤖 &lt;Agent&gt;
+  assigned this record to &lt;User&gt;."*
+* **`_ai_tool_schedule_activity`** posts on success: *"🤖 &lt;Agent&gt;
+  scheduled activity &lt;Summary&gt; for &lt;User&gt; on &lt;Date&gt;."*
+
+Skipped/duplicate cases (already_assigned, duplicate activity) do
+NOT post — nothing happened, no note needed.
+
+### Why the note and not just tracking?
+
+Odoo's automatic tracking on `user_id` shows "Nick assigned this to
+Wytse" — because `create_uid` on the write is Nick (the run-as user).
+That's technically true but functionally misleading: the *decision*
+came from an agent, not Nick. The chatter note surfaces the actual
+actor while the audit metadata still records the underlying user.
+
 ## 19.0.4.0.0 — 2026-05-21
 
 Adds two write-side AI tools so autonomous agents (e.g. the
