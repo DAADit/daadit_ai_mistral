@@ -7,6 +7,37 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.1.2 — 2026-07-03
+
+Tool-loop robustness, round two. After v19.0.4.1.1 the model DID
+run searches, but prod logs (#87–#89, same afternoon) showed three
+consecutive failures that burned the whole tool budget and made
+Ask AI fall back to "which model should I use?" counter-questions:
+
+1. `group_by` kwarg (stock expects `groupby`) → TypeError.
+2. `aggregates=['count']` → ORM "Invalid field 'count'".
+3. `aggregates=['id']` → ORM "Aggregate method is mandatory".
+
+Plus the silent killer: Mistral has no clock and resolved
+"deze maand" to **October 2023**, so even a successful query would
+have returned empty results.
+
+### Patch
+
+* `tool_dispatch._PARAM_ALIASES` — added `group_by`/`groupBy`/
+  `group_bys`/`groupbys` → `groupby` and `aggregate` → `aggregates`.
+* `tool_dispatch.run_tool_call` — normalises well-known count
+  spellings (`count`, `id`, `*`, `count(*)`, `id:count`, …) to the
+  ORM's literal `__count`, dedupes, and injects
+  `aggregates=['__count']` when the model omits aggregates
+  entirely. Field aggregates like `amount_total:sum` pass through
+  untouched.
+* `llm_api_patch._inject_runtime_context` (new) — appends the
+  current date/time (Europe/Amsterdam + UTC) to the system message
+  on every request, with the instruction to resolve all relative
+  dates against it. Same injection strategy as the language
+  mirror.
+
 ## 19.0.4.1.1 — 2026-07-03
 
 Hotfix: inject default `domain='[]'` (and `having='[]'` for

@@ -671,7 +671,24 @@ _PARAM_ALIASES = {
     "model_technical_name": "model_name",
     "ir_model": "model_name",
     "modelName": "model_name",
+    # read_group: prod logs (2026-07-03, #87) show Mistral emitting the
+    # snake-split spelling `group_by` — stock's kwarg is `groupby`.
+    "group_by": "groupby",
+    "groupBy": "groupby",
+    "group_bys": "groupby",
+    "groupbys": "groupby",
+    "aggregate": "aggregates",
 }
+
+
+# read_group aggregate spellings Mistral actually emits versus what
+# Odoo's ORM accepts. Prod logs (2026-07-03, #88/#89): `count` →
+# "Invalid field 'count'", `id` → "Aggregate method is mandatory for
+# 'id'". The ORM's record-count aggregate is the literal `__count`.
+_COUNT_AGGREGATE_SPELLINGS = frozenset({
+    "count", "id", "*", "count(*)", "count_all", "__count__",
+    "id:count", "count:count", "total", "count()",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -1287,6 +1304,53 @@ def run_tool_call(agent, tool_call):
                     "%s='[]' for %s on %s (LLM omitted the argument)",
                     _dom_key, fn_name, requested_model or "<unknown>",
                 )
+
+    # ------------------------------------------------------------------
+    # read_group aggregate normalisation (v19.0.4.1.2)
+    # ------------------------------------------------------------------
+    # Mistral spells the record-count aggregate as `count` / `id` /
+    # `count(*)` — Odoo's ORM only accepts the literal `__count`, and
+    # a bare field name without `:method` is likewise rejected. Both
+    # failure modes burned tool-loop iterations on prod (logs #88/#89).
+    # Normalise the well-known count spellings; leave everything else
+    # (e.g. `amount_total:sum`) untouched.
+    if fn_name == "ir_actions_server_read_group":
+        aggs = kwargs.get("aggregates")
+        if isinstance(aggs, str):
+            aggs = [aggs]
+        if isinstance(aggs, list):
+            fixed = []
+            changed = False
+            for a in aggs:
+                key = str(a).strip().lower() if a is not None else ""
+                if key in _COUNT_AGGREGATE_SPELLINGS:
+                    fixed.append("__count")
+                    changed = True
+                else:
+                    fixed.append(a)
+            # Dedupe while preserving order (count + id → one __count).
+            seen_aggs = set()
+            deduped = []
+            for a in fixed:
+                if a not in seen_aggs:
+                    seen_aggs.add(a)
+                    deduped.append(a)
+            kwargs["aggregates"] = deduped
+            if changed:
+                _logger.info(
+                    "daadit_ai_mistral.tool_dispatch: normalised "
+                    "aggregates %s → %s for %s on %s",
+                    aggs, deduped, fn_name, requested_model or "<unknown>",
+                )
+        elif not aggs:
+            # No aggregates at all → counting records is the only
+            # sensible default for a grouped query.
+            kwargs["aggregates"] = ["__count"]
+            _logger.info(
+                "daadit_ai_mistral.tool_dispatch: injected default "
+                "aggregates=['__count'] for %s on %s",
+                fn_name, requested_model or "<unknown>",
+            )
 
     try:
         result = method(**kwargs)

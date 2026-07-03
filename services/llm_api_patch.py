@@ -779,6 +779,56 @@ def _inject_language_mirror(conversation):
     return out
 
 
+def _inject_runtime_context(conversation):
+    """Append the current date/time to the conversation's system message.
+
+    Why: Mistral gets no clock. On prod (2026-07-03, log #88) a Dutch
+    "deze maand"-question was answered by filtering ``create_date`` on
+    **October 2023** — the model guessed a date from its training data
+    and produced confidently wrong, empty results. One line of runtime
+    context eliminates the whole failure class for every relative-date
+    question ("deze maand", "vorige week", "dit kwartaal").
+
+    Same injection strategy as ``_inject_language_mirror``: append to
+    the first system message, or prepend a fresh one. Returns a new
+    list; does not mutate the input.
+    """
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        now_local = now_utc.astimezone(ZoneInfo("Europe/Amsterdam"))
+        local_label = "Europe/Amsterdam"
+    except Exception:  # noqa: BLE001
+        now_local = now_utc
+        local_label = "UTC"
+    instruction = (
+        f"CURRENT DATE/TIME: it is now {now_local.strftime('%A %Y-%m-%d %H:%M')} "
+        f"({local_label}); {now_utc.strftime('%Y-%m-%d %H:%M')} UTC. "
+        f"Resolve every relative date reference (today, this month, "
+        f"last week, dit kwartaal, deze maand) against THIS date — "
+        f"never against your training data."
+    )
+    if not conversation:
+        return [{"role": "system", "content": instruction}]
+    out = []
+    injected = False
+    for m in conversation:
+        if not injected and isinstance(m, dict) and m.get("role") == "system":
+            new_msg = dict(m)
+            existing = new_msg.get("content") or ""
+            new_msg["content"] = (
+                f"{existing}\n\n{instruction}" if existing else instruction
+            )
+            out.append(new_msg)
+            injected = True
+        else:
+            out.append(m)
+    if not injected:
+        out.insert(0, {"role": "system", "content": instruction})
+    return out
+
+
 def _request_llm_mistral(api_self, *args, **kwargs):
     """Mistral-side replacement for ``LLMApiService.request_llm``.
 
@@ -1020,6 +1070,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     client = MistralClient.from_env(api_self.env)
     conversation = _inject_language_mirror(list(messages))
+    conversation = _inject_runtime_context(conversation)
     iteration = 0
     MAX_ITER = 6
     response = None
