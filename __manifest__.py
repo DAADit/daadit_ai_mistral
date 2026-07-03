@@ -32,7 +32,7 @@ in their respective files. Multiple candidate names are wrapped to survive
 across Odoo versions; verify against the installed Enterprise source on your
 Odoo.sh dev branch before relying on this in production.
 """,
-    "version": "19.0.4.2.6",
+    "version": "19.0.4.3.0",
     "category": "Productivity/Discuss",
     "author": "DAADit",
     "website": "https://daadit.group",
@@ -49,6 +49,7 @@ Odoo.sh dev branch before relying on this in production.
         "security/ir.model.access.csv",
         "security/mistral_usage_security.xml",
         "data/ai_tools.xml",
+        "data/cost_cap_params.xml",
         "views/res_config_settings_views.xml",
         "views/mistral_usage_views.xml",
         "views/ai_agent_views.xml",

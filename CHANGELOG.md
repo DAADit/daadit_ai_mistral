@@ -7,6 +7,40 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.3.0 — 2026-07-04
+
+Daily cost cap (spend circuit-breaker). With six query agents on
+`mistral-large-latest` and routing doubling calls on one shared key,
+an accidental loop or a heavy testing day could run up real money.
+This adds a hard daily budget: once today's spend reaches the cap,
+every further Mistral call is refused with a clear, translated
+"budget reached — paused until tomorrow" message, and the admin is
+e-mailed once per day. Budget resets at local midnight.
+
+### Feature
+
+* `services/cost_cap.py` — reads the stored `estimated_cost_usd` on
+  `daadit_ai_mistral.usage` (already booked per call, per agent),
+  sums today's spend (aggregated read on indexed `create_date`), and
+  compares to the cap. Fail-open: any error in the breaker leaves
+  chat running.
+* Gate at the top of `_request_llm_mistral` — the single choke point
+  every Mistral chat call funnels through (concierge, specialists,
+  routed sub-runs, scheduled agents), so one check covers all.
+* `data/cost_cap_params.xml` — seeds `daily_cost_cap_usd = 5`
+  (Mistral bills in USD; ~EUR 4.6) and an empty
+  `cost_cap_notify_email`. Both `noupdate=1` so admins tune them in
+  System Parameters without an upgrade reverting the change.
+* Admin notification: one e-mail per day to
+  `cost_cap_notify_email` (fallback: admin user / company e-mail),
+  guarded by a date marker so it never spams.
+
+Soft ceiling by design: the check sums already-recorded usage, so the
+call that crosses the line still completes and everything after it is
+blocked — exactly the runaway protection intended, not a to-the-cent
+guarantee. Per-agent caps were considered and deferred (global only,
+per Nick's choice).
+
 ## 19.0.4.2.6 — 2026-07-04
 
 Strip hallucinated fields instead of failing the whole search. Nick

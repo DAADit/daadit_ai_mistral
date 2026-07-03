@@ -1473,6 +1473,31 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
 
+    # --- Daily cost cap (v19.0.4.3.0) --------------------------------
+    # Single choke point for every Mistral chat call. When today's spend
+    # has reached the configured cap, refuse the call with a clear,
+    # translated message instead of hitting Mistral — and notify the
+    # admin once per day. Fail-open: a broken breaker never blocks chat.
+    try:
+        from . import cost_cap
+        blocked, spent, cap = cost_cap.check(api_self.env)
+        if blocked:
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: daily cost cap reached "
+                "(%.2f/%.2f) — refusing call for agent=%s",
+                spent, cap, agent.id if agent else None,
+            )
+            msg = _translate_to_chat_language(
+                client, model, conversation,
+                cost_cap.blocked_message_en(spent, cap),
+            )
+            return [msg]
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.llm_api_patch: cost-cap gate raised; "
+            "failing open"
+        )
+
     while iteration < MAX_ITER:
         # Build the per-call `extra` payload. When the caller passed a
         # JSON schema (AI Fields, structured automation actions), turn
