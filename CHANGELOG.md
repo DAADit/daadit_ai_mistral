@@ -7,6 +7,29 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.2.4 — 2026-07-03
+
+The missing flag that meant routing never actually fired. All three
+custom AI tools (`AI: Assign User`, `AI: Schedule Activity`,
+`AI: Ask Agent`) were created without `use_in_ai=True`. Stock
+`ai.topic.tool_ids` is domain-filtered on that flag, so linking any of
+them to a topic was **silently dropped** — the write returns ok, the
+m2m stays empty. Consequence: the "Agent Routing" topic had no tool,
+so Ask AI never had the router tool; the good answers it gave came
+from answering directly via its own domain topics (consolidation),
+not from delegation. The "Helpdesk Actions" topic was equally empty.
+
+### Patch
+
+* `data/ai_tools.xml` — `<field name="use_in_ai" eval="True"/>` on all
+  three tool records so fresh installs/staging get it. (Existing prod
+  records were fixed in place; the file is `noupdate="1"`, so upgrades
+  won't reset them.)
+
+After this, `Agent Routing` → [AI: Ask Agent] and `Helpdesk Actions`
+→ [AI: Assign User, AI: Schedule Activity] hold, and Ask AI actually
+exposes the router tool to Mistral.
+
 ## 19.0.4.2.3 — 2026-07-03
 
 Force tool use on the first turn. Prod (Sales Agent / routed sub-run)

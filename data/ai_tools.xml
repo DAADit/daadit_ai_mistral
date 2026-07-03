@@ -24,6 +24,10 @@
 
         <record id="ir_actions_server_assign_user" model="ir.actions.server">
             <field name="name">AI: Assign User</field>
+            <!-- use_in_ai flags this as an AI tool so it can be linked to
+                 ai.topic.tool_ids (which is domain-filtered on this flag).
+                 Without it the m2m link is silently dropped. (v19.0.4.2.4) -->
+            <field name="use_in_ai" eval="True"/>
             <field name="model_id" ref="ai.model_ai_agent"/>
             <field name="state">code</field>
             <field name="code">ai['result'] = record._ai_tool_assign_user(
@@ -35,6 +39,7 @@
 
         <record id="ir_actions_server_schedule_activity" model="ir.actions.server">
             <field name="name">AI: Schedule Activity</field>
+            <field name="use_in_ai" eval="True"/>
             <field name="model_id" ref="ai.model_ai_agent"/>
             <field name="state">code</field>
             <field name="code">ai['result'] = record._ai_tool_schedule_activity(
@@ -56,6 +61,7 @@
              don't tempt fate). -->
         <record id="ir_actions_server_ask_agent" model="ir.actions.server">
             <field name="name">AI: Ask Agent</field>
+            <field name="use_in_ai" eval="True"/>
             <field name="model_id" ref="ai.model_ai_agent"/>
             <field name="state">code</field>
             <field name="code">ai['result'] = record._ai_tool_ask_agent(
