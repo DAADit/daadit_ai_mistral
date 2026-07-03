@@ -7,6 +7,30 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.2.5 — 2026-07-03
+
+Language-independent sub-run failure signal. With the `use_in_ai` fix
+(v4.2.4) routing finally fired for real — prod logs show Ask AI (11
+tools incl. `ask_agent`) → Product Agent sub-run. But when the Product
+Agent burned its budget (it hallucinated non-existent custom fields
+`x_product_manager_id` etc.), the sub-run produced the "couldn't find
+the AI Agent record" fallback sentinel, `_translate_to_chat_language`
+rendered it in Dutch, and the router's English-prefix filter missed it
+— so the concierge relayed the confusing sentinel as a real answer
+instead of falling back.
+
+### Patch
+
+* `_request_llm_mistral` sets `router_state.sub_failed = True` in the
+  fallback-sentinel path (before translation) whenever depth > 0.
+* `_ai_tool_ask_agent` checks `sub_failed` alongside `exhausted` and
+  returns an error → hybrid fallback, regardless of the sentinel's
+  language. Reset each top-level turn; restored in the finally.
+
+Net effect: a routed sub-run that can't answer now cleanly hands the
+question back to the concierge (which answers with its own tools),
+instead of surfacing an internal sentinel to the user.
+
 ## 19.0.4.2.4 — 2026-07-03
 
 The missing flag that meant routing never actually fired. All three

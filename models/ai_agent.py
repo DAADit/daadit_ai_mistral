@@ -1456,6 +1456,7 @@ class AIAgent(models.Model):
 
         prev_record = getattr(tool_dispatch.current_agent, "record", None)
         prev_exhausted = getattr(tool_dispatch.router_state, "exhausted", False)
+        prev_sub_failed = getattr(tool_dispatch.router_state, "sub_failed", False)
         # Set state and run inside one try/finally so a raise anywhere —
         # including before request_llm — can never leak depth or the
         # active-agent record onto this worker thread.
@@ -1478,6 +1479,9 @@ class AIAgent(models.Model):
             exhausted = bool(
                 getattr(tool_dispatch.router_state, "exhausted", False)
             )
+            sub_failed = bool(
+                getattr(tool_dispatch.router_state, "sub_failed", False)
+            )
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 "daadit_ai_mistral.router: sub-run on %s(%s) raised %s: %s",
@@ -1491,6 +1495,7 @@ class AIAgent(models.Model):
             tool_dispatch.current_agent.record = prev_record
             tool_dispatch.router_state.depth = depth
             tool_dispatch.router_state.exhausted = prev_exhausted
+            tool_dispatch.router_state.sub_failed = prev_sub_failed
 
         if isinstance(result, (list, tuple)):
             answer = "\n\n".join(
@@ -1499,14 +1504,21 @@ class AIAgent(models.Model):
         else:
             answer = str(result or "").strip()
 
-        # The sub-run burned its whole iteration budget without producing
-        # a final text answer → what came back is truncated narration or
-        # the panel fallback sentinel, not a real answer. Report failure
-        # so the hybrid concierge falls back instead of relaying garbage.
-        if exhausted:
+        # The sub-run burned its whole iteration budget, or ended with a
+        # (possibly translated) fallback sentinel, without producing a
+        # real answer. Report failure so the hybrid concierge falls back
+        # instead of relaying garbage. sub_failed is the language-
+        # independent signal set inside the sentinel path; exhausted
+        # covers MAX_ITER; the string check is a last-resort belt.
+        if exhausted or sub_failed:
+            _logger.info(
+                "daadit_ai_mistral.router: sub-run on %s(%s) failed "
+                "(exhausted=%s sub_failed=%s) — signalling hybrid fallback",
+                target.name, target.id, exhausted, sub_failed,
+            )
             return {"error": (
-                "Agent '%s' could not complete the question within its "
-                "budget. Answer with your own tools instead." % target.name
+                "Agent '%s' could not complete the question. Answer with "
+                "your own tools instead." % target.name
             )}
         if not answer or answer.lstrip().startswith((
             "_(Mistral wanted to call", "_(Empty response",

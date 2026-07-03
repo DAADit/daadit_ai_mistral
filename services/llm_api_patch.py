@@ -1469,6 +1469,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         # thread never leaks in (v19.0.4.2.1).
         tool_dispatch.router_state.calls = 0
         tool_dispatch.router_state.exhausted = False
+        tool_dispatch.router_state.sub_failed = False
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
 
@@ -1696,6 +1697,18 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         first_choice_msg = (
             (response.get("choices") or [{}])[0].get("message") or {}
         ) if isinstance(response, dict) else {}
+        # v19.0.4.2.4: flag this as a failed sub-run BEFORE translating,
+        # so the router (_ai_tool_ask_agent) can detect the failure
+        # language-independently. Previously the sentinel was translated
+        # to the chat language (e.g. Dutch), so the router's English
+        # prefix filter missed it and relayed the confusing "kon de AI
+        # Agent-record niet vinden" sentinel to the user as a real
+        # answer. The flag closes that leak regardless of translation.
+        try:
+            if getattr(tool_dispatch.router_state, "depth", 0) > 0:
+                tool_dispatch.router_state.sub_failed = True
+        except Exception:  # noqa: BLE001
+            pass
         if first_choice_msg.get("tool_calls"):
             fallback_en = (
                 "_(Mistral wanted to call a function but I couldn't "
