@@ -42,6 +42,13 @@ _logger = logging.getLogger(__name__)
 # leftover state doesn't leak across requests on the same worker.
 current_agent = threading.local()
 
+# Router state for the ``AI: Ask Agent`` tool (v19.0.4.2.0). ``depth``
+# counts how many routed sub-runs are active on this thread; the tool
+# refuses to route when depth >= 1 (Concierge → specialist only, no
+# chains, no A→B→A loops) and the Mistral loop shortens its iteration
+# budget for sub-runs.
+router_state = threading.local()
+
 
 # ---------------------------------------------------------------------------
 # Tool name → ai.agent method mapping
@@ -346,6 +353,47 @@ TOOL_SCHEMAS = {
                 "model_name": {"type": "string"},
             },
             "required": ["action_id", "model_name"],
+        },
+    },
+    # --- DAADit router tool (v19.0.4.2.0) -------------------------------
+    "ir_actions_server_ask_agent": {
+        "description": (
+            "ROUTER TOOL — delegate a question to a specialist AI agent "
+            "by name and return its answer. Use this FIRST for any "
+            "domain question that matches a specialist (e.g. 'Sales "
+            "Agent' for pipeline/leads/quotes, 'Project Agent' for "
+            "projects/tasks/hours, 'Product Agent' for products/owners, "
+            "'Marketing Agent' for lead sources/campaigns, 'Helpdesk "
+            "SLA Agent' for tickets/SLA). Formulate the question "
+            "self-contained (the specialist does not see this "
+            "conversation). If the result contains 'error', answer the "
+            "question yourself with your other tools instead — never "
+            "show the error to the user."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent_name": {
+                    "type": "string",
+                    "description": (
+                        "Exact display name of the target agent, e.g. "
+                        "'Sales Agent', 'Project Agent', 'Product "
+                        "Agent', 'Marketing Agent', 'Helpdesk SLA "
+                        "Agent'."
+                    ),
+                },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "The full, self-contained question for the "
+                        "specialist, in the user's language. Include "
+                        "all relevant context (time ranges, names, "
+                        "filters) — the specialist cannot see this "
+                        "conversation."
+                    ),
+                },
+            },
+            "required": ["agent_name", "question"],
         },
     },
     # --- DAADit write-side tools (v19.0.4.0.0) --------------------------

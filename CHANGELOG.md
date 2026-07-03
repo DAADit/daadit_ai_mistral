@@ -7,6 +7,33 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.2.0 — 2026-07-03
+
+Router tool: **AI: Ask Agent**. On Nick's explicit decision the
+concierge (Ask AI) now delegates domain questions to the matching
+specialist agent and relays its answer — hybrid mode: on any
+routing error the concierge falls back to its own topics. This
+revisits the plan review's "definitively scrapped" verdict; the
+review's guardrail conditions ship as part of the feature:
+
+* **Max depth 1** — `tool_dispatch.router_state.depth` refuses
+  routing from within a routed sub-run, AND the router tool is
+  stripped from every sub-run's tool list (defence in depth).
+* **Tight sub-run budget** — routed runs get MAX_ITER=4 in the
+  Mistral loop instead of 6.
+* **Threadlocal swap with guaranteed restore** — the TARGET agent
+  (its allowed/blocked models, PII blocklist, tools) is active for
+  the duration of the sub-run; previous agent restored in finally.
+* **Same-user RBAC** — the sub-run executes as the calling chat
+  user; sudo only reads agent config (prompt/topics), mirroring
+  the schedule module.
+* Errors always instruct the caller to answer with its own tools
+  ("hybrid" degradation) and are never user-facing verbatim.
+
+New pieces: `ai.agent._ai_tool_ask_agent`, server action
+`ir_actions_server_ask_agent` in data/ai_tools.xml, TOOL_SCHEMAS
+entry with routing guidance, `router_state` threadlocal.
+
 ## 19.0.4.1.5 — 2026-07-03
 
 The real panel fix: reconstruct what the bare entry point doesn't

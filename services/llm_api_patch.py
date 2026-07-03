@@ -1393,6 +1393,11 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     iteration = 0
     MAX_ITER = 6
+    # Routed sub-runs (AI: Ask Agent) get a tighter loop budget: the
+    # parent turn is already paying for its own iterations, and a
+    # dwaling sub-agent must never consume the whole turn.
+    if getattr(tool_dispatch.router_state, "depth", 0) > 0:
+        MAX_ITER = 4
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
 

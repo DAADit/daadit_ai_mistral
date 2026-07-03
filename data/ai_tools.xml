@@ -49,5 +49,20 @@
 )</field>
         </record>
 
+        <!-- Router tool (v19.0.4.2.0): delegate a question to another
+             agent. Attach ONLY to concierge-level agents (Ask AI) via
+             a dedicated topic — never to specialists (the depth guard
+             plus tool-strip in the sub-run enforce this anyway, but
+             don't tempt fate). -->
+        <record id="ir_actions_server_ask_agent" model="ir.actions.server">
+            <field name="name">AI: Ask Agent</field>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="code">ai['result'] = record._ai_tool_ask_agent(
+    agent_name=agent_name,
+    question=question,
+)</field>
+        </record>
+
     </data>
 </odoo>

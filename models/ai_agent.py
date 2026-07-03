@@ -1268,6 +1268,157 @@ class AIAgent(models.Model):
         }
 
     # ------------------------------------------------------------------ #
+    # Router tool (v19.0.4.2.0) — "AI: Ask Agent"                        #
+    #                                                                    #
+    # Lets a concierge agent delegate a question to a specialist agent   #
+    # and return its answer as a tool result. Guardrails, all           #
+    # non-negotiable (from the 2026-07-03 adversarial plan review):      #
+    #                                                                    #
+    # * MAX DEPTH 1 — a routed agent cannot route further. Enforced      #
+    #   via ``tool_dispatch.router_state.depth`` AND by stripping the    #
+    #   router tool from the sub-run's tool list (defence in depth).     #
+    # * Tight budget — sub-runs get MAX_ITER=4 in the Mistral loop      #
+    #   (see llm_api_patch) instead of 6.                                #
+    # * Threadlocal swap with guaranteed restore — during the sub-run    #
+    #   the TARGET agent is active (its allowed/blocked models, PII     #
+    #   blocklist and tools apply); the previous agent is restored in    #
+    #   a finally block.                                                 #
+    # * Same user, no sudo dispatch — the sub-run executes with the      #
+    #   calling user's RBAC; sudo() is only used to read agent config    #
+    #   fields (system_prompt, topics), mirroring the schedule module.   #
+    # ------------------------------------------------------------------ #
+
+    def _ai_tool_ask_agent(self, agent_name=None, question=None, **_extra):
+        """Delegate ``question`` to the agent named ``agent_name`` and
+        return its final answer.
+
+        Returns ``{'ok': True, 'agent': <name>, 'answer': <text>}`` on
+        success, or ``{'error': '<reason>'}`` — errors always include
+        the instruction to fall back to the caller's own tools, so a
+        hybrid concierge degrades gracefully.
+        """
+        self.ensure_one()
+        from ..services.llm_api_patch import _slug_tool_name
+
+        if not agent_name or not isinstance(agent_name, str):
+            return {"error": (
+                "agent_name is required (e.g. 'Sales Agent'). "
+                "Answer with your own tools instead."
+            )}
+        if (
+            not question
+            or not isinstance(question, str)
+            or not question.strip()
+        ):
+            return {"error": (
+                "question is required (the full question for the "
+                "specialist, self-contained). Answer with your own "
+                "tools instead."
+            )}
+
+        depth = getattr(tool_dispatch.router_state, "depth", 0)
+        if depth >= 1:
+            return {"error": (
+                "Routing depth limit reached: a routed agent cannot "
+                "route further. Answer with your own tools instead."
+            )}
+
+        Agent = self.env["ai.agent"]
+        needle = agent_name.strip()
+        target = Agent.search([("name", "=ilike", needle)], limit=1)
+        if not target:
+            target = Agent.search([("name", "ilike", needle)], limit=1)
+        if not target:
+            available = Agent.search([]).mapped("name")
+            return {"error": (
+                "No agent named '%s'. Available agents: %s. "
+                "Answer with your own tools instead."
+                % (needle, ", ".join(sorted(available)))
+            )}
+        if target.id == self.id:
+            return {"error": (
+                "Refusing to route to myself. Answer with your own "
+                "tools instead."
+            )}
+        if not is_mistral_model(target.llm_model or ""):
+            return {"error": (
+                "Agent '%s' does not run on the Mistral path; cannot "
+                "route. Answer with your own tools instead." % target.name
+            )}
+
+        # Build the sub-run tool list from the TARGET's topics; strip
+        # the router tool itself so a routed agent can never see it.
+        tool_names = []
+        try:
+            for action in target.sudo().topic_ids.tool_ids:
+                if action.model_id and action.model_id.model == "ai.agent":
+                    slug = _slug_tool_name(action.name)
+                    if (
+                        slug
+                        and slug != "ir_actions_server_ask_agent"
+                        and slug not in tool_names
+                    ):
+                        tool_names.append(slug)
+        except Exception:  # noqa: BLE001
+            tool_names = []
+
+        messages = []
+        sys_prompt = (target.sudo().system_prompt or "").strip()
+        if sys_prompt:
+            messages.append({"role": "system", "content": sys_prompt})
+        messages.append({"role": "user", "content": question.strip()})
+
+        try:
+            from odoo.addons.ai.utils.llm_api_service import LLMApiService
+        except ImportError as exc:
+            return {"error": (
+                "LLM service unavailable (%s). Answer with your own "
+                "tools instead." % exc
+            )}
+
+        prev_record = getattr(tool_dispatch.current_agent, "record", None)
+        tool_dispatch.router_state.depth = depth + 1
+        tool_dispatch.current_agent.record = target
+        _logger.info(
+            "daadit_ai_mistral.router: agent %s(%s) routing question to "
+            "%s(%s) as user %s (depth %s→%s, %d tools)",
+            self.name, self.id, target.name, target.id, self.env.uid,
+            depth, depth + 1, len(tool_names),
+        )
+        try:
+            service = LLMApiService(env=self.env, provider="mistral")
+            result = service.request_llm(
+                model=target.llm_model,
+                inputs=messages,
+                tools=tool_names,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "daadit_ai_mistral.router: sub-run on %s(%s) raised %s: %s",
+                target.name, target.id, type(exc).__name__, exc,
+            )
+            return {"error": (
+                "Routed agent '%s' failed (%s). Answer with your own "
+                "tools instead." % (target.name, type(exc).__name__)
+            )}
+        finally:
+            tool_dispatch.current_agent.record = prev_record
+            tool_dispatch.router_state.depth = depth
+
+        if isinstance(result, (list, tuple)):
+            answer = "\n\n".join(
+                str(x) for x in result if x is not None
+            ).strip()
+        else:
+            answer = str(result or "").strip()
+        if not answer:
+            return {"error": (
+                "Agent '%s' returned no text. Answer with your own "
+                "tools instead." % target.name
+            )}
+        return {"ok": True, "agent": target.name, "answer": answer}
+
+    # ------------------------------------------------------------------ #
     # Diagnostic introspection — temporary helper                        #
     #                                                                    #
     # When iterating against a closed-source Enterprise module without   #
