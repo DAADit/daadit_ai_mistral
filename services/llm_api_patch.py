@@ -645,7 +645,7 @@ def _translate_to_chat_language(client, model, ref_messages, text):
         return text
 
 
-def _resolve_agent(api_self):
+def _resolve_agent(api_self, request_kwargs=None):
     """Find the ``ai.agent`` record that triggered this chat call.
 
     Two paths in priority order:
@@ -726,27 +726,68 @@ def _resolve_agent(api_self):
     except Exception:  # noqa: BLE001
         pass
 
+    # Fallback 3b (v19.0.4.1.4): request kwargs. Stock's request_llm
+    # may carry the channel or agent under a kwarg. Accept recordsets
+    # (ai.agent / discuss.channel) and channel-ish integer ids.
+    try:
+        for _k, _v in (request_kwargs or {}).items():
+            vname = getattr(_v, "_name", None)
+            if vname == "ai.agent" and getattr(_v, "ids", None) and len(_v.ids) == 1:
+                ag = api_self.env["ai.agent"].browse(_v.ids[0])
+                _logger.info(
+                    "daadit_ai_mistral.llm_api_patch: agent resolved via "
+                    "request kwarg %r (ai.agent recordset) → ai.agent(%s)",
+                    _k, ag.id,
+                )
+                return ag
+            if vname == "discuss.channel" and getattr(_v, "ids", None) and len(_v.ids) == 1:
+                agent_id = _v.sudo().ai_agent_id.id
+                if agent_id:
+                    _logger.info(
+                        "daadit_ai_mistral.llm_api_patch: agent resolved "
+                        "via request kwarg %r (discuss.channel %s) → "
+                        "ai.agent(%s)", _k, _v.ids[0], agent_id,
+                    )
+                    return api_self.env["ai.agent"].browse(agent_id)
+            if (
+                isinstance(_v, int) and _v
+                and isinstance(_k, str)
+                and ("channel" in _k.lower() or "thread" in _k.lower())
+            ):
+                ch2 = api_self.env["discuss.channel"].sudo().browse(_v).exists()
+                if ch2 and ch2.ai_agent_id:
+                    _logger.info(
+                        "daadit_ai_mistral.llm_api_patch: agent resolved "
+                        "via request kwarg %r=%s (channel id) → "
+                        "ai.agent(%s)", _k, _v, ch2.ai_agent_id.id,
+                    )
+                    return api_self.env["ai.agent"].browse(ch2.ai_agent_id.id)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Fallback 4 (v19.0.4.1.3): call-stack walk. The Enterprise AI
     # chat-panel controller constructs LLMApiService directly — our
     # ai.agent._get_provider never runs on that path, so neither the
     # threadlocal nor the discuss-channel context is populated
     # (observed on prod 2026-07-03 15:28 UTC: Mistral returned
     # tool_calls, dispatch had no agent, user got the "couldn't find
-    # the AI Agent record" fallback). The controller *does* hold the
-    # agent record in a local variable somewhere up-stack. Walk the
-    # frames and pick the nearest local that is an ai.agent
-    # singleton. Read-only inspection; the returned record is
-    # re-browsed on the caller's env so RBAC is preserved. Bounded
-    # depth keeps this cheap and safe.
+    # the AI Agent record" fallback). Walk the frames and pick the
+    # nearest local that is an ai.agent singleton — or, since
+    # v19.0.4.1.4, a discuss.channel singleton with an agent (the
+    # ai_chat channel is what the panel controller actually holds).
+    # Read-only inspection; the returned record is re-browsed on the
+    # caller's env so RBAC is preserved. Bounded depth keeps this
+    # cheap and safe.
     try:
         import sys
         frame = sys._getframe(1)
         depth = 0
-        while frame is not None and depth < 30:
+        while frame is not None and depth < 40:
             for val in frame.f_locals.values():
                 try:
+                    vname = getattr(val, "_name", None)
                     if (
-                        getattr(val, "_name", None) == "ai.agent"
+                        vname == "ai.agent"
                         and hasattr(val, "ids")
                         and len(val.ids) == 1
                         and val.ids[0]
@@ -760,6 +801,22 @@ def _resolve_agent(api_self):
                             api_self.env.uid,
                         )
                         return ag
+                    if (
+                        vname == "discuss.channel"
+                        and hasattr(val, "ids")
+                        and len(val.ids) == 1
+                        and val.ids[0]
+                    ):
+                        agent_id = val.sudo().ai_agent_id.id
+                        if agent_id:
+                            _logger.info(
+                                "daadit_ai_mistral.llm_api_patch: agent "
+                                "resolved via call-stack walk channel "
+                                "(depth %s, fn %r, channel %s) → "
+                                "ai.agent(%s)", depth,
+                                frame.f_code.co_name, val.ids[0], agent_id,
+                            )
+                            return api_self.env["ai.agent"].browse(agent_id)
                 except Exception:  # noqa: BLE001
                     continue
             frame = frame.f_back
@@ -769,7 +826,91 @@ def _resolve_agent(api_self):
             "daadit_ai_mistral.llm_api_patch: stack-walk agent lookup "
             "raised; continuing without agent"
         )
+
+    # Fallback 5 (v19.0.4.1.4): newest ai_chat channel of this user.
+    # The standalone AI panel creates a discuss.channel of type
+    # 'ai_chat' with ai_agent_id set the moment the conversation
+    # starts (verified on prod: channel 73 created at the exact
+    # second of the failing message). When every structural fallback
+    # missed, the most recently active ai_chat channel this user is
+    # a member of is the conversation being answered. Heuristic —
+    # logged loudly so we can spot any mis-resolution — but strictly
+    # better than failing the whole turn.
+    try:
+        partner_id = api_self.env.user.partner_id.id
+        ch3 = api_self.env["discuss.channel"].sudo().search(
+            [
+                ("channel_type", "=", "ai_chat"),
+                ("ai_agent_id", "!=", False),
+                ("channel_member_ids.partner_id", "in", [partner_id]),
+            ],
+            order="id desc", limit=1,
+        )
+        if ch3 and ch3.ai_agent_id:
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: agent resolved via "
+                "LAST-RESORT newest-ai_chat-channel heuristic "
+                "(channel %s → ai.agent %s, user %s). If this ever "
+                "picks the wrong agent, the request context/kwargs "
+                "diagnostics row in ir.logging shows what was "
+                "available.", ch3.id, ch3.ai_agent_id.id, api_self.env.uid,
+            )
+            _record_resolution_diagnostics(api_self, request_kwargs,
+                                           resolved_via="heuristic")
+            return api_self.env["ai.agent"].browse(ch3.ai_agent_id.id)
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.llm_api_patch: ai_chat-channel heuristic "
+            "raised; continuing without agent"
+        )
+
+    _record_resolution_diagnostics(api_self, request_kwargs,
+                                   resolved_via="FAILED")
     return None
+
+
+def _record_resolution_diagnostics(api_self, request_kwargs, resolved_via):
+    """Persist a structure-only snapshot of the request to ir.logging.
+
+    Written when agent resolution needed the last-resort heuristic or
+    failed outright, so the next occurrence can be fixed
+    deterministically instead of by guesswork. Logs KEY NAMES and
+    types only — never values — so no chat content or PII lands in
+    ir.logging.
+    """
+    try:
+        import sys
+        ctx_keys = sorted((api_self.env.context or {}).keys())
+        kw_desc = {
+            str(k): type(v).__name__ + (
+                f"[{getattr(v, '_name', '')}]" if hasattr(v, "_name") else ""
+            )
+            for k, v in (request_kwargs or {}).items()
+        }
+        frames = []
+        frame = sys._getframe(2)
+        depth = 0
+        while frame is not None and depth < 25:
+            frames.append(
+                f"{frame.f_code.co_name}({','.join(list(frame.f_locals.keys())[:10])})"
+            )
+            frame = frame.f_back
+            depth += 1
+        api_self.env["ir.logging"].sudo().create({
+            "name": "daadit_ai_mistral.agent_resolution",
+            "type": "server",
+            "level": "WARNING",
+            "message": (
+                f"AGENT_RESOLUTION via={resolved_via} uid={api_self.env.uid} "
+                f"ctx_keys={ctx_keys} kwargs={kw_desc} stack={frames}"
+            )[:8000],
+            "path": "daadit_ai_mistral",
+            "func": "_resolve_agent",
+            "line": "0",
+        })
+        api_self.env.cr.commit()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 _LANGUAGE_MIRROR_INSTRUCTION = (
@@ -1106,7 +1247,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     #   call → if tool_calls, run each on the agent and feed back as
     #   ``role: tool`` messages → call again. Stop when the model
     #   returns a final text response OR we hit ``MAX_ITER``.
-    agent = _resolve_agent(api_self)
+    agent = _resolve_agent(api_self, request_kwargs=kwargs)
 
     # ---- Per-agent overrides ----------------------------------------
     # If the agent has explicit ``daadit_mistral_temperature`` /

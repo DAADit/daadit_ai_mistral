@@ -7,6 +7,35 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.1.4 — 2026-07-03
+
+Panel agent resolution, round two — v19.0.4.1.3's fallbacks (context
+keys + ai.agent stack-walk) still missed on prod (16:50 UTC, fresh
+panel conversation). Verified: the panel DOES create a
+``discuss.channel`` of type ``ai_chat`` with ``ai_agent_id`` set
+(channel 73, created the exact second of the failing message) — the
+channel just never reaches our resolver structurally.
+
+### Patch
+
+* **Fallback 3b — request kwargs scan.** Accepts ai.agent /
+  discuss.channel recordsets and channel-ish integer ids
+  (``*channel*``/``*thread*`` kwarg names) passed to
+  ``request_llm``.
+* **Stack-walk extended** to also match ``discuss.channel``
+  singleton locals (the panel controller holds the channel, not the
+  agent) and depth raised 30 → 40.
+* **Fallback 5 — newest-ai_chat-channel heuristic.** When all
+  structural fallbacks miss: the most recently active ``ai_chat``
+  channel this user is a member of (sudo lookup, re-browse on the
+  user env). Logged at WARNING each time so mis-resolutions are
+  visible.
+* **Structure-only diagnostics.** When resolution needed the
+  heuristic or failed, an ``ir.logging`` row records context keys,
+  kwarg names+types and a 25-frame stack summary (key names only —
+  no values, no chat content, no PII), so the next fix is
+  deterministic instead of guesswork.
+
 ## 19.0.4.1.3 — 2026-07-03
 
 Agent resolution for the standalone AI chat panel. Observed on prod
