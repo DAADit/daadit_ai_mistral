@@ -1518,6 +1518,28 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             active_tools = None
             active_tool_choice = None
 
+        # Force a tool call on the FIRST turn (v19.0.4.2.3). mistral-medium
+        # regularly narrates a plan and asks "zal ik doorgaan?" instead of
+        # emitting the tool call — defeating the whole "act, don't ask"
+        # design at the mechanism level, not just the prompt. When tools
+        # are available, no JSON schema is active, and the caller didn't
+        # pin a tool_choice, we set tool_choice='any' for iteration 0 so
+        # Mistral MUST call one of the provided tools. Later iterations
+        # fall back to 'auto' (active_tool_choice stays as-is) so the
+        # model can produce the final text answer after seeing results.
+        if (
+            iteration == 0
+            and active_tools
+            and not chat_extra
+            and active_tool_choice in (None, "auto")
+        ):
+            active_tool_choice = "any"
+            _logger.info(
+                "daadit_ai_mistral.llm_api_patch: forcing tool_choice='any' "
+                "on first turn (%d tools) to prevent narrate-and-ask",
+                len(active_tools),
+            )
+
         response = client.chat_completion(
             model=model,
             messages=conversation,

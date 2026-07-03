@@ -7,6 +7,27 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.2.3 — 2026-07-03
+
+Force tool use on the first turn. Prod (Sales Agent / routed sub-run)
+kept producing a plan-and-ask response — "Ik ga nu de data ophalen met
+de tool ir_actions_server_search … Zal ik doorgaan?" — instead of
+emitting the tool call. That defeats the "act, don't ask" design at the
+mechanism level, not just the prompt: mistral-medium is free to choose
+NOT to call a tool, and often does.
+
+### Patch
+
+* On iteration 0, when tools are available, no JSON-schema
+  response_format is active, and the caller didn't pin a `tool_choice`,
+  set `tool_choice='any'` so Mistral MUST call one of the provided
+  tools. Later iterations use `auto` so the model still produces the
+  final text answer after seeing the tool results. Logged at INFO.
+
+This makes narrate-and-ask structurally impossible for the read/query
+agents whose whole purpose is to run a search, while leaving genuine
+no-tool turns (agents without tools) untouched.
+
 ## 19.0.4.2.2 — 2026-07-03
 
 Diagnose + belt-and-suspenders for the "No API key set for provider
