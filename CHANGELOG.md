@@ -7,6 +7,32 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.1.3 — 2026-07-03
+
+Agent resolution for the standalone AI chat panel. Observed on prod
+(15:28 UTC, fresh conversation in the Ask AI panel): Mistral
+correctly returned tool_calls on the first turn, but dispatch had
+no agent record — the panel's Enterprise controller constructs
+LLMApiService directly, so neither our `_get_provider` threadlocal
+nor the `discuss_channel` context fallback was populated. The user
+got the "couldn't find the AI Agent record" fallback instead of an
+answer.
+
+### Patch
+
+Two extra fallbacks in `_resolve_agent`, tried in order after the
+existing two:
+
+* **Context keys** — `ai_agent_id` / `agent_id` /
+  `default_ai_agent_id` / `default_agent_id` as plain ints in
+  `env.context`.
+* **Call-stack walk** — bounded (30 frames) inspection of caller
+  locals for an `ai.agent` singleton recordset. The panel
+  controller holds the agent in a local variable up-stack; we
+  re-browse the id on the caller's env so RBAC/record rules stay
+  those of the actual chat user. Read-only, exception-guarded,
+  logs the resolving frame for diagnostics.
+
 ## 19.0.4.1.2 — 2026-07-03
 
 Tool-loop robustness, round two. After v19.0.4.1.1 the model DID

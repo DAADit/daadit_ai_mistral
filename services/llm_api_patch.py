@@ -684,27 +684,90 @@ def _resolve_agent(api_self):
     # Fallback: discuss_channel.ai_agent_id
     try:
         ch = api_self.env.context.get("discuss_channel")
-        if ch is None:
-            return None
-        # ``ch`` may be a recordset or an id; normalize.
-        if isinstance(ch, int):
-            ch = api_self.env["discuss.channel"].sudo().browse(ch)
-        if hasattr(ch, "sudo") and hasattr(ch, "ai_agent_id"):
-            agent_id = ch.sudo().ai_agent_id.id
-            if agent_id:
-                # Re-browse on the non-sudo env so subsequent
-                # _ai_tool_* calls run as the actual user.
-                ag = api_self.env["ai.agent"].browse(agent_id)
-                _logger.info(
-                    "daadit_ai_mistral.llm_api_patch: agent resolved "
-                    "via env.context['discuss_channel'].ai_agent_id "
-                    "(threadlocal was empty) → ai.agent(%s) as user %s",
-                    agent_id, api_self.env.uid,
-                )
-                return ag
+        if ch is not None:
+            # ``ch`` may be a recordset or an id; normalize.
+            if isinstance(ch, int):
+                ch = api_self.env["discuss.channel"].sudo().browse(ch)
+            if hasattr(ch, "sudo") and hasattr(ch, "ai_agent_id"):
+                agent_id = ch.sudo().ai_agent_id.id
+                if agent_id:
+                    # Re-browse on the non-sudo env so subsequent
+                    # _ai_tool_* calls run as the actual user.
+                    ag = api_self.env["ai.agent"].browse(agent_id)
+                    _logger.info(
+                        "daadit_ai_mistral.llm_api_patch: agent resolved "
+                        "via env.context['discuss_channel'].ai_agent_id "
+                        "(threadlocal was empty) → ai.agent(%s) as user %s",
+                        agent_id, api_self.env.uid,
+                    )
+                    return ag
     except Exception:  # noqa: BLE001
         _logger.exception(
             "daadit_ai_mistral.llm_api_patch: agent fallback lookup raised"
+        )
+
+    # Fallback 3 (v19.0.4.1.3): plain context keys. Some Enterprise
+    # entry points (the standalone AI chat panel controller among
+    # them) don't put a discuss channel in context but do carry the
+    # agent id under a simple key.
+    try:
+        for _key in ("ai_agent_id", "agent_id", "default_ai_agent_id",
+                     "default_agent_id"):
+            val = api_self.env.context.get(_key)
+            if isinstance(val, int) and val:
+                ag = api_self.env["ai.agent"].browse(val).exists()
+                if ag:
+                    _logger.info(
+                        "daadit_ai_mistral.llm_api_patch: agent resolved "
+                        "via env.context[%r] → ai.agent(%s) as user %s",
+                        _key, ag.id, api_self.env.uid,
+                    )
+                    return ag
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Fallback 4 (v19.0.4.1.3): call-stack walk. The Enterprise AI
+    # chat-panel controller constructs LLMApiService directly — our
+    # ai.agent._get_provider never runs on that path, so neither the
+    # threadlocal nor the discuss-channel context is populated
+    # (observed on prod 2026-07-03 15:28 UTC: Mistral returned
+    # tool_calls, dispatch had no agent, user got the "couldn't find
+    # the AI Agent record" fallback). The controller *does* hold the
+    # agent record in a local variable somewhere up-stack. Walk the
+    # frames and pick the nearest local that is an ai.agent
+    # singleton. Read-only inspection; the returned record is
+    # re-browsed on the caller's env so RBAC is preserved. Bounded
+    # depth keeps this cheap and safe.
+    try:
+        import sys
+        frame = sys._getframe(1)
+        depth = 0
+        while frame is not None and depth < 30:
+            for val in frame.f_locals.values():
+                try:
+                    if (
+                        getattr(val, "_name", None) == "ai.agent"
+                        and hasattr(val, "ids")
+                        and len(val.ids) == 1
+                        and val.ids[0]
+                    ):
+                        ag = api_self.env["ai.agent"].browse(val.ids[0])
+                        _logger.info(
+                            "daadit_ai_mistral.llm_api_patch: agent "
+                            "resolved via call-stack walk (frame depth "
+                            "%s, function %r) → ai.agent(%s) as user %s",
+                            depth, frame.f_code.co_name, ag.id,
+                            api_self.env.uid,
+                        )
+                        return ag
+                except Exception:  # noqa: BLE001
+                    continue
+            frame = frame.f_back
+            depth += 1
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.llm_api_patch: stack-walk agent lookup "
+            "raised; continuing without agent"
         )
     return None
 
