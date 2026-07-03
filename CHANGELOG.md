@@ -7,6 +7,48 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.2.1 — 2026-07-03
+
+Router hardening after an adversarial review of v19.0.4.2.0 (4 lenses,
+per-finding verification). Six confirmed defects fixed, plus two
+security concerns whose verifiers were cut short.
+
+* **Exhaustion → real error (was: garbage answer).** A sub-run that
+  burned all 4 iterations returned the last tool-call response, which
+  `_adapt_response_to_text_messages` renders as the panel fallback
+  sentinel or mid-thought narration — a non-empty string, so the
+  router relayed it as `{'ok': True, 'answer': ...}`. Now the Mistral
+  loop sets `router_state.exhausted` on MAX_ITER; the router checks it
+  (and the known sentinels) and returns an error → the hybrid
+  concierge falls back to its own tools.
+* **Param aliases.** Mistral spelling `agent`/`name`/`query`/… was
+  swallowed by `**_extra` (no TypeError → no repair), silently
+  disabling routing for the turn. Now aliased to `agent_name`/
+  `question` before validation; the missing-param error is a re-call
+  instruction, not a "give up" instruction.
+* **Width budget.** `router_state.calls` caps routing at 3 sub-runs
+  per top-level turn (depth was already 1) so a multi-route or
+  re-routing turn can't stack dozens of sequential Mistral calls into
+  one HTTP request and hit the worker timeout. Reset each top-level
+  turn.
+* **Write tools stripped from sub-runs.** Routing fetches an answer,
+  never a mutation: `AI: Assign User` / `AI: Schedule Activity` are
+  removed from every routed sub-run's tool list, so the draft-only
+  policy holds even when routing to the write-capable Helpdesk SLA
+  Agent. Applied both where the router builds the list and in the
+  v4.1.5 topic-reconstruction path (which also now strips the router
+  tool when depth > 0).
+* **Wildcard-safe, unambiguous agent match.** `%`/`_`/`\` in the name
+  are escaped; an ambiguous `ilike` match (>1) asks for the exact
+  name instead of silently picking one. (Archived agents were already
+  excluded by the ORM `active_test` default.)
+* **State-leak window closed.** Threadlocal depth/record/exhausted are
+  set and restored inside one try/finally (a raise before
+  `request_llm` previously skipped the restore).
+* **Language pin.** A one-line instruction pins the sub-run answer to
+  the calling user's language, so a question Mistral translated to
+  English doesn't come back English and mix into a Dutch answer.
+
 ## 19.0.4.2.0 — 2026-07-03
 
 Router tool: **AI: Ask Agent**. On Nick's explicit decision the

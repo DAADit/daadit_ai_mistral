@@ -1276,9 +1276,17 @@ class AIAgent(models.Model):
     #                                                                    #
     # * MAX DEPTH 1 — a routed agent cannot route further. Enforced      #
     #   via ``tool_dispatch.router_state.depth`` AND by stripping the    #
-    #   router tool from the sub-run's tool list (defence in depth).     #
+    #   router tool from the sub-run's tool list, in BOTH the explicit   #
+    #   build here and the topic-reconstruction path (defence in depth). #
+    # * WIDTH BUDGET — at most 3 sub-runs per top-level turn             #
+    #   (``router_state.calls``), so one turn can't stack dozens of      #
+    #   sequential Mistral calls and hit the worker timeout.             #
+    # * NO WRITES — write-side tools (Assign User, Schedule Activity)    #
+    #   are stripped from every sub-run; routing reads, never mutates.   #
     # * Tight budget — sub-runs get MAX_ITER=4 in the Mistral loop      #
-    #   (see llm_api_patch) instead of 6.                                #
+    #   (see llm_api_patch) instead of 6; exhaustion is reported as an   #
+    #   error so the concierge falls back rather than relaying truncated #
+    #   narration.                                                       #
     # * Threadlocal swap with guaranteed restore — during the sub-run    #
     #   the TARGET agent is active (its allowed/blocked models, PII     #
     #   blocklist and tools apply); the previous agent is restored in    #
@@ -1288,22 +1296,56 @@ class AIAgent(models.Model):
     #   fields (system_prompt, topics), mirroring the schedule module.   #
     # ------------------------------------------------------------------ #
 
+    # Per-turn cap on how many sub-runs one concierge turn may launch.
+    # Depth is bounded at 1; this bounds WIDTH so a multi-route turn (or
+    # a model that re-routes a failing question every iteration) can't
+    # stack dozens of sequential Mistral calls into one HTTP request and
+    # trip the Odoo worker's limit_time_real. (v19.0.4.2.1)
+    _DAADIT_ROUTER_MAX_CALLS_PER_TURN = 3
+
+    # Argument-name aliases Mistral tends to pick instead of the exact
+    # schema names. Mirrors the pattern in tool_dispatch._PARAM_ALIASES
+    # (model→model_name etc.), applied here because ``ask_agent`` params
+    # are swallowed by ``**_extra`` — no TypeError, so the generic
+    # kwarg-repair path never fires for this tool. (v19.0.4.2.1)
+    _DAADIT_ASK_AGENT_ALIASES = {
+        "agent": "agent_name", "name": "agent_name",
+        "target": "agent_name", "target_agent": "agent_name",
+        "agent_id": "agent_name", "specialist": "agent_name",
+        "query": "question", "prompt": "question",
+        "message": "question", "text": "question", "vraag": "question",
+    }
+
     def _ai_tool_ask_agent(self, agent_name=None, question=None, **_extra):
         """Delegate ``question`` to the agent named ``agent_name`` and
         return its final answer.
 
         Returns ``{'ok': True, 'agent': <name>, 'answer': <text>}`` on
-        success, or ``{'error': '<reason>'}`` — errors always include
-        the instruction to fall back to the caller's own tools, so a
-        hybrid concierge degrades gracefully.
+        success, or ``{'error': '<reason>'}``. Error messages tell the
+        concierge how to recover: a *recoverable* input error (missing
+        param under an alias) instructs a re-call with the right names;
+        any other error instructs a fallback to the concierge's own
+        tools, so a hybrid concierge degrades gracefully.
         """
         self.ensure_one()
         from ..services.llm_api_patch import _slug_tool_name
 
+        # --- Alias repair: pull agent_name/question out of _extra -----
+        if not agent_name or not question:
+            for k, v in (_extra or {}).items():
+                tgt = self._DAADIT_ASK_AGENT_ALIASES.get(k)
+                if tgt == "agent_name" and not agent_name and isinstance(v, str):
+                    agent_name = v
+                elif tgt == "question" and not question and isinstance(v, str):
+                    question = v
+
         if not agent_name or not isinstance(agent_name, str):
+            # Recoverable: re-call with the right parameter name rather
+            # than abandoning routing for the whole turn.
             return {"error": (
-                "agent_name is required (e.g. 'Sales Agent'). "
-                "Answer with your own tools instead."
+                "Missing 'agent_name'. Re-call ir_actions_server_ask_agent "
+                "with parameters agent_name (e.g. 'Sales Agent') and "
+                "question."
             )}
         if (
             not question
@@ -1311,9 +1353,9 @@ class AIAgent(models.Model):
             or not question.strip()
         ):
             return {"error": (
-                "question is required (the full question for the "
-                "specialist, self-contained). Answer with your own "
-                "tools instead."
+                "Missing 'question'. Re-call ir_actions_server_ask_agent "
+                "with parameters agent_name and question (the full, "
+                "self-contained question for the specialist)."
             )}
 
         depth = getattr(tool_dispatch.router_state, "depth", 0)
@@ -1323,16 +1365,37 @@ class AIAgent(models.Model):
                 "route further. Answer with your own tools instead."
             )}
 
+        # --- Per-turn width budget ------------------------------------
+        calls = getattr(tool_dispatch.router_state, "calls", 0)
+        if calls >= self._DAADIT_ROUTER_MAX_CALLS_PER_TURN:
+            return {"error": (
+                "Routing budget for this turn is used up. Answer with "
+                "your own tools instead."
+            )}
+        tool_dispatch.router_state.calls = calls + 1
+
         Agent = self.env["ai.agent"]
+        # Escape LIKE wildcards so a name containing '%'/'_' can't match
+        # an unintended agent. ``search`` already excludes archived
+        # agents (active_test defaults True).
         needle = agent_name.strip()
-        target = Agent.search([("name", "=ilike", needle)], limit=1)
+        safe = needle.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        target = Agent.search([("name", "=ilike", safe)], limit=1)
         if not target:
-            target = Agent.search([("name", "ilike", needle)], limit=1)
+            matches = Agent.search([("name", "ilike", safe)], limit=2)
+            if len(matches) > 1:
+                return {"error": (
+                    "Agent name '%s' is ambiguous (%s). Re-call with the "
+                    "exact agent name." % (
+                        needle, ", ".join(sorted(matches.mapped("name")))
+                    )
+                )}
+            target = matches[:1]
         if not target:
             available = Agent.search([]).mapped("name")
             return {"error": (
-                "No agent named '%s'. Available agents: %s. "
-                "Answer with your own tools instead."
+                "No agent named '%s'. Available agents: %s. Re-call with "
+                "one of these exact names, or answer with your own tools."
                 % (needle, ", ".join(sorted(available)))
             )}
         if target.id == self.id:
@@ -1346,8 +1409,11 @@ class AIAgent(models.Model):
                 "route. Answer with your own tools instead." % target.name
             )}
 
-        # Build the sub-run tool list from the TARGET's topics; strip
-        # the router tool itself so a routed agent can never see it.
+        # Build the sub-run tool list from the TARGET's topics. Strip
+        # the router tool (no chains) AND all write-side tools: routing
+        # fetches an ANSWER, never a mutation on the caller's behalf, so
+        # the draft-only policy holds across the router boundary even
+        # when routing to a write-capable agent (e.g. Helpdesk SLA).
         tool_names = []
         try:
             for action in target.sudo().topic_ids.tool_ids:
@@ -1355,7 +1421,8 @@ class AIAgent(models.Model):
                     slug = _slug_tool_name(action.name)
                     if (
                         slug
-                        and slug != "ir_actions_server_ask_agent"
+                        and slug != tool_dispatch.ROUTER_TOOL_SLUG
+                        and slug not in tool_dispatch.WRITE_SIDE_TOOL_SLUGS
                         and slug not in tool_names
                     ):
                         tool_names.append(slug)
@@ -1366,6 +1433,12 @@ class AIAgent(models.Model):
         sys_prompt = (target.sudo().system_prompt or "").strip()
         if sys_prompt:
             messages.append({"role": "system", "content": sys_prompt})
+        # Pin the answer language to the calling user's language so a
+        # question that Mistral happened to translate to English doesn't
+        # come back English and mix into a Dutch concierge answer.
+        lang_hint = self._daadit_language_hint()
+        if lang_hint:
+            messages.append({"role": "system", "content": lang_hint})
         messages.append({"role": "user", "content": question.strip()})
 
         try:
@@ -1377,20 +1450,28 @@ class AIAgent(models.Model):
             )}
 
         prev_record = getattr(tool_dispatch.current_agent, "record", None)
-        tool_dispatch.router_state.depth = depth + 1
-        tool_dispatch.current_agent.record = target
-        _logger.info(
-            "daadit_ai_mistral.router: agent %s(%s) routing question to "
-            "%s(%s) as user %s (depth %s→%s, %d tools)",
-            self.name, self.id, target.name, target.id, self.env.uid,
-            depth, depth + 1, len(tool_names),
-        )
+        prev_exhausted = getattr(tool_dispatch.router_state, "exhausted", False)
+        # Set state and run inside one try/finally so a raise anywhere —
+        # including before request_llm — can never leak depth or the
+        # active-agent record onto this worker thread.
         try:
+            tool_dispatch.router_state.depth = depth + 1
+            tool_dispatch.router_state.exhausted = False
+            tool_dispatch.current_agent.record = target
+            _logger.info(
+                "daadit_ai_mistral.router: agent %s(%s) routing question "
+                "to %s(%s) as user %s (depth %s->%s, call %s, %d tools)",
+                self.name, self.id, target.name, target.id, self.env.uid,
+                depth, depth + 1, calls + 1, len(tool_names),
+            )
             service = LLMApiService(env=self.env, provider="mistral")
             result = service.request_llm(
                 model=target.llm_model,
                 inputs=messages,
                 tools=tool_names,
+            )
+            exhausted = bool(
+                getattr(tool_dispatch.router_state, "exhausted", False)
             )
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
@@ -1404,6 +1485,7 @@ class AIAgent(models.Model):
         finally:
             tool_dispatch.current_agent.record = prev_record
             tool_dispatch.router_state.depth = depth
+            tool_dispatch.router_state.exhausted = prev_exhausted
 
         if isinstance(result, (list, tuple)):
             answer = "\n\n".join(
@@ -1411,12 +1493,44 @@ class AIAgent(models.Model):
             ).strip()
         else:
             answer = str(result or "").strip()
-        if not answer:
+
+        # The sub-run burned its whole iteration budget without producing
+        # a final text answer → what came back is truncated narration or
+        # the panel fallback sentinel, not a real answer. Report failure
+        # so the hybrid concierge falls back instead of relaying garbage.
+        if exhausted:
             return {"error": (
-                "Agent '%s' returned no text. Answer with your own "
-                "tools instead." % target.name
+                "Agent '%s' could not complete the question within its "
+                "budget. Answer with your own tools instead." % target.name
+            )}
+        if not answer or answer.lstrip().startswith((
+            "_(Mistral wanted to call", "_(Empty response",
+        )):
+            return {"error": (
+                "Agent '%s' returned no usable answer. Answer with your "
+                "own tools instead." % target.name
             )}
         return {"ok": True, "agent": target.name, "answer": answer}
+
+    def _daadit_language_hint(self):
+        """Return a one-line system instruction pinning the sub-run's
+        answer language to the calling user's language, or '' if
+        unknown. Best-effort — a wrong guess only affects phrasing."""
+        try:
+            lang = (self.env.user.lang or "").split("_")[0].lower()
+        except Exception:  # noqa: BLE001
+            return ""
+        names = {
+            "nl": "Dutch", "en": "English", "fr": "French",
+            "de": "German", "es": "Spanish", "it": "Italian",
+        }
+        label = names.get(lang)
+        if not label:
+            return ""
+        return (
+            "Answer in %s (the user's language), regardless of the "
+            "language this question is phrased in." % label
+        )
 
     # ------------------------------------------------------------------ #
     # Diagnostic introspection — temporary helper                        #

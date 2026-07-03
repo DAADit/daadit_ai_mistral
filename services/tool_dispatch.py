@@ -46,8 +46,26 @@ current_agent = threading.local()
 # counts how many routed sub-runs are active on this thread; the tool
 # refuses to route when depth >= 1 (Concierge → specialist only, no
 # chains, no A→B→A loops) and the Mistral loop shortens its iteration
-# budget for sub-runs.
+# budget for sub-runs. ``calls`` is the per-turn width budget (reset at
+# each top-level turn). ``exhausted`` is set by the Mistral loop when a
+# sub-run hits MAX_ITER so the router can report failure instead of
+# passing off truncated narration as a real answer (v19.0.4.2.1).
 router_state = threading.local()
+
+# Tool slugs that MUTATE database state. Stripped from every routed
+# sub-run's tool list (v19.0.4.2.1): routing exists to fetch an
+# ANSWER, never to let a delegated agent write on the caller's behalf.
+# This keeps the draft-only policy intact across the router boundary —
+# e.g. routing a question to the Helpdesk SLA Agent (which owns
+# Assign User / Schedule Activity) can only ever read.
+WRITE_SIDE_TOOL_SLUGS = frozenset({
+    "ir_actions_server_assign_user",
+    "ir_actions_server_schedule_activity",
+})
+
+# The router tool itself — never exposed inside a routed sub-run
+# (depth guard is defence-in-depth; this is the primary strip).
+ROUTER_TOOL_SLUG = "ir_actions_server_ask_agent"
 
 
 # ---------------------------------------------------------------------------
@@ -367,8 +385,10 @@ TOOL_SCHEMAS = {
             "SLA Agent' for tickets/SLA). Formulate the question "
             "self-contained (the specialist does not see this "
             "conversation). If the result contains 'error', answer the "
-            "question yourself with your other tools instead — never "
-            "show the error to the user."
+            "question yourself with your other tools instead and briefly "
+            "mention that the specialist could not be reached; do not "
+            "show the raw error text, and do not retry the same failing "
+            "route this turn. Route at most a few times per turn."
         ),
         "parameters": {
             "type": "object",

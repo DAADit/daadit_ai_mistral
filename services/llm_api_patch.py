@@ -1275,18 +1275,31 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # ir.logging for that turn).
     if agent is not None and not normalized_tools:
         try:
+            # Inside a routed sub-run (depth > 0) the reconstruction must
+            # apply the SAME strips the router applies when it builds the
+            # list explicitly (v19.0.4.2.1) — otherwise a sub-run with an
+            # empty explicit tool list silently regains the router tool
+            # and every write-side tool via this path.
+            _in_subrun = _router_depth > 0
             names = []
             for action in agent.sudo().topic_ids.tool_ids:
                 if action.model_id and action.model_id.model == "ai.agent":
                     slug = _slug_tool_name(action.name)
-                    if slug and slug not in names:
-                        names.append(slug)
+                    if not slug or slug in names:
+                        continue
+                    if _in_subrun and (
+                        slug == tool_dispatch.ROUTER_TOOL_SLUG
+                        or slug in tool_dispatch.WRITE_SIDE_TOOL_SLUGS
+                    ):
+                        continue
+                    names.append(slug)
             if names:
                 normalized_tools = tool_dispatch.annotate_tools(names)
                 _logger.info(
                     "daadit_ai_mistral.llm_api_patch: caller passed no "
-                    "tools — injected %d tool defs from agent %s topics: %s",
-                    len(names), agent.id, names,
+                    "tools — injected %d tool defs from agent %s topics "
+                    "(subrun=%s): %s",
+                    len(names), agent.id, _in_subrun, names,
                 )
         except Exception:  # noqa: BLE001
             _logger.exception(
@@ -1396,8 +1409,15 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # Routed sub-runs (AI: Ask Agent) get a tighter loop budget: the
     # parent turn is already paying for its own iterations, and a
     # dwaling sub-agent must never consume the whole turn.
-    if getattr(tool_dispatch.router_state, "depth", 0) > 0:
+    _router_depth = getattr(tool_dispatch.router_state, "depth", 0)
+    if _router_depth > 0:
         MAX_ITER = 4
+    else:
+        # Top-level turn: reset the per-turn router width budget and the
+        # exhaustion flag so state from a previous turn on this worker
+        # thread never leaks in (v19.0.4.2.1).
+        tool_dispatch.router_state.calls = 0
+        tool_dispatch.router_state.exhausted = False
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
 
@@ -1510,6 +1530,16 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             "loop; returning whatever final response we have",
             MAX_ITER,
         )
+        # v19.0.4.2.1: flag budget exhaustion so the router tool
+        # (_ai_tool_ask_agent) can report failure instead of relaying
+        # truncated narration or the panel fallback sentinel as if it
+        # were a real specialist answer. Only meaningful inside a routed
+        # sub-run (depth > 0); harmless at top level.
+        try:
+            if getattr(tool_dispatch.router_state, "depth", 0) > 0:
+                tool_dispatch.router_state.exhausted = True
+        except Exception:  # noqa: BLE001
+            pass
 
     usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
 
