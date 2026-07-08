@@ -1456,20 +1456,32 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         pass
 
     iteration = 0
-    MAX_ITER = 6
-    # Routed sub-runs (AI: Ask Agent) get a tighter loop budget: the
-    # parent turn is already paying for its own iterations, and a
-    # dwaling sub-agent must never consume the whole turn.
+    # Fase 0 governance guardrail (Knowledge id 173): top-level loop
+    # budget bumped from 6 to 10 in v19.0.4.4.0. Sub-runs stay tighter
+    # — a dwaling sub-agent must never consume the whole parent turn.
+    MAX_ITER = 10
     _router_depth = getattr(tool_dispatch.router_state, "depth", 0)
     if _router_depth > 0:
         MAX_ITER = 4
     else:
-        # Top-level turn: reset the per-turn router width budget and the
-        # exhaustion flag so state from a previous turn on this worker
-        # thread never leaks in (v19.0.4.2.1).
+        # Top-level turn: reset per-turn router width budget and
+        # exhaustion flags so state from a previous turn on this
+        # worker thread never leaks in (v19.0.4.2.1 / v19.0.4.4.0).
         tool_dispatch.router_state.calls = 0
         tool_dispatch.router_state.exhausted = False
         tool_dispatch.router_state.sub_failed = False
+        # v19.0.4.4.0: top_level_exhausted is read by
+        # ``daadit_ai_agent_schedule`` after ``request_llm`` returns to
+        # decide whether a scheduled run should be marked 'done' or
+        # 'error'. Namespaced separately from ``exhausted`` (which is
+        # sub-run specific) to keep concerns clean.
+        tool_dispatch.router_state.top_level_exhausted = False
+        tool_dispatch.router_state.exhaustion_reason = None
+    # Fase 0 governance guardrail: cap hallucinated tool-name attempts.
+    # After 2 "Unknown tool: ..." results in the same turn we bail out
+    # instead of letting the model keep guessing and burn the cap.
+    unknown_tool_count = 0
+    unknown_tool_break = False
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
 
@@ -1593,6 +1605,17 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         for tc in tool_calls:
             result = tool_dispatch.run_tool_call(agent, tc)
 
+            # v19.0.4.4.0: Fase 0 governance — tally hallucinated tool
+            # names. Two "Unknown tool: ..." errors in a single turn
+            # means the model is guessing wildly; stop instead of
+            # feeding more errors back for it to hallucinate around.
+            if isinstance(result, dict) and "Unknown tool:" in str(
+                result.get("error", "")
+            ):
+                unknown_tool_count += 1
+                if unknown_tool_count >= 2:
+                    unknown_tool_break = True
+
             # If the tool was denied by the agent's allow/block list,
             # break the loop and surface a clean user-facing message
             # below. We do NOT feed the error back to Mistral, because
@@ -1613,7 +1636,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 "content": content,
             })
 
-        if access_denial:
+        if access_denial or unknown_tool_break:
             break
 
         iteration += 1
@@ -1623,22 +1646,82 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             iteration, len(tool_calls),
         )
 
+    # v19.0.4.4.0: unified bail-out handling. Two independent conditions
+    # can end the tool-call loop unsuccessfully: the MAX_ITER budget is
+    # exhausted, or the model kept hallucinating tool names. Both mean
+    # "the agent didn't produce a real answer" and should surface an
+    # explicit, user-facing message plus set the top_level_exhausted
+    # flag so callers (notably daadit_ai_agent_schedule) can reflect
+    # the failure in their own state ('error' instead of 'done').
+    bail_reason = None
     if iteration >= MAX_ITER:
+        bail_reason = "max_iter"
+    elif unknown_tool_break:
+        bail_reason = "unknown_tools"
+
+    if bail_reason:
         _logger.warning(
-            "daadit_ai_mistral.llm_api_patch: hit MAX_ITER=%d in tool "
-            "loop; returning whatever final response we have",
-            MAX_ITER,
+            "daadit_ai_mistral.llm_api_patch: bail out reason=%s "
+            "(iteration=%d MAX_ITER=%d unknown_tool_count=%d)",
+            bail_reason, iteration, MAX_ITER, unknown_tool_count,
         )
         # v19.0.4.2.1: flag budget exhaustion so the router tool
         # (_ai_tool_ask_agent) can report failure instead of relaying
         # truncated narration or the panel fallback sentinel as if it
-        # were a real specialist answer. Only meaningful inside a routed
-        # sub-run (depth > 0); harmless at top level.
+        # were a real specialist answer. Only meaningful inside a
+        # routed sub-run (depth > 0).
         try:
             if getattr(tool_dispatch.router_state, "depth", 0) > 0:
                 tool_dispatch.router_state.exhausted = True
         except Exception:  # noqa: BLE001
             pass
+        # v19.0.4.4.0: top-level flag read by the schedule module.
+        # Namespaced separately from ``exhausted`` (sub-run only) so
+        # each caller can inspect its own state without interference.
+        try:
+            tool_dispatch.router_state.top_level_exhausted = True
+            tool_dispatch.router_state.exhaustion_reason = bail_reason
+        except Exception:  # noqa: BLE001
+            pass
+        if bail_reason == "max_iter":
+            en_message = (
+                f"I couldn't finish this in {MAX_ITER} tool-call steps. "
+                f"Try asking a more specific question, or break your "
+                f"request into smaller pieces."
+            )
+        else:  # unknown_tools
+            en_message = (
+                f"The agent tried to call {unknown_tool_count} tool "
+                f"names that don't exist. I stopped it to avoid burning "
+                f"the call budget. Check the agent's topic configuration."
+            )
+        adapted = [
+            _translate_to_chat_language(
+                client, model, conversation, en_message,
+            )
+        ]
+        usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
+        try:
+            ch = api_self.env.context.get("discuss_channel")
+            channel_id = ch.id if ch and hasattr(ch, "id") else (
+                ch if isinstance(ch, int) else False
+            )
+            api_self.env["daadit_ai_mistral.usage"].sudo().record_usage(
+                kind="chat", model=model,
+                agent_id=agent.id if agent else False,
+                channel_id=channel_id,
+                prompt_tokens=usage.get("prompt_tokens") or 0,
+                completion_tokens=usage.get("completion_tokens") or 0,
+                iterations=iteration,
+                has_tools=bool(normalized_tools),
+                error=f"bail:{bail_reason}",
+            )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.llm_api_patch: usage row creation "
+                "failed during bail; continuing"
+            )
+        return adapted
 
     usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
 
