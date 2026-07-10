@@ -1,0 +1,85 @@
+name: Sync release to deploy repos
+
+# Fires on every release tag (v19.0.4.4.0 etc). For each deploy target it
+# replaces the daadit_ai_mistral/ folder with the tagged content and opens
+# a PR — a human still reviews and merges, so nothing lands on a deploy
+# branch unseen. Requires the DEPLOY_PAT repo secret: a PAT of an account
+# with push access to every target repo below.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  verify:
+    name: Tag matches manifest version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare tag with __manifest__.py
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          MANIFEST=$(python3 -c "import ast; print(ast.literal_eval(open('daadit_ai_mistral/__manifest__.py').read())['version'])")
+          echo "tag=$TAG manifest=$MANIFEST"
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::Tag v$TAG does not match manifest version $MANIFEST — refusing to sync."
+            exit 1
+          fi
+
+  sync:
+    name: PR to ${{ matrix.repo }}
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: adriedaadit/daadit        # DAADit production monorepo
+            base: main
+          - repo: nimbleconsulting/BroStar  # BroStar deploy repo
+            base: Staging
+    steps:
+      - name: Checkout product repo at tag
+        uses: actions/checkout@v4
+        with:
+          path: product
+
+      - name: Clone deploy repo
+        env:
+          DEPLOY_PAT: ${{ secrets.DEPLOY_PAT }}
+        run: |
+          git clone --depth 1 --branch "${{ matrix.base }}" \
+            "https://x-access-token:${DEPLOY_PAT}@github.com/${{ matrix.repo }}.git" target
+
+      - name: Sync module folder
+        id: sync
+        run: |
+          rsync -a --delete product/daadit_ai_mistral/ target/daadit_ai_mistral/
+          cd target
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Target already at ${GITHUB_REF_NAME} — nothing to sync."
+          fi
+
+      - name: Push branch and open PR
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.DEPLOY_PAT }}
+        run: |
+          cd target
+          BRANCH="sync/daadit_ai_mistral-${GITHUB_REF_NAME}"
+          git config user.name "daadit-release-sync"
+          git config user.email "dev@daadit.group"
+          git checkout -b "$BRANCH"
+          git add daadit_ai_mistral
+          git commit -m "daadit_ai_mistral: sync release ${GITHUB_REF_NAME} from DAADit/daadit_ai_mistral"
+          git push origin "$BRANCH"
+          gh pr create \
+            --repo "${{ matrix.repo }}" \
+            --base "${{ matrix.base }}" \
+            --head "$BRANCH" \
+            --title "daadit_ai_mistral ${GITHUB_REF_NAME}" \
+            --body "$(printf 'Automated sync of tagged release %s from DAADit/daadit_ai_mistral.\n\nSee the CHANGELOG.md inside the module for what changed. Merging this PR triggers the Odoo.sh build for this branch; upgrade the module afterwards if auto-update is off.' "${GITHUB_REF_NAME}")"
