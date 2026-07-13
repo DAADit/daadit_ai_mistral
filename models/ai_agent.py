@@ -1052,6 +1052,128 @@ class AIAgent(models.Model):
             "previous_user_id": previous_user.id or None,
         }
 
+    _THROTTLE_ICP_LIMIT = "daadit_ai_mistral.activity_throttle_per_day"
+    _THROTTLE_ICP_FALLBACK = "daadit_ai_mistral.activity_throttle_fallback_user_id"
+    _THROTTLE_DIGEST_SUMMARY = "Agent-activiteiten boven daglimiet (bundel)"
+
+    def _daadit_activity_throttle(self, assignee, model_name, record,
+                                  summary):
+        """Fase-0 throttle: cap agent-created activities per user/day.
+
+        Returns ``None`` when the activity may be created normally, or
+        a result dict when the cap was hit and the item was bundled
+        into the fallback reviewer's digest instead.
+
+        Config (ir.config_parameter):
+          * ``daadit_ai_mistral.activity_throttle_per_day`` — cap per
+            assignee per day. Default 5; ``0`` disables the throttle.
+          * ``daadit_ai_mistral.activity_throttle_fallback_user_id`` —
+            res.users id that receives the bundled overflow digest.
+            Unset → throttle logs a warning and lets the activity
+            through (fail-open: a missing fallback must not silently
+            swallow agent output).
+        """
+        self.ensure_one()
+        icp = self.env["ir.config_parameter"].sudo()
+        try:
+            limit = int(icp.get_param(self._THROTTLE_ICP_LIMIT, "5") or 5)
+        except (TypeError, ValueError):
+            limit = 5
+        if limit <= 0:
+            return None
+
+        today_start = fields.Datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        Activity = self.env["mail.activity"].sudo()
+        count_today = Activity.search_count([
+            ("daadit_agent_created", "=", True),
+            ("user_id", "=", assignee.id),
+            ("create_date", ">=", today_start),
+        ])
+        if count_today < limit:
+            return None
+
+        fallback = self.env["res.users"].browse()
+        raw_fb = icp.get_param(self._THROTTLE_ICP_FALLBACK, "")
+        try:
+            if raw_fb:
+                fallback = self.env["res.users"].sudo().browse(
+                    int(raw_fb)
+                ).exists()
+        except (TypeError, ValueError):
+            fallback = self.env["res.users"].browse()
+        if not fallback or not fallback.active or fallback.share:
+            _logger.warning(
+                "daadit_ai_mistral activity throttle: cap (%d/day) hit "
+                "for user %s but no valid fallback reviewer configured "
+                "(%s) — letting the activity through. Set the ICP to a "
+                "res.users id to activate bundling.",
+                limit, assignee.id, self._THROTTLE_ICP_FALLBACK,
+            )
+            return None
+        if fallback.id == assignee.id:
+            # The overflow target IS the fallback reviewer — bundling
+            # onto themselves adds nothing; let it through.
+            return None
+
+        # Bundle into one open digest activity on the fallback user's
+        # partner record (res.partner carries the activity mixin).
+        entry = (
+            "<li>%s #%s — %s (voor: %s)</li>" % (
+                model_name, record.id,
+                summary or "(geen samenvatting)",
+                assignee.display_name,
+            )
+        )
+        digest = Activity.search([
+            ("daadit_agent_created", "=", True),
+            ("user_id", "=", fallback.id),
+            ("res_model", "=", "res.partner"),
+            ("res_id", "=", fallback.partner_id.id),
+            ("summary", "=", self._THROTTLE_DIGEST_SUMMARY),
+        ], limit=1)
+        if digest:
+            digest.write({"note": (digest.note or "") + entry})
+        else:
+            act_type = self.env.ref(
+                "mail.mail_activity_data_todo", raise_if_not_found=False,
+            )
+            digest = Activity.create({
+                "activity_type_id": act_type.id if act_type else False,
+                "res_model": "res.partner",
+                "res_model_id": self.env["ir.model"]._get_id("res.partner"),
+                "res_id": fallback.partner_id.id,
+                "summary": self._THROTTLE_DIGEST_SUMMARY,
+                "note": (
+                    "<p>Agent-activiteiten die de daglimiet (%d per "
+                    "gebruiker) overschreden — beoordeel en verdeel "
+                    "handmatig:</p><ul>%s</ul>" % (limit, entry)
+                ),
+                "date_deadline": fields.Date.context_today(self),
+                "user_id": fallback.id,
+                "daadit_agent_created": True,
+            })
+        _logger.info(
+            "daadit_ai_mistral activity throttle: cap (%d/day) hit for "
+            "user %s — bundled into digest activity %s for %s",
+            limit, assignee.id, digest.id, fallback.login,
+        )
+        return {
+            "ok": True,
+            "throttled": True,
+            "reason": (
+                "Daily agent-activity cap (%d) reached for user %s. "
+                "The item was added to the overflow digest for %s "
+                "instead of creating a new activity." % (
+                    limit, assignee.display_name, fallback.display_name,
+                )
+            ),
+            "digest_activity_id": digest.id,
+            "model_name": model_name,
+            "record_id": record.id,
+        }
+
     def _ai_tool_schedule_activity(self, model_name=None, record_id=None,
                                    activity_type_xmlid=None,
                                    activity_type_id=None,
@@ -1220,6 +1342,17 @@ class AIAgent(models.Model):
                 "user_id": assignee.id,
             }
 
+        # --- Fase-0 throttle: max N agent-activiteiten per gebruiker
+        # per dag (Governance & guardrails knowledge id 173, kernregel
+        # 4). Overschot wordt gebundeld in één digest-activiteit voor
+        # de fallback-reviewer in plaats van de assignee te blijven
+        # bestoken. Beschermt de reviewcapaciteit van een klein team.
+        throttled = self._daadit_activity_throttle(
+            assignee, model_name, record, target_summary,
+        )
+        if throttled is not None:
+            return throttled
+
         # --- Create the activity ---------------------------------------
         try:
             res_model_id = self.env["ir.model"]._get_id(model_name)
@@ -1232,6 +1365,7 @@ class AIAgent(models.Model):
                 "note": target_note,
                 "date_deadline": deadline,
                 "user_id": assignee.id,
+                "daadit_agent_created": True,
             })
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
