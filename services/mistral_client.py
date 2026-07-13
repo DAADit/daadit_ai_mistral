@@ -13,6 +13,8 @@ Docs: https://docs.mistral.ai/api/
 """
 import json
 import logging
+import random
+import time
 from typing import Iterable, List, Mapping, Optional, Sequence
 
 import requests
@@ -136,6 +138,43 @@ def _redact_payload(payload):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Retry policy for rate limits and transient upstream failures (Fase 0,
+# Governance & guardrails knowledge id 173: "backoff met jitter bij
+# rate-limit-fouten in plaats van retry-stormen").
+#
+# A request is retried when Mistral answers 429 (rate limit) or a
+# transient 5xx (502/503/504), or when the connection itself fails.
+# Waits grow exponentially with full jitter and honour Retry-After when
+# the server sends one. Non-transient statuses (400/401/422/...) are
+# never retried — they would fail identically.
+# ---------------------------------------------------------------------------
+_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+_MAX_ATTEMPTS = 3
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_CAP_SECONDS = 20.0
+
+
+def _retry_wait_seconds(attempt, retry_after=None):
+    """Seconds to sleep before retry ``attempt`` (1-based).
+
+    Full-jitter exponential backoff: uniform(0, base * 2^attempt),
+    capped. When the server supplied a parseable Retry-After, that
+    value wins (also capped) — plus a little jitter so concurrent
+    workers don't stampede on the exact same second.
+    """
+    if retry_after:
+        try:
+            ra = float(retry_after)
+            if ra > 0:
+                return min(ra, _BACKOFF_CAP_SECONDS) + random.uniform(0, 1)
+        except (TypeError, ValueError):
+            pass
+    return random.uniform(0, min(
+        _BACKOFF_CAP_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** attempt)
+    ))
+
+
 class MistralClient:
     """Thin wrapper around requests for Mistral's API.
 
@@ -222,15 +261,43 @@ class MistralClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        try:
-            resp = requests.post(
-                url,
-                headers=headers,
-                data=json.dumps(payload),
-                timeout=self.timeout,
+        body = json.dumps(payload)
+        resp = None
+        last_exc = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    data=body,
+                    timeout=self.timeout,
+                )
+                last_exc = None
+            except requests.RequestException as exc:
+                # Connection-level failure — transient by nature.
+                last_exc = exc
+                resp = None
+            if resp is not None and resp.status_code not in _RETRY_STATUSES:
+                break
+            if attempt >= _MAX_ATTEMPTS:
+                break
+            wait = _retry_wait_seconds(
+                attempt,
+                resp.headers.get("Retry-After") if resp is not None else None,
             )
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Mistral request failed: {exc}") from exc
+            _logger.warning(
+                "Mistral API transient failure on %s (%s) — retry %d/%d "
+                "in %.1fs",
+                path,
+                resp.status_code if resp is not None else f"conn: {last_exc}",
+                attempt, _MAX_ATTEMPTS - 1, wait,
+            )
+            time.sleep(wait)
+        if resp is None:
+            raise RuntimeError(
+                f"Mistral request failed after {_MAX_ATTEMPTS} attempts: "
+                f"{last_exc}"
+            ) from last_exc
 
         if 400 <= resp.status_code < 500:
             try:
