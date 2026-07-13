@@ -38,6 +38,8 @@ adapt the wrapper.
 """
 import json
 import logging
+import time
+import uuid
 
 from .mistral_client import MistralClient, is_mistral_model
 from . import tool_dispatch
@@ -1477,11 +1479,18 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         # sub-run specific) to keep concerns clean.
         tool_dispatch.router_state.top_level_exhausted = False
         tool_dispatch.router_state.exhaustion_reason = None
+        # v19.0.4.8.0: one uuid per top-level turn. Every usage row
+        # this turn creates (including router sub-calls, which inherit
+        # the threadlocal) carries it, so the performance report can
+        # count QUESTIONS (distinct turn_uuid / depth-0 rows) instead
+        # of API calls.
+        tool_dispatch.router_state.turn_uuid = uuid.uuid4().hex
     # Fase 0 governance guardrail: cap hallucinated tool-name attempts.
     # After 2 "Unknown tool: ..." results in the same turn we bail out
     # instead of letting the model keep guessing and burn the cap.
     unknown_tool_count = 0
     unknown_tool_break = False
+    deadline_break = False
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
 
@@ -1511,6 +1520,25 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         )
 
     while iteration < MAX_ITER:
+        # v19.0.4.8.0: hard per-run time budget (Fase 0-gate). Callers
+        # that own a whole run (daadit_ai_agent_schedule) set
+        # ``router_state.run_deadline_monotonic`` before request_llm
+        # and clear it in their finally. Checked between round-trips —
+        # a run can overshoot by at most one Mistral call + its tools,
+        # never hang for the full MAX_ITER budget. Interactive chat
+        # never sets it, so this is a no-op there.
+        _run_deadline = getattr(
+            tool_dispatch.router_state, "run_deadline_monotonic", None,
+        )
+        if _run_deadline is not None and time.monotonic() >= _run_deadline:
+            deadline_break = True
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: run deadline reached "
+                "after %d iteration(s) — breaking the tool loop",
+                iteration,
+            )
+            break
+
         # Build the per-call `extra` payload. When the caller passed a
         # JSON schema (AI Fields, structured automation actions), turn
         # it into Mistral's `response_format` and drop tools — Mistral
@@ -1654,7 +1682,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # flag so callers (notably daadit_ai_agent_schedule) can reflect
     # the failure in their own state ('error' instead of 'done').
     bail_reason = None
-    if iteration >= MAX_ITER:
+    if deadline_break:
+        bail_reason = "deadline"
+    elif iteration >= MAX_ITER:
         bail_reason = "max_iter"
     elif unknown_tool_break:
         bail_reason = "unknown_tools"
@@ -1683,7 +1713,14 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             tool_dispatch.router_state.exhaustion_reason = bail_reason
         except Exception:  # noqa: BLE001
             pass
-        if bail_reason == "max_iter":
+        if bail_reason == "deadline":
+            en_message = (
+                "This run reached its hard time budget before the "
+                "task was finished. Partial work may have been done; "
+                "check the run log. Consider a narrower instruction "
+                "or a higher time budget."
+            )
+        elif bail_reason == "max_iter":
             en_message = (
                 f"I couldn't finish this in {MAX_ITER} tool-call steps. "
                 f"Try asking a more specific question, or break your "
@@ -1715,6 +1752,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 iterations=iteration,
                 has_tools=bool(normalized_tools),
                 error=f"bail:{bail_reason}",
+                depth=_router_depth,
+                turn_uuid=getattr(
+                    tool_dispatch.router_state, "turn_uuid", None,
+                ),
             )
         except Exception:  # noqa: BLE001
             _logger.exception(
@@ -1756,6 +1797,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 iterations=iteration + 1,
                 has_tools=bool(normalized_tools),
                 error=f"Access denied: {access_denial.get('model_name')}",
+                depth=_router_depth,
+                turn_uuid=getattr(
+                    tool_dispatch.router_state, "turn_uuid", None,
+                ),
             )
         except Exception:  # noqa: BLE001
             _logger.exception(
@@ -1792,6 +1837,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             completion_tokens=usage.get("completion_tokens") or 0,
             iterations=iteration + 1,
             has_tools=bool(normalized_tools),
+            depth=_router_depth,
+            turn_uuid=getattr(
+                tool_dispatch.router_state, "turn_uuid", None,
+            ),
         )
     except Exception:  # noqa: BLE001
         _logger.exception(
