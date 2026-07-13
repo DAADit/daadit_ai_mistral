@@ -71,6 +71,18 @@ class ResConfigSettings(models.TransientModel):
             "allowlist so a tampered URL cannot exfiltrate the key."
         ),
     )
+    mistral_key_batch = fields.Char(
+        string="Mistral API-key voor geplande agents (batch)",
+        config_parameter="daadit_ai_mistral.mistral_key_batch",
+        help=(
+            "Optionele tweede API-key die uitsluitend door geplande "
+            "agent-runs (daadit_ai_agent_schedule) wordt gebruikt. "
+            "Hiermee is batch-verkeer qua rate-limit gescheiden van de "
+            "klant-facing key (Ask AI, Milo livechat): batch mag "
+            "stikken, de livechat nooit. Leeg = geplande runs "
+            "gebruiken de gewone key."
+        ),
+    )
     mistral_base_url = fields.Char(
         string="Mistral API base URL",
         config_parameter="daadit_ai_mistral.mistral_base_url",

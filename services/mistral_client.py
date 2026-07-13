@@ -239,8 +239,22 @@ class MistralClient:
                 "Mistral API key is not enabled. Toggle 'Use your own "
                 "Mistral AI account' in General Settings → AI."
             ))
+        api_key = ICP.get_param("daadit_ai_mistral.mistral_key", default="")
+        # Fase-0 API-key-splitsing (Governance & guardrails, knowledge
+        # id 173): scheduled/batch callers flag themselves through the
+        # env context. When a dedicated batch key is configured, batch
+        # traffic uses it — so a runaway scheduled agent can exhaust
+        # its own rate limit but never the client-facing key that
+        # serves Ask AI / Milo livechat. Falls back to the main key
+        # when no batch key is set, so the split is opt-in.
+        if env.context.get("daadit_mistral_batch"):
+            batch_key = (ICP.get_param(
+                "daadit_ai_mistral.mistral_key_batch", default="",
+            ) or "").strip()
+            if batch_key:
+                api_key = batch_key
         return cls(
-            api_key=ICP.get_param("daadit_ai_mistral.mistral_key", default=""),
+            api_key=api_key,
             base_url=ICP.get_param(
                 "daadit_ai_mistral.mistral_base_url",
                 default="https://api.mistral.ai/v1",

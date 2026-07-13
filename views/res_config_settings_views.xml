@@ -114,6 +114,20 @@
                                    nolabel="1"
                                    class="w-100"/>
                         </div>
+                        <div class="mt8">
+                            <label for="mistral_key_batch"
+                                   string="Aparte key voor geplande agents (batch)"/>
+                            <field name="mistral_key_batch"
+                                   placeholder="Optioneel — leeg = zelfde key"
+                                   password="True"
+                                   nolabel="1"
+                                   class="w-100"/>
+                            <div class="text-muted">
+                                Geplande agent-runs gebruiken deze key
+                                zodat batch-verkeer de livechat-key
+                                nooit kan leegtrekken (Fase 0).
+                            </div>
+                        </div>
                         <div class="text-muted mt8 mb8">
                             <i class="fa fa-info-circle me-1"/>
                             Get a key at
