@@ -1459,12 +1459,23 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     iteration = 0
     # Fase 0 governance guardrail (Knowledge id 173): top-level loop
-    # budget bumped from 6 to 10 in v19.0.4.4.0. Sub-runs stay tighter
-    # — a dwaling sub-agent must never consume the whole parent turn.
-    MAX_ITER = 10
+    # budget. v19.0.4.9.0 — now a System Parameter so it can be tuned
+    # centrally without a deploy (Settings → Technical → System
+    # Parameters). Defaults: 20 top-level, 4 sub-run; fail-open to those.
+    # Sub-runs stay tighter — a dwaling sub-agent must never consume the
+    # whole parent turn.
+    try:
+        _icp = api_self.env["ir.config_parameter"].sudo()
+        MAX_ITER = int(_icp.get_param("daadit_ai_mistral.max_tool_iterations") or 20)
+        _max_iter_subrun = int(
+            _icp.get_param("daadit_ai_mistral.max_tool_iterations_subrun") or 4
+        )
+    except Exception:  # noqa: BLE001
+        MAX_ITER = 20
+        _max_iter_subrun = 4
     _router_depth = getattr(tool_dispatch.router_state, "depth", 0)
     if _router_depth > 0:
-        MAX_ITER = 4
+        MAX_ITER = _max_iter_subrun
     else:
         # Top-level turn: reset per-turn router width budget and
         # exhaustion flags so state from a previous turn on this

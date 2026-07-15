@@ -32,6 +32,8 @@ this file to keep only the override that matches.
 """
 import logging
 
+from markupsafe import Markup
+
 from odoo import _, api, fields, models
 
 from ..services.mistral_client import (
@@ -1037,11 +1039,10 @@ class AIAgent(models.Model):
             )}
         self._daadit_post_agent_message(
             record,
-            _(
-                "🤖 <strong>%(agent)s</strong> assigned this record to "
-                "<strong>%(user)s</strong>.",
-                agent=self.name, user=user.name,
-            ),
+            Markup(_(
+                "🤖 <strong>%(agent)s</strong> assigned this to "
+                "<strong>%(user)s</strong>."
+            )) % {"agent": self.name, "user": user.name},
         )
         return {
             "ok": True,
@@ -1379,15 +1380,15 @@ class AIAgent(models.Model):
             )}
         self._daadit_post_agent_message(
             record,
-            _(
-                "🤖 <strong>%(agent)s</strong> scheduled activity "
-                "<strong>%(summary)s</strong> for <strong>%(user)s</strong> "
-                "on <strong>%(deadline)s</strong>.",
-                agent=self.name,
-                summary=target_summary or act_type.name or _("(no summary)"),
-                user=assignee.name,
-                deadline=deadline.strftime("%Y-%m-%d"),
-            ),
+            Markup(_(
+                "🤖 <strong>%(agent)s</strong> scheduled a to-do for "
+                "<strong>%(user)s</strong> (due %(deadline)s): %(summary)s"
+            )) % {
+                "agent": self.name,
+                "user": assignee.name,
+                "deadline": deadline.strftime("%Y-%m-%d"),
+                "summary": target_summary or act_type.name or _("(no summary)"),
+            },
         )
         return {
             "ok": True,
