@@ -828,6 +828,22 @@ class AIAgent(models.Model):
     # We override candidate methods so ``'mistral'`` → ``'mistral-embed'``#
     # ------------------------------------------------------------------ #
 
+    def _get_embedding_model(self, *args, **kwargs):
+        """The real hook — verified against the Enterprise source.
+
+        ``ai.agent._get_embedding_model`` resolves the model by scanning
+        ``llm_providers.PROVIDERS``, which has no Mistral entry, so it
+        raises for a Mistral agent. The other overrides in this block
+        are guesses at method names that do not exist in stock; this is
+        the one Odoo actually calls (from ``_build_rag_context``).
+        """
+        if is_mistral_model(self.llm_model):
+            return "mistral-embed"
+        try:
+            return super()._get_embedding_model(*args, **kwargs)
+        except AttributeError:
+            raise
+
     def _get_embedding_model_for_provider(self, *args, **kwargs):
         provider = kwargs.get("provider") or (args[0] if args else None)
         if provider == "mistral":

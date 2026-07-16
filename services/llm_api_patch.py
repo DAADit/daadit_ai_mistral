@@ -41,7 +41,12 @@ import logging
 import time
 import uuid
 
-from .mistral_client import MistralClient, is_mistral_model
+from .mistral_client import (
+    EMBEDDING_MODEL,
+    MistralClient,
+    is_mistral_embedding_model,
+    is_mistral_model,
+)
 from . import tool_dispatch
 
 _logger = logging.getLogger(__name__)
@@ -147,6 +152,11 @@ def patch_llm_api_service() -> bool:
     # but the internal dispatcher still falls into stock's
     # `raise NotImplementedError()` at the bottom of `_request_llm`.
     original_request_llm_internal = getattr(LLMApiService, "_request_llm", None)
+    # `ai.agent._build_rag_context` embeds the user's prompt by calling
+    # `get_embedding` on this class directly — it never goes through
+    # `ai.embedding`, where our `_generate_embeddings` override handles
+    # the indexing side. See `_patched_get_embedding` below.
+    original_get_embedding = getattr(LLMApiService, "get_embedding", None)
 
     def _resolve_force_provider(env):
         """Read the system parameter that forces a non-stock provider.
@@ -285,7 +295,76 @@ def patch_llm_api_service() -> bool:
         # request_llm-loop uses 4-tuple) can unpack uniformly.
         return (adapted, [], [], {})
 
+    def _patched_get_embedding(api_self, *args, **kwargs):
+        """Query-side embedding dispatch.
+
+        Stock `get_embedding` builds its headers via `_get_base_headers`
+        → `_get_api_token`, whose provider table holds only openai and
+        google, so it raises `UserError("Unsupported provider 'mistral'")`
+        for us. That is what breaks chatting with a Mistral agent that
+        has sources: `_build_rag_context` embeds the prompt before any
+        chat call happens. Scheduled runs never touch RAG, which is why
+        they kept working while the chat window did not.
+
+        Mistral's /embeddings response is already OpenAI-shaped, so
+        callers doing `response['data'][0]['embedding']` need no change.
+        """
+        if getattr(api_self, "provider", None) != "mistral":
+            _diag_nonmistral_delegation(api_self, "get_embedding", kwargs)
+            if original_get_embedding is None:
+                raise AttributeError(
+                    "LLMApiService.get_embedding not found on stock; "
+                    "cannot delegate non-Mistral call."
+                )
+            return original_get_embedding(api_self, *args, **kwargs)
+
+        inputs = kwargs.get("input", args[0] if args else None)
+        if inputs is None:
+            inputs = []
+        elif isinstance(inputs, str):
+            inputs = [inputs]
+        else:
+            inputs = list(inputs)
+
+        # `dimensions` is accepted and ignored: mistral-embed has a fixed
+        # 1024-wide output, and the stored vectors were written by
+        # ai_embedding._daadit_call_mistral_embeddings, which ignores it
+        # too. Honouring it here would query a different vector space
+        # than the one the sources were indexed into.
+        model = kwargs.get("model") or EMBEDDING_MODEL
+        if not is_mistral_embedding_model(model):
+            _logger.info(
+                "daadit_ai_mistral.llm_api_patch: get_embedding asked for "
+                "model=%r on provider='mistral'; using %r instead so the "
+                "query matches the indexed vectors.",
+                model, EMBEDDING_MODEL,
+            )
+            model = EMBEDDING_MODEL
+
+        client = MistralClient.from_env(api_self.env)
+        response = client.embeddings(inputs, model=model)
+
+        try:
+            usage = MistralClient.extract_usage(response)
+            api_self.env["daadit_ai_mistral.usage"].sudo().record_usage(
+                kind="embedding",
+                model=model,
+                prompt_tokens=usage.get("total_tokens")
+                or usage.get("prompt_tokens")
+                or 0,
+                completion_tokens=0,
+                iterations=1,
+                has_tools=False,
+            )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral: embedding usage row creation failed"
+            )
+        return response
+
     LLMApiService.__init__ = _patched_init
+    if original_get_embedding is not None:
+        LLMApiService.get_embedding = _patched_get_embedding
     if original_request_llm is not None:
         LLMApiService.request_llm = _patched_request_llm
     if original_request_llm_internal is not None:
@@ -294,12 +373,13 @@ def patch_llm_api_service() -> bool:
     LLMApiService._daadit_original_init = original_init
     LLMApiService._daadit_original_request_llm = original_request_llm
     LLMApiService._daadit_original_request_llm_internal = original_request_llm_internal
+    LLMApiService._daadit_original_get_embedding = original_get_embedding
 
     _PATCHED = True
     _logger.info(
         "daadit_ai_mistral.llm_api_patch: LLMApiService.__init__/"
-        "request_llm/_request_llm patched to support provider='mistral' "
-        "(class: %s.%s)",
+        "request_llm/_request_llm/get_embedding patched to support "
+        "provider='mistral' (class: %s.%s)",
         LLMApiService.__module__, LLMApiService.__name__,
     )
     return True
