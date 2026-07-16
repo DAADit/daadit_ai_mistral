@@ -167,6 +167,36 @@ def _string_array(desc, default=None):
 
 
 TOOL_SCHEMAS = {
+    "ir_actions_server_search_knowledge": {
+        "description": (
+            "Search this agent's own knowledge sources (Odoo Knowledge "
+            "articles) by meaning rather than keywords — a question "
+            "about an 'invoice' also finds a passage that says 'bill'. "
+            "Use it to answer from documented company knowledge instead "
+            "of from memory. Pass the question as literally as you can. "
+            "Returns {'ok': true, 'chunks': [{'source', 'url', "
+            "'content'}]}. An EMPTY chunks list means the knowledge "
+            "base holds no answer: say so, never invent one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "The question to look up, in the asker's own "
+                        "words where possible."
+                    ),
+                },
+                "top_n": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Passages to return (1-10). Default 5.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
     "ir_actions_server_search": {
         "description": (
             "Search records of an Odoo model. Returns a list of dicts "

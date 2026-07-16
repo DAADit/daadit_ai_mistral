@@ -51,6 +51,10 @@ from ..services import diagnostics
 
 _logger = logging.getLogger(__name__)
 
+# Per-chunk cap for _ai_tool_search_knowledge. Five chunks of raw
+# article text can otherwise dwarf the rest of the run's context.
+_KNOWLEDGE_CHUNK_CHARS = 2000
+
 
 # Mistral model labels for the selection field. Order = display order.
 MISTRAL_MODEL_SELECTION = [
@@ -1190,6 +1194,90 @@ class AIAgent(models.Model):
             "model_name": model_name,
             "record_id": record.id,
         }
+
+    def _ai_tool_search_knowledge(self, query=None, top_n=5, **_extra):
+        """Semantic search over this agent's own knowledge sources.
+
+        Stock only retrieves in ``ai.agent._build_rag_context``, which
+        runs on the interactive chat path. The scheduled runner in
+        ``daadit_ai_agent_schedule`` calls ``request_llm`` directly, so a
+        scheduled agent can never reach its own sources. Pre-flight
+        retrieval would not fix that either: a schedule's prompt is a
+        task instruction ("run your hourly scan"), not the question that
+        needs answering — that only surfaces mid-run, inside a tool
+        result. So retrieval has to be a tool the agent calls with the
+        question once it has found it.
+
+        Returns ``{'ok': True, 'chunks': [{source, url, content}, ...]}``.
+        An empty ``chunks`` list means the sources hold no answer — the
+        caller is expected to say so rather than invent one.
+        """
+        self.ensure_one()
+        query = (query or "").strip()
+        if not query:
+            return {"error": "query is required — pass the question verbatim."}
+        if not self.sources_ids:
+            return {"ok": True, "chunks": [],
+                    "reason": "this agent has no knowledge sources attached"}
+        try:
+            top_n = max(1, min(int(top_n or 5), 10))
+        except (TypeError, ValueError):
+            top_n = 5
+
+        try:
+            from odoo.addons.ai.utils.llm_api_service import LLMApiService
+        except ImportError:
+            return {"error": "Odoo AI LLMApiService is not importable"}
+
+        # v19.0.4.10.0 made get_embedding Mistral-aware; without that
+        # patch this call raises "Unsupported provider 'mistral'".
+        llm_api_patch.patch_llm_api_service()
+        embedding_model = self._get_embedding_model()
+        try:
+            response = LLMApiService(
+                env=self.env, provider=self._get_provider(),
+            ).get_embedding(
+                input=query,
+                dimensions=self.env["ai.embedding"]._get_dimensions(),
+                model=embedding_model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral: knowledge search failed to embed query"
+            )
+            return {"error": "could not embed the query: %s" % exc}
+
+        data = (response or {}).get("data") or []
+        if not data:
+            return {"error": "the embedding service returned no vector"}
+
+        chunks = self.env["ai.embedding"]._get_similar_chunks(
+            query_embedding=data[0]["embedding"],
+            sources=self.sources_ids,
+            embedding_model=embedding_model,
+            top_n=top_n,
+        )
+        if not chunks:
+            return {"ok": True, "chunks": [],
+                    "reason": "no matching passage in this agent's sources"}
+
+        source_by_checksum = {
+            s.attachment_id.checksum: s
+            for s in self.sources_ids.filtered(lambda s: s.attachment_id)
+        }
+        results = []
+        for chunk in chunks:
+            source = source_by_checksum.get(chunk.attachment_id.checksum)
+            results.append({
+                "source": source.name if source else "",
+                "url": (source.url or "") if source else "",
+                "content": (chunk.content or "")[:_KNOWLEDGE_CHUNK_CHARS],
+            })
+        _logger.info(
+            "daadit_ai_mistral: knowledge search agent=%s q=%d chars -> %d chunk(s)",
+            self.id, len(query), len(results),
+        )
+        return {"ok": True, "chunks": results}
 
     def _ai_tool_schedule_activity(self, model_name=None, record_id=None,
                                    activity_type_xmlid=None,
