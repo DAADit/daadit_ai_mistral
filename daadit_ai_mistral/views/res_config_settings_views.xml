@@ -82,21 +82,14 @@
                             <li>Paste it in the <em>Use your own Mistral AI account</em> field below. Default API base URL <code>https://api.mistral.ai</code> works for everyone.</li>
                         </ol>
                     </details>
-                    <details class="mb-1">
-                        <summary class="small fw-bold">
-                            <i class="fa fa-microsoft me-1"/> Microsoft 365 Copilot (Azure OpenAI)
-                        </summary>
-                        <ol class="small mt-1 mb-2">
-                            <li>Open <a href="https://portal.azure.com/" target="_blank" rel="noopener">portal.azure.com</a> with an account that has <strong>Cognitive Services Contributor</strong> on the relevant subscription.</li>
-                            <li>If you don't have one yet: create an <strong>Azure OpenAI</strong> resource — Search bar → "Azure OpenAI" → <strong>Create</strong>. Pick a region (West Europe / Sweden Central are common for EU). Approval may take a few minutes.</li>
-                            <li>Open the resource → <strong>Resource Management → Keys and Endpoint</strong>. Copy <code>Key 1</code> and the <strong>Endpoint</strong> URL (looks like <code>https://YOUR-RESOURCE.openai.azure.com/</code>).</li>
-                            <li>Open <strong>Azure AI Studio → Deployments</strong> (<a href="https://oai.azure.com/portal" target="_blank" rel="noopener">oai.azure.com/portal</a>) and deploy a model (e.g. <code>gpt-4o</code>). The deployment name is what Odoo uses to address the model.</li>
-                            <li>Paste the key + endpoint below. Default API version <code>2024-10-21</code> works for the supported models; bump it only when Microsoft documents it for a feature you need (<a href="https://learn.microsoft.com/azure/ai-services/openai/reference" target="_blank" rel="noopener">learn.microsoft.com/azure/ai-services/openai/reference</a>).</li>
-                        </ol>
-                        <p class="small text-muted mb-0">
-                            Note: this is the <em>Azure OpenAI</em> path — using your enterprise Azure subscription. If you're looking for the consumer Microsoft 365 Copilot chat assistant, that's a different product and doesn't expose an API key here.
-                        </p>
-                    </details>
+                    <!--
+                        v19.0.4.5.0 (store readiness): the Microsoft 365
+                        Copilot / Azure OpenAI walkthrough moved out of
+                        this module — it documented fields owned by the
+                        separate daadit_ai_copilot module, which renders
+                        its own setup card. This card only documents
+                        providers this module (or stock Odoo) ships.
+                    -->
                 </div>
             </xpath>
 

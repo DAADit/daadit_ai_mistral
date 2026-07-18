@@ -7,6 +7,61 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.4.5.0 — 2026-07-11
+
+Store-readiness release. Everything a customer outside DAADit needs:
+no references to sibling modules they don't have, resilience against
+Mistral's free-tier throttling, and the Odoo Apps Store assets.
+
+### Minor
+
+* **Dynamic cross-provider hints.** The base-URL validator's hints
+  that pointed at the `daadit_ai_claude` / `daadit_ai_copilot`
+  settings fields now render only when that sibling module is
+  actually installed; otherwise a generic "does not belong in the
+  Mistral provider settings" wording is used. DAADit's own
+  environments keep the full hints; store customers never see fields
+  they don't have.
+* **Provider help-card slimmed.** The Microsoft 365 Copilot (Azure
+  OpenAI) walkthrough moved out of the Settings info-card — it
+  documented fields owned by the separate `daadit_ai_copilot`
+  module, which renders its own setup card.
+* **429/5xx backoff with jitter** (Fase 0 guardrail). `_post` retries
+  HTTP 429 up to 2× and 502/503/504 up to 1×, honouring Mistral's
+  `Retry-After` header when present, else exponential base with
+  0-50% jitter (capped at 15s per wait). Free-tier keys throttle
+  aggressively; end users no longer see a raw "Rate limit exceeded"
+  dialog on the first burst.
+* **Store assets.** New `static/description/index.html` product page
+  and `banner.png`; `support` and `images` manifest keys added.
+  Module icon reverted to the original DAADit-branded artwork —
+  Mistral's own mark is their trademark and doesn't belong on a
+  store listing implying endorsement (a nominative-use disclaimer
+  is included on the store page).
+* **Cleanup.** Dropped the dead `data/debug_actions.xml` (unreferenced
+  since v3.5.2).
+
+## 19.0.4.4.0 — 2026-07-11
+
+Fase 0 governance guardrails (Knowledge article id 173): the LLM
+tool-call loop budget and its failure visibility.
+
+### Minor
+
+* **Top-level MAX_ITER 6 → 10** per the governance article. Routed
+  sub-runs stay at 4.
+* **Explicit bail-out messages.** Cap-hit and hallucinated-toolname
+  bail-outs return a translated user-facing sentence instead of an
+  empty response.
+* **Unknown-tool retry cap.** Two "Unknown tool" results in one turn
+  stop the loop.
+* **Cross-module exhaustion signal.** New threadlocals
+  `router_state.top_level_exhausted` / `exhaustion_reason`, consumed
+  by `daadit_ai_agent_schedule` (v19.0.2.1.0+) to mark scheduled runs
+  `error` instead of `done` when the loop bailed.
+* **Usage rows on bail-out** carry `error="bail:max_iter"` /
+  `"bail:unknown_tools"`.
+
 ## 19.0.4.3.0 — 2026-07-04
 
 Daily cost cap (spend circuit-breaker). With six query agents on

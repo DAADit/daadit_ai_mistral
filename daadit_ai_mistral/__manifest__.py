@@ -32,10 +32,12 @@ in their respective files. Multiple candidate names are wrapped to survive
 across Odoo versions; verify against the installed Enterprise source on your
 Odoo.sh dev branch before relying on this in production.
 """,
-    "version": "19.0.4.4.0",
+    "version": "19.0.4.5.0",
     "category": "Productivity/Discuss",
     "author": "DAADit",
     "website": "https://daadit.group",
+    "support": "https://daadit.group",
+    "images": ["static/description/banner.png"],
     "license": "LGPL-3",
     "depends": [
         "base",

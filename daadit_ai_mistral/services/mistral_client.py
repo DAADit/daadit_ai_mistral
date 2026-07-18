@@ -13,6 +13,8 @@ Docs: https://docs.mistral.ai/api/
 """
 import json
 import logging
+import random
+import time
 from typing import Iterable, List, Mapping, Optional, Sequence
 
 import requests
@@ -215,6 +217,16 @@ class MistralClient:
 
     # --- internal HTTP helper -------------------------------------------
 
+    # Retry budget for transient statuses (Fase 0 "backoff met jitter",
+    # governance article id 173). 429 gets two retries because free-tier
+    # Mistral keys throttle aggressively; 5xx gets one because those are
+    # usually real outages where hammering doesn't help. Delays honour
+    # the Retry-After header when Mistral sends one, else exponential
+    # base with 0-50% jitter so parallel workers don't retry in
+    # lock-step. The delay cap keeps a stalled worker bounded.
+    _RETRY_BUDGET = {429: 2, 502: 1, 503: 1, 504: 1}
+    _RETRY_DELAY_CAP = 15.0
+
     def _post(self, path: str, payload: dict) -> dict:
         url = f"{self.base_url}{path}"
         headers = {
@@ -222,15 +234,40 @@ class MistralClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        try:
-            resp = requests.post(
-                url,
-                headers=headers,
-                data=json.dumps(payload),
-                timeout=self.timeout,
+        attempts = {}  # status -> retries done, within this call
+        while True:
+            try:
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    data=json.dumps(payload),
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                raise RuntimeError(f"Mistral request failed: {exc}") from exc
+
+            status = resp.status_code
+            budget = self._RETRY_BUDGET.get(status, 0)
+            if not budget or attempts.get(status, 0) >= budget:
+                break
+
+            attempts[status] = attempts.get(status, 0) + 1
+            delay = None
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = None
+            if delay is None:
+                base = 1.5 * (2 ** (attempts[status] - 1))
+                delay = base + random.uniform(0, base / 2)
+            delay = min(delay, self._RETRY_DELAY_CAP)
+            _logger.warning(
+                "Mistral API %d on %s — retry %d/%d in %.1fs",
+                status, path, attempts[status], budget, delay,
             )
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Mistral request failed: {exc}") from exc
+            time.sleep(delay)
 
         if 400 <= resp.status_code < 500:
             try:

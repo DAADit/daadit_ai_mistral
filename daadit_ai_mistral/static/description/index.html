@@ -1,0 +1,78 @@
+<section style="max-width: 875px; margin: 0 auto; font-family: sans-serif; color: #333;">
+
+    <img src="banner.png" alt="DAADit AI — Mistral Provider"
+         style="width: 100%; border-radius: 8px; margin-bottom: 24px;"/>
+
+    <h2 style="color: #c44e10;">Mistral AI as a first-class LLM provider for Odoo 19 Enterprise</h2>
+    <p>
+        Odoo 19 Enterprise ships AI features wired to OpenAI and Google.
+        This module adds <strong>Mistral AI</strong> as a third provider with
+        feature parity: chat completions, embeddings (Sources / RAG) and
+        tool calling — so your AI agents can query and act on your Odoo data
+        through an EU-based model provider.
+    </p>
+
+    <h3 style="color: #c44e10;">Features</h3>
+    <ul>
+        <li><strong>7 chat models</strong> — Mistral Large, Medium, Small,
+            Codestral, Pixtral Large (vision), Ministral 8B and 3B, selectable
+            per AI agent.</li>
+        <li><strong>Embeddings</strong> — <code>mistral-embed</code> powers
+            Odoo's Sources / RAG features end-to-end on Mistral.</li>
+        <li><strong>Tool calling</strong> — agents use Odoo's standard AI
+            topics/tools (search, aggregate, introspect) through Mistral's
+            function-calling API.</li>
+        <li><strong>Usage &amp; cost tracking</strong> — every call is logged
+            with token counts per agent (<em>Mistral Usage</em> menu), with a
+            configurable daily spend cap per agent.</li>
+        <li><strong>Settings UI</strong> — a Mistral block in General
+            Settings → AI, next to the ChatGPT / Gemini blocks, including a
+            step-by-step "where do I get an API key" helper.</li>
+    </ul>
+
+    <h3 style="color: #c44e10;">Guardrails built in</h3>
+    <ul>
+        <li><strong>Loop protection</strong> — hard cap of 10 LLM calls per
+            turn; hallucinated tool names are stopped after 2 attempts. Clear
+            user-facing message instead of a silent failure.</li>
+        <li><strong>Context protection</strong> — tool results are stripped of
+            binary fields and size-capped, so a broad query can't blow past
+            the model's context window.</li>
+        <li><strong>Rate-limit resilience</strong> — automatic backoff with
+            jitter on HTTP 429/5xx, honouring Mistral's
+            <code>Retry-After</code>.</li>
+        <li><strong>Data protection</strong> — per-agent model allow/block
+            lists, a PII field blocklist enforced on results <em>and</em>
+            filters, and a base-URL allowlist so the API key can only ever be
+            sent to Mistral.</li>
+    </ul>
+
+    <h3 style="color: #c44e10;">Setup in three steps</h3>
+    <ol>
+        <li>Create an API key at
+            <a href="https://console.mistral.ai/" target="_blank" rel="noopener">console.mistral.ai</a>.</li>
+        <li>Enable <em>Use your own Mistral AI account</em> in General
+            Settings → AI and paste the key.</li>
+        <li>Pick a Mistral model on any AI agent — done.</li>
+    </ol>
+
+    <h3 style="color: #c44e10;">Requirements</h3>
+    <ul>
+        <li>Odoo 19 <strong>Enterprise</strong> (depends on the standard
+            <code>ai</code> and <code>ai_app</code> modules).</li>
+        <li>A Mistral AI account with billing enabled (a typical agent
+            conversation costs a few cents).</li>
+    </ul>
+    <p style="font-size: 0.85em; color: #777;">
+        Mistral AI is a trademark of Mistral AI SAS. This module is an
+        independent integration by DAADit and is not affiliated with or
+        endorsed by Mistral AI.
+    </p>
+
+    <h3 style="color: #c44e10;">Support</h3>
+    <p>
+        Questions or issues? Contact us via
+        <a href="https://daadit.group" target="_blank" rel="noopener">daadit.group</a>.
+    </p>
+
+</section>

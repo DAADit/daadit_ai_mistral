@@ -209,25 +209,53 @@ class ResConfigSettings(models.TransientModel):
 
         if host not in allowed:
             # Cross-provider hint — if the host clearly belongs to a
-            # known sibling provider, point the admin at the right
+            # known other provider, point the admin at the right
             # settings field instead of just rejecting the URL.
+            #
+            # v19.0.4.5.0 (store readiness): hints that name a DAADit
+            # sibling module's field only render when that module is
+            # actually installed. A store customer running just this
+            # module gets a generic "does not belong here" wording
+            # instead of a pointer to a field they don't have.
+            def _sibling_installed(name):
+                try:
+                    return bool(env["ir.module.module"].sudo().search_count(
+                        [("name", "=", name), ("state", "=", "installed")],
+                    ))
+                except Exception:  # noqa: BLE001
+                    return False
+
             wrong_provider_hint = ""
             host_lower = host.lower()
             if "anthropic.com" in host_lower:
-                wrong_provider_hint = _(
-                    " This URL looks like Anthropic Claude's API "
-                    "endpoint — set it on the 'Claude API base URL' "
-                    "field of the Anthropic / Claude provider block, "
-                    "not Mistral's."
-                )
+                if _sibling_installed("daadit_ai_claude"):
+                    wrong_provider_hint = _(
+                        " This URL looks like Anthropic Claude's API "
+                        "endpoint — set it on the 'Claude API base URL' "
+                        "field of the Anthropic / Claude provider block, "
+                        "not Mistral's."
+                    )
+                else:
+                    wrong_provider_hint = _(
+                        " This URL looks like Anthropic Claude's API "
+                        "endpoint — it does not belong in the Mistral "
+                        "provider settings."
+                    )
             elif "openai.azure.com" in host_lower or (
                 "services.ai.azure.com" in host_lower
             ):
-                wrong_provider_hint = _(
-                    " This URL looks like an Azure OpenAI / Foundry "
-                    "endpoint — set it on the 'Microsoft 365 Copilot "
-                    "endpoint' field, not Mistral's."
-                )
+                if _sibling_installed("daadit_ai_copilot"):
+                    wrong_provider_hint = _(
+                        " This URL looks like an Azure OpenAI / Foundry "
+                        "endpoint — set it on the 'Microsoft 365 Copilot "
+                        "endpoint' field, not Mistral's."
+                    )
+                else:
+                    wrong_provider_hint = _(
+                        " This URL looks like an Azure OpenAI / Foundry "
+                        "endpoint — it does not belong in the Mistral "
+                        "provider settings."
+                    )
             elif "openai.com" in host_lower:
                 wrong_provider_hint = _(
                     " This URL looks like OpenAI's public API — "
