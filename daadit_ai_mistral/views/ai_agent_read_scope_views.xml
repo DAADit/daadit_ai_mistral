@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!--
+        Hard per-agent read scope (v19.0.4.8.0).
+
+        Layout follows the constraints documented in ai_agent_views.xml:
+        no embedded <list> inside a <field> (Odoo 19's validator rejected
+        that in v3.9.3), so the scope model gets standalone list/form
+        views and the One2many on the agent form uses the default
+        external list view.
+    -->
+
+    <record id="view_daadit_ai_agent_read_scope_list" model="ir.ui.view">
+        <field name="name">daadit.ai.agent.read.scope.list</field>
+        <field name="model">daadit.ai.agent.read.scope</field>
+        <field name="arch" type="xml">
+            <list editable="bottom">
+                <field name="model_id" options="{'no_create': True}"/>
+                <field name="domain"/>
+                <field name="active" widget="boolean_toggle"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_daadit_ai_agent_read_scope_form" model="ir.ui.view">
+        <field name="name">daadit.ai.agent.read.scope.form</field>
+        <field name="model">daadit.ai.agent.read.scope</field>
+        <field name="arch" type="xml">
+            <form>
+                <sheet>
+                    <group>
+                        <field name="agent_id"/>
+                        <field name="model_id"
+                               options="{'no_create': True}"/>
+                        <field name="domain"
+                               placeholder='[["root_article_id", "=", 191]]'/>
+                        <field name="active"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="ai_agent_view_form_inherit_daadit_read_scope"
+            model="ir.ui.view">
+        <field name="name">ai.agent.view.form.inherit.daadit.read.scope</field>
+        <field name="model">ai.agent</field>
+        <field name="inherit_id" ref="ai_app.ai_agent_view_form"/>
+        <field name="arch" type="xml">
+
+            <xpath expr="//form//sheet" position="inside">
+
+                <separator string="Hard read scope"
+                           invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')"/>
+
+                <div invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')">
+                    <p class="text-muted">
+                        Per-model record domains, AND-ed into every
+                        search this agent runs — enforced in the tool
+                        layer, below the prompt. Models without a line
+                        stay governed by the allowed/blocked lists
+                        alone. Example: scope the Vault Agent to
+                        <code>knowledge.article</code> with domain
+                        <code>[["root_article_id", "=", 191]]</code>.
+                    </p>
+                    <field name="daadit_read_scope_ids"
+                           nolabel="1"
+                           context="{'default_agent_id': id, 'active_test': False}"/>
+                </div>
+
+            </xpath>
+
+        </field>
+    </record>
+
+</odoo>

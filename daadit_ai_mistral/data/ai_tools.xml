@@ -54,6 +54,24 @@
 )</field>
         </record>
 
+        <!-- Knowledge retrieval tool (v19.0.4.11.0). Stock only
+             retrieves in ai.agent._build_rag_context, which runs on the
+             interactive chat path only — a scheduled agent can never
+             reach its own sources. Pre-flight retrieval would not help:
+             a schedule's prompt is a task instruction, not the question
+             that needs answering. Hence retrieval as a tool. Read-only;
+             attach it to any agent that has sources_ids. -->
+        <record id="ir_actions_server_search_knowledge" model="ir.actions.server">
+            <field name="name">AI: Search Knowledge</field>
+            <field name="use_in_ai" eval="True"/>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="code">ai['result'] = record._ai_tool_search_knowledge(
+    query=query,
+    top_n=top_n,
+)</field>
+        </record>
+
         <!-- Router tool (v19.0.4.2.0): delegate a question to another
              agent. Attach ONLY to concierge-level agents (Ask AI) via
              a dedicated topic — never to specialists (the depth guard

@@ -167,6 +167,36 @@ def _string_array(desc, default=None):
 
 
 TOOL_SCHEMAS = {
+    "ir_actions_server_search_knowledge": {
+        "description": (
+            "Search this agent's own knowledge sources (Odoo Knowledge "
+            "articles) by meaning rather than keywords — a question "
+            "about an 'invoice' also finds a passage that says 'bill'. "
+            "Use it to answer from documented company knowledge instead "
+            "of from memory. Pass the question as literally as you can. "
+            "Returns {'ok': true, 'chunks': [{'source', 'url', "
+            "'content'}]}. An EMPTY chunks list means the knowledge "
+            "base holds no answer: say so, never invent one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "The question to look up, in the asker's own "
+                        "words where possible."
+                    ),
+                },
+                "top_n": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Passages to return (1-10). Default 5.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
     "ir_actions_server_search": {
         "description": (
             "Search records of an Odoo model. Returns a list of dicts "
@@ -911,6 +941,171 @@ def _normalize_json_string_param(v):
         return "[]"
 
 
+# ---------------------------------------------------------------------------
+# Domain post-processing for search / read_group (v19.0.4.8.0)
+#
+# Two Fase-0 items that both operate on the parsed domain right before
+# dispatch:
+#
+# 1. Non-searchable fields (gate: tool-laag). Agents keep building
+#    domains on computed, non-stored fields without a search method
+#    (observed repeatedly: ``mail.activity.state``). The ORM refuses
+#    those outright and the whole tool call dies. Instead we TRANSLATE
+#    the ones we know (activity ``state`` → the ``date_deadline``
+#    comparison it is computed from) and STRIP the rest (replaced by a
+#    true-leaf so AND/OR structure stays intact — the result set can
+#    only widen, never silently shrink), with a note in the tool result
+#    so the model knows to post-filter.
+#
+# 2. Hard per-agent read scope (gate: hard lees-domein). When the agent
+#    has a ``daadit.ai.agent.read.scope`` line for the model, that
+#    domain is AND-ed in — enforced here in the tool layer, below the
+#    prompt. Fail-closed: an unusable scope domain blocks the read.
+# ---------------------------------------------------------------------------
+# odoo.osv.expression is deprecated in 19 and warns at import (builds
+# must stay warning-free). odoo.fields.Domain is the 19-native
+# equivalent; ``list(Domain)`` yields the classic domain list, which
+# json.dumps serialises fine.
+from odoo.fields import Domain as _Domain
+
+_TRUE_LEAF = (1, "=", 1)
+
+
+def _domain_and(domains):
+    return list(_Domain.AND(domains))
+
+
+def _domain_or(domains):
+    return list(_Domain.OR(domains))
+
+_DOMAIN_TOOLS = ("ir_actions_server_search", "ir_actions_server_read_group")
+
+
+def _translate_activity_state_leaf(env, leaf):
+    """Rewrite a ``mail.activity.state`` condition to ``date_deadline``.
+
+    ``state`` on ``mail.activity`` is computed from ``date_deadline``
+    vs. the user's today and is not searchable. The mapping below is
+    exactly the compute's definition, so the translation is lossless:
+    overdue < today, today = today, planned > today.
+
+    Returns a normalized domain (one expression) or None when the
+    operator/value shape isn't translatable.
+    """
+    from odoo import fields as odoo_fields
+    _f, op, value = leaf
+    today = odoo_fields.Date.to_string(
+        odoo_fields.Date.context_today(env.user)
+    )
+    direct = {
+        "overdue": ("date_deadline", "<", today),
+        "today": ("date_deadline", "=", today),
+        "planned": ("date_deadline", ">", today),
+    }
+    complement = {
+        "overdue": ("date_deadline", ">=", today),
+        "today": ("date_deadline", "!=", today),
+        "planned": ("date_deadline", "<=", today),
+    }
+    table = direct if op in ("=", "in") else (
+        complement if op in ("!=", "not in") else None
+    )
+    if table is None:
+        return None
+    values = value if isinstance(value, (list, tuple)) else [value]
+    parts = [[list(table[v])] for v in values if v in table]
+    if not parts or len(parts) != len(values):
+        return None
+    combine = _domain_or if table is direct else _domain_and
+    return combine(parts)
+
+
+# (model_name, field_path) → callable(env, leaf) returning a
+# replacement domain, or None to fall back to stripping the leaf.
+_UNSEARCHABLE_TRANSLATORS = {
+    ("mail.activity", "state"): _translate_activity_state_leaf,
+}
+
+
+def _domain_field_unsearchable(env, model_name, path):
+    """True when ``path`` ends on a field the ORM cannot search.
+
+    Non-stored fields without a ``search=`` method (and not related)
+    raise on search. Unknown fields/models return False — the ORM's
+    own "Invalid field" error is more instructive there.
+    """
+    try:
+        current = env[model_name]
+    except KeyError:
+        return False
+    segments = str(path).split(".")
+    for i, seg in enumerate(segments):
+        field = current._fields.get(seg)
+        if field is None:
+            return False
+        if i < len(segments) - 1:
+            if not field.relational:
+                return False
+            try:
+                current = env[field.comodel_name]
+            except KeyError:
+                return False
+            continue
+        return not (field.store or field.search or field.related)
+    return False
+
+
+def _sanitize_unsearchable_domain(env, model_name, domain):
+    """Translate or strip domain leaves on non-searchable fields.
+
+    Returns ``(new_domain, notes)``. Stripped leaves become a
+    true-leaf so prefix operators keep their arity; each rewrite adds
+    a human-readable note that is attached to the tool result.
+    """
+    notes = []
+    out = []
+    for token in domain:
+        is_leaf = (
+            isinstance(token, (list, tuple))
+            and len(token) == 3
+            and isinstance(token[0], str)
+        )
+        if is_leaf and _domain_field_unsearchable(
+            env, model_name, token[0]
+        ):
+            translator = _UNSEARCHABLE_TRANSLATORS.get(
+                (model_name, token[0])
+            )
+            replacement = None
+            if translator is not None:
+                try:
+                    replacement = translator(env, token)
+                except Exception:  # noqa: BLE001
+                    _logger.exception(
+                        "daadit_ai_mistral.tool_dispatch: translator "
+                        "for %s.%s raised — falling back to strip",
+                        model_name, token[0],
+                    )
+            if replacement:
+                out.extend(replacement)
+                notes.append(
+                    "Condition on '%s' (not searchable on %s) was "
+                    "translated to an equivalent stored-field filter."
+                    % (token[0], model_name)
+                )
+            else:
+                out.append(list(_TRUE_LEAF))
+                notes.append(
+                    "Condition on '%s' was REMOVED: the field is not "
+                    "searchable on %s. The result set may be wider "
+                    "than requested — filter the returned records "
+                    "yourself if needed." % (token[0], model_name)
+                )
+            continue
+        out.append(token)
+    return out, notes
+
+
 # Tools whose stock method takes a required ``model_name`` first arg.
 # Mistral periodically omits it (staging logs: repeated
 # "_ai_tool_search() missing 1 required positional argument:
@@ -1374,6 +1569,61 @@ def run_tool_call(agent, tool_call):
                 )
 
     # ------------------------------------------------------------------
+    # Domain post-processing: non-searchable-field repair + hard
+    # per-agent read scope (v19.0.4.8.0 — see helper section above).
+    # ------------------------------------------------------------------
+    _domain_notes = []
+    if fn_name in _DOMAIN_TOOLS and requested_model and env is not None:
+        _dom_raw = kwargs.get("domain")
+        _dom = None
+        try:
+            _dom = json.loads(_dom_raw) if isinstance(_dom_raw, str) \
+                else _dom_raw
+        except (TypeError, ValueError):
+            _dom = None
+        if isinstance(_dom, list):
+            # (1) Translate/strip conditions the ORM cannot search.
+            try:
+                _dom, _domain_notes = _sanitize_unsearchable_domain(
+                    env, requested_model, _dom,
+                )
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "daadit_ai_mistral.tool_dispatch: domain sanitize "
+                    "failed for %s on %s — using original domain",
+                    fn_name, requested_model,
+                )
+            # (2) Hard read scope — fail-closed: a scope line whose
+            # domain can't be applied blocks the read rather than
+            # silently widening it.
+            if hasattr(agent, "_daadit_read_scope_domain"):
+                try:
+                    _scope = agent._daadit_read_scope_domain(
+                        requested_model
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _logger.exception(
+                        "daadit_ai_mistral.tool_dispatch: read-scope "
+                        "lookup failed for agent=%s model=%s — "
+                        "failing closed", agent.id, requested_model,
+                    )
+                    return {"error": (
+                        f"This agent's read scope for "
+                        f"'{requested_model}' could not be applied "
+                        f"({exc}). The read was blocked; ask an "
+                        f"administrator to fix the agent's read-scope "
+                        f"configuration."
+                    )}
+                if _scope:
+                    _dom = _domain_and([_scope, _dom])
+                    _logger.info(
+                        "daadit_ai_mistral.tool_dispatch: read scope "
+                        "enforced for agent=%s on %s (scope=%s)",
+                        agent.id, requested_model, _scope,
+                    )
+            kwargs["domain"] = json.dumps(_dom, default=str)
+
+    # ------------------------------------------------------------------
     # read_group aggregate normalisation (v19.0.4.1.2)
     # ------------------------------------------------------------------
     # Mistral spells the record-count aggregate as `count` / `id` /
@@ -1569,6 +1819,10 @@ def run_tool_call(agent, tool_call):
     # "prompt too large" HTTP 400.
     # ------------------------------------------------------------------
     safe = _enforce_result_size_cap(safe, fn_name)
+    # Surface domain rewrites (non-searchable-field repair) to the
+    # model so it knows the result set may be wider than it asked for.
+    if _domain_notes and isinstance(safe, dict):
+        safe.setdefault("daadit_domain_notes", _domain_notes)
     _logger.info(
         "daadit_ai_mistral.tool_dispatch: %s ok (args_keys=%s, "
         "result_type=%s)",

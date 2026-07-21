@@ -138,6 +138,43 @@ def _redact_payload(payload):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Retry policy for rate limits and transient upstream failures (Fase 0,
+# Governance & guardrails knowledge id 173: "backoff met jitter bij
+# rate-limit-fouten in plaats van retry-stormen").
+#
+# A request is retried when Mistral answers 429 (rate limit) or a
+# transient 5xx (502/503/504), or when the connection itself fails.
+# Waits grow exponentially with full jitter and honour Retry-After when
+# the server sends one. Non-transient statuses (400/401/422/...) are
+# never retried — they would fail identically.
+# ---------------------------------------------------------------------------
+_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+_MAX_ATTEMPTS = 3
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_CAP_SECONDS = 20.0
+
+
+def _retry_wait_seconds(attempt, retry_after=None):
+    """Seconds to sleep before retry ``attempt`` (1-based).
+
+    Full-jitter exponential backoff: uniform(0, base * 2^attempt),
+    capped. When the server supplied a parseable Retry-After, that
+    value wins (also capped) — plus a little jitter so concurrent
+    workers don't stampede on the exact same second.
+    """
+    if retry_after:
+        try:
+            ra = float(retry_after)
+            if ra > 0:
+                return min(ra, _BACKOFF_CAP_SECONDS) + random.uniform(0, 1)
+        except (TypeError, ValueError):
+            pass
+    return random.uniform(0, min(
+        _BACKOFF_CAP_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** attempt)
+    ))
+
+
 class MistralClient:
     """Thin wrapper around requests for Mistral's API.
 
@@ -202,8 +239,22 @@ class MistralClient:
                 "Mistral API key is not enabled. Toggle 'Use your own "
                 "Mistral AI account' in General Settings → AI."
             ))
+        api_key = ICP.get_param("daadit_ai_mistral.mistral_key", default="")
+        # Fase-0 API-key-splitsing (Governance & guardrails, knowledge
+        # id 173): scheduled/batch callers flag themselves through the
+        # env context. When a dedicated batch key is configured, batch
+        # traffic uses it — so a runaway scheduled agent can exhaust
+        # its own rate limit but never the client-facing key that
+        # serves Ask AI / Milo livechat. Falls back to the main key
+        # when no batch key is set, so the split is opt-in.
+        if env.context.get("daadit_mistral_batch"):
+            batch_key = (ICP.get_param(
+                "daadit_ai_mistral.mistral_key_batch", default="",
+            ) or "").strip()
+            if batch_key:
+                api_key = batch_key
         return cls(
-            api_key=ICP.get_param("daadit_ai_mistral.mistral_key", default=""),
+            api_key=api_key,
             base_url=ICP.get_param(
                 "daadit_ai_mistral.mistral_base_url",
                 default="https://api.mistral.ai/v1",
@@ -217,16 +268,6 @@ class MistralClient:
 
     # --- internal HTTP helper -------------------------------------------
 
-    # Retry budget for transient statuses (Fase 0 "backoff met jitter",
-    # governance article id 173). 429 gets two retries because free-tier
-    # Mistral keys throttle aggressively; 5xx gets one because those are
-    # usually real outages where hammering doesn't help. Delays honour
-    # the Retry-After header when Mistral sends one, else exponential
-    # base with 0-50% jitter so parallel workers don't retry in
-    # lock-step. The delay cap keeps a stalled worker bounded.
-    _RETRY_BUDGET = {429: 2, 502: 1, 503: 1, 504: 1}
-    _RETRY_DELAY_CAP = 15.0
-
     def _post(self, path: str, payload: dict) -> dict:
         url = f"{self.base_url}{path}"
         headers = {
@@ -234,40 +275,43 @@ class MistralClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        attempts = {}  # status -> retries done, within this call
-        while True:
+        body = json.dumps(payload)
+        resp = None
+        last_exc = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 resp = requests.post(
                     url,
                     headers=headers,
-                    data=json.dumps(payload),
+                    data=body,
                     timeout=self.timeout,
                 )
+                last_exc = None
             except requests.RequestException as exc:
-                raise RuntimeError(f"Mistral request failed: {exc}") from exc
-
-            status = resp.status_code
-            budget = self._RETRY_BUDGET.get(status, 0)
-            if not budget or attempts.get(status, 0) >= budget:
+                # Connection-level failure — transient by nature.
+                last_exc = exc
+                resp = None
+            if resp is not None and resp.status_code not in _RETRY_STATUSES:
                 break
-
-            attempts[status] = attempts.get(status, 0) + 1
-            delay = None
-            retry_after = resp.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    delay = float(retry_after)
-                except (TypeError, ValueError):
-                    delay = None
-            if delay is None:
-                base = 1.5 * (2 ** (attempts[status] - 1))
-                delay = base + random.uniform(0, base / 2)
-            delay = min(delay, self._RETRY_DELAY_CAP)
-            _logger.warning(
-                "Mistral API %d on %s — retry %d/%d in %.1fs",
-                status, path, attempts[status], budget, delay,
+            if attempt >= _MAX_ATTEMPTS:
+                break
+            wait = _retry_wait_seconds(
+                attempt,
+                resp.headers.get("Retry-After") if resp is not None else None,
             )
-            time.sleep(delay)
+            _logger.warning(
+                "Mistral API transient failure on %s (%s) — retry %d/%d "
+                "in %.1fs",
+                path,
+                resp.status_code if resp is not None else f"conn: {last_exc}",
+                attempt, _MAX_ATTEMPTS - 1, wait,
+            )
+            time.sleep(wait)
+        if resp is None:
+            raise RuntimeError(
+                f"Mistral request failed after {_MAX_ATTEMPTS} attempts: "
+                f"{last_exc}"
+            ) from last_exc
 
         if 400 <= resp.status_code < 500:
             try:
