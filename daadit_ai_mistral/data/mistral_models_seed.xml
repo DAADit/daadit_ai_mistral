@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Fallback seed: keeps the agent model dropdown usable before the
+         first successful sync with the Mistral API. The daily cron (and
+         the manual "Refresh models" button) overwrite/extend these rows
+         with the live model list. noupdate="1" so admin edits and synced
+         rows survive module upgrades. -->
+    <data noupdate="1">
+        <record id="model_mistral_large_latest" model="daadit.ai.mistral.model">
+            <field name="technical_name">mistral-large-latest</field>
+            <field name="display_name">Mistral Large (latest)</field>
+            <field name="sequence">1</field>
+        </record>
+        <record id="model_mistral_medium_latest" model="daadit.ai.mistral.model">
+            <field name="technical_name">mistral-medium-latest</field>
+            <field name="display_name">Mistral Medium (latest)</field>
+            <field name="sequence">2</field>
+        </record>
+        <record id="model_mistral_small_latest" model="daadit.ai.mistral.model">
+            <field name="technical_name">mistral-small-latest</field>
+            <field name="display_name">Mistral Small (latest)</field>
+            <field name="sequence">3</field>
+        </record>
+        <record id="model_codestral_latest" model="daadit.ai.mistral.model">
+            <field name="technical_name">codestral-latest</field>
+            <field name="display_name">Codestral (latest)</field>
+            <field name="sequence">4</field>
+        </record>
+        <record id="model_pixtral_large_latest" model="daadit.ai.mistral.model">
+            <field name="technical_name">pixtral-large-latest</field>
+            <field name="display_name">Pixtral Large — vision (latest)</field>
+            <field name="sequence">5</field>
+        </record>
+        <record id="model_ministral_8b_latest" model="daadit.ai.mistral.model">
+            <field name="technical_name">ministral-8b-latest</field>
+            <field name="display_name">Ministral 8B (latest)</field>
+            <field name="sequence">6</field>
+        </record>
+        <record id="model_ministral_3b_latest" model="daadit.ai.mistral.model">
+            <field name="technical_name">ministral-3b-latest</field>
+            <field name="display_name">Ministral 3B (latest)</field>
+            <field name="sequence">7</field>
+        </record>
+    </data>
+</odoo>

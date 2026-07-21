@@ -280,3 +280,15 @@ class ResConfigSettings(models.TransientModel):
                 allowed=", ".join(sorted(allowed)),
                 hint=wrong_provider_hint,
             ))
+
+    # ------------------------------------------------------------------
+    # Model list — manual refresh from the settings screen
+    #
+    # The Mistral model dropdown on ai.agent is fed from the live
+    # ``daadit.ai.mistral.model`` registry, refreshed daily by cron. This
+    # button lets an admin pull the current list on demand. Runs against
+    # the SAVED configuration, so save the key first if you just entered it.
+    # ------------------------------------------------------------------
+    def action_daadit_mistral_sync_models(self):
+        self.ensure_one()
+        return self.env["daadit.ai.mistral.model"].sudo().action_sync_now()

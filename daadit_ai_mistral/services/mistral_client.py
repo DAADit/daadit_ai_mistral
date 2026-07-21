@@ -315,6 +315,69 @@ class MistralClient:
 
         return resp.json()
 
+    # --- internal HTTP GET helper ---------------------------------------
+
+    def _get(self, path: str) -> dict:
+        url = f"{self.base_url}{path}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Mistral request failed: {exc}") from exc
+
+        if 400 <= resp.status_code < 500:
+            try:
+                err = resp.json() or {}
+            except ValueError:
+                err = {}
+            detail = _stringify_error(err.get("message") or err) or resp.text[:500]
+            raise UserError(_(
+                "Mistral API rejected the request (HTTP %(status)s): "
+                "%(detail)s",
+                status=resp.status_code,
+                detail=detail,
+            ))
+        if resp.status_code >= 500:
+            raise RuntimeError(
+                f"Mistral API server error {resp.status_code}: "
+                f"{resp.text[:200]}"
+            )
+        return resp.json()
+
+    def list_models(self) -> list:
+        """Return available models from ``GET /v1/models``.
+
+        Mistral returns ``{"object": "list", "data": [{"id": "...",
+        "name": "...", "description": "...", "capabilities": {...}}]}``.
+        We keep only chat-capable models (``capabilities.completion_chat``
+        when present) and return ``{"id", "display_name"}`` dicts.
+        """
+        data = self._get("/models") or {}
+        items = data.get("data") or []
+        out = []
+        seen = set()
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            mid = (it.get("id") or "").strip()
+            if not mid or mid in seen:
+                continue
+            caps = it.get("capabilities") or {}
+            # If capabilities are reported, keep only chat-capable models
+            # (skip embedding/OCR/moderation-only ids). If absent, keep it.
+            if isinstance(caps, dict) and "completion_chat" in caps \
+                    and not caps.get("completion_chat"):
+                continue
+            seen.add(mid)
+            out.append({
+                "id": mid,
+                "display_name": (it.get("name") or mid).strip(),
+            })
+        return out
+
     # --- chat completions -----------------------------------------------
 
     def chat_completion(
