@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_mistral_model_list" model="ir.ui.view">
+        <field name="name">daadit.ai.mistral.model.list</field>
+        <field name="model">daadit.ai.mistral.model</field>
+        <field name="arch" type="xml">
+            <list string="Mistral models" editable="bottom">
+                <header>
+                    <button name="action_sync_now" type="object"
+                            string="Refresh from Mistral" class="btn-primary"/>
+                </header>
+                <field name="sequence" widget="handle"/>
+                <field name="technical_name"/>
+                <field name="display_name"/>
+                <field name="synced_from_api"/>
+                <field name="last_synced"/>
+                <field name="active" widget="boolean_toggle"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_mistral_model_form" model="ir.ui.view">
+        <field name="name">daadit.ai.mistral.model.form</field>
+        <field name="model">daadit.ai.mistral.model</field>
+        <field name="arch" type="xml">
+            <form string="Mistral model">
+                <header>
+                    <button name="action_sync_now" type="object"
+                            string="Refresh from Mistral" class="btn-primary"/>
+                </header>
+                <sheet>
+                    <group>
+                        <field name="technical_name"/>
+                        <field name="display_name"/>
+                        <field name="sequence"/>
+                        <field name="active"/>
+                        <field name="synced_from_api" readonly="1"/>
+                        <field name="last_synced" readonly="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mistral_model" model="ir.actions.act_window">
+        <field name="name">Mistral Models</field>
+        <field name="res_model">daadit.ai.mistral.model</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'active_test': False}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No Mistral models yet</p>
+            <p>Use <b>Refresh from Mistral</b> to pull the current model
+               list from the Mistral API. This runs daily automatically.</p>
+        </field>
+    </record>
+
+    <menuitem id="menu_mistral_model"
+              name="Mistral Models"
+              parent="ai_app.ai_config_menu"
+              action="action_mistral_model"
+              sequence="91"
+              groups="base.group_system"/>
+</odoo>

@@ -121,6 +121,21 @@
                             <field name="mistral_base_url" string="API base URL"/>
                             <field name="mistral_timeout" string="Request timeout (s)"/>
                         </group>
+                        <div class="mt8">
+                            <button type="object"
+                                    name="action_daadit_mistral_sync_models"
+                                    string="Refresh Mistral model list"
+                                    icon="fa-refresh"
+                                    class="btn-secondary"/>
+                            <div class="text-muted mt4">
+                                <i class="fa fa-info-circle me-1"/>
+                                The available Mistral models are synced
+                                automatically every day from the Mistral API.
+                                Use this button to refresh now (save the key
+                                first). Manage the list under
+                                <strong>AI → Configuration → Mistral Models</strong>.
+                            </div>
+                        </div>
                     </div>
                 </setting>
             </xpath>

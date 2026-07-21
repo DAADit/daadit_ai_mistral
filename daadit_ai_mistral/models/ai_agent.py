@@ -539,10 +539,27 @@ class AIAgent(models.Model):
                     "selection method; OpenAI/Gemini entries may be missing."
                 )
         existing_keys = {value for value, _label in base}
+        # Dynamic source: the live-synced registry (daadit.ai.mistral.model),
+        # refreshed daily from the Mistral /v1/models API and via the manual
+        # "Refresh models" button. Newly-released Mistral models appear here
+        # automatically — no redeploy needed. Fall back to the built-in seed
+        # constant when the table is empty or unreachable (fresh
+        # install/upgrade before seed data loads, or a DB error).
+        entries = []
+        try:
+            entries = self.env["daadit.ai.mistral.model"].sudo()._selection_entries()
+        except Exception:  # noqa: BLE001
+            _logger.debug(
+                "daadit_ai_mistral: model registry unavailable; using seed",
+                exc_info=True,
+            )
+        if not entries:
+            entries = list(MISTRAL_MODEL_SELECTION)
         added = 0
-        for value, label in MISTRAL_MODEL_SELECTION:
+        for value, label in entries:
             if value not in existing_keys:
                 base.append((value, label))
+                existing_keys.add(value)
                 added += 1
         _logger.debug(
             "daadit_ai_mistral: _get_llm_model_selection extended with %d "
