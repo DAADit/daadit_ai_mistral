@@ -14,6 +14,8 @@
                 <field name="kind"/>
                 <field name="model"/>
                 <field name="iterations" optional="hide"/>
+                <field name="depth" optional="hide"/>
+                <field name="turn_uuid" optional="hide"/>
                 <field name="has_tools" optional="hide" widget="boolean_toggle"/>
                 <field name="prompt_tokens" sum="prompt_tokens"/>
                 <field name="completion_tokens" sum="completion_tokens"/>
@@ -45,6 +47,8 @@
                             <field name="model"/>
                             <field name="iterations"/>
                             <field name="has_tools"/>
+                            <field name="depth"/>
+                            <field name="turn_uuid"/>
                         </group>
                     </group>
                     <group string="Tokens">
@@ -79,6 +83,8 @@
                         domain="[('error', '!=', False)]"/>
                 <filter name="chat" string="Chat" domain="[('kind', '=', 'chat')]"/>
                 <filter name="embedding" string="Embedding" domain="[('kind', '=', 'embedding')]"/>
+                <filter name="questions" string="Questions (top-level only)"
+                        domain="[('kind', '=', 'chat'), ('depth', '=', 0)]"/>
                 <separator/>
                 <filter name="today" string="Today"
                         domain="[('create_date', '&gt;=', context_today().strftime('%Y-%m-%d 00:00:00'))]"/>

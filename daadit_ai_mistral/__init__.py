@@ -2,7 +2,7 @@
 import logging
 
 _logger = logging.getLogger(__name__)
-_logger.info("daadit_ai_mistral: __init__ loading (v19.0.4.5.0)")
+_logger.info("daadit_ai_mistral: __init__ loading (v19.0.6.0.0)")
 
 # Services first so diagnostics installs its UserError tap before any model
 # code is imported.

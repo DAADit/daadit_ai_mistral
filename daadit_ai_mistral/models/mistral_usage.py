@@ -114,6 +114,21 @@ class MistralUsage(models.Model):
     )
     has_tools = fields.Boolean(string="Used tools")
     error = fields.Text(string="Error", help="Empty when call succeeded.")
+    # v19.0.4.8.0: per-conversation accounting. One user question (or
+    # scheduled run) = exactly one depth-0 row; router sub-calls
+    # (depth > 0) share the parent's turn_uuid. Count questions as
+    # depth-0 rows; group on turn_uuid for exact per-question cost.
+    depth = fields.Integer(
+        string="Router depth", default=0, readonly=True,
+        help="0 = a direct (top-level) request — exactly one per user "
+             "question or scheduled run. >0 = a router sub-call "
+             "executed inside another request.",
+    )
+    turn_uuid = fields.Char(
+        string="Turn", index=True, readonly=True,
+        help="Shared by every API call made while answering one "
+             "question (top-level call + router sub-calls).",
+    )
 
     # --- Tokens --------------------------------------------------------
     prompt_tokens = fields.Integer(string="Prompt tokens")
@@ -160,7 +175,8 @@ class MistralUsage(models.Model):
     @api.model
     def record_usage(self, *, kind="chat", model=None, agent_id=None,
                      channel_id=None, prompt_tokens=0, completion_tokens=0,
-                     iterations=1, has_tools=False, error=None):
+                     iterations=1, has_tools=False, error=None,
+                     depth=0, turn_uuid=None):
         """Convenience constructor used by the Mistral dispatch helpers.
 
         Best-effort: a logging hiccup must never break the chat flow,
@@ -181,6 +197,8 @@ class MistralUsage(models.Model):
                 "error": (error or "")[:8000] if error else False,
                 "unit_input_usd": unit_in,
                 "unit_output_usd": unit_out,
+                "depth": depth or 0,
+                "turn_uuid": turn_uuid or False,
             }
             with self.env.cr.savepoint():
                 self.sudo().create(vals)

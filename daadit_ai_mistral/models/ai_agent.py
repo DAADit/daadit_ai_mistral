@@ -32,6 +32,8 @@ this file to keep only the override that matches.
 """
 import logging
 
+from markupsafe import Markup
+
 from odoo import _, api, fields, models
 
 from ..services.mistral_client import (
@@ -48,6 +50,10 @@ from ..services import tool_dispatch
 from ..services import diagnostics
 
 _logger = logging.getLogger(__name__)
+
+# Per-chunk cap for _ai_tool_search_knowledge. Five chunks of raw
+# article text can otherwise dwarf the rest of the run's context.
+_KNOWLEDGE_CHUNK_CHARS = 2000
 
 
 # Mistral model labels for the selection field. Order = display order.
@@ -843,6 +849,22 @@ class AIAgent(models.Model):
     # We override candidate methods so ``'mistral'`` → ``'mistral-embed'``#
     # ------------------------------------------------------------------ #
 
+    def _get_embedding_model(self, *args, **kwargs):
+        """The real hook — verified against the Enterprise source.
+
+        ``ai.agent._get_embedding_model`` resolves the model by scanning
+        ``llm_providers.PROVIDERS``, which has no Mistral entry, so it
+        raises for a Mistral agent. The other overrides in this block
+        are guesses at method names that do not exist in stock; this is
+        the one Odoo actually calls (from ``_build_rag_context``).
+        """
+        if is_mistral_model(self.llm_model):
+            return "mistral-embed"
+        try:
+            return super()._get_embedding_model(*args, **kwargs)
+        except AttributeError:
+            raise
+
     def _get_embedding_model_for_provider(self, *args, **kwargs):
         provider = kwargs.get("provider") or (args[0] if args else None)
         if provider == "mistral":
@@ -1054,11 +1076,10 @@ class AIAgent(models.Model):
             )}
         self._daadit_post_agent_message(
             record,
-            _(
-                "🤖 <strong>%(agent)s</strong> assigned this record to "
-                "<strong>%(user)s</strong>.",
-                agent=self.name, user=user.name,
-            ),
+            Markup(_(
+                "🤖 <strong>%(agent)s</strong> assigned this to "
+                "<strong>%(user)s</strong>."
+            )) % {"agent": self.name, "user": user.name},
         )
         return {
             "ok": True,
@@ -1068,6 +1089,212 @@ class AIAgent(models.Model):
             "user_name": user.name,
             "previous_user_id": previous_user.id or None,
         }
+
+    _THROTTLE_ICP_LIMIT = "daadit_ai_mistral.activity_throttle_per_day"
+    _THROTTLE_ICP_FALLBACK = "daadit_ai_mistral.activity_throttle_fallback_user_id"
+    _THROTTLE_DIGEST_SUMMARY = "Agent-activiteiten boven daglimiet (bundel)"
+
+    def _daadit_activity_throttle(self, assignee, model_name, record,
+                                  summary):
+        """Fase-0 throttle: cap agent-created activities per user/day.
+
+        Returns ``None`` when the activity may be created normally, or
+        a result dict when the cap was hit and the item was bundled
+        into the fallback reviewer's digest instead.
+
+        Config (ir.config_parameter):
+          * ``daadit_ai_mistral.activity_throttle_per_day`` — cap per
+            assignee per day. Default 5; ``0`` disables the throttle.
+          * ``daadit_ai_mistral.activity_throttle_fallback_user_id`` —
+            res.users id that receives the bundled overflow digest.
+            Unset → throttle logs a warning and lets the activity
+            through (fail-open: a missing fallback must not silently
+            swallow agent output).
+        """
+        self.ensure_one()
+        icp = self.env["ir.config_parameter"].sudo()
+        try:
+            limit = int(icp.get_param(self._THROTTLE_ICP_LIMIT, "5") or 5)
+        except (TypeError, ValueError):
+            limit = 5
+        if limit <= 0:
+            return None
+
+        today_start = fields.Datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+        Activity = self.env["mail.activity"].sudo()
+        count_today = Activity.search_count([
+            ("daadit_agent_created", "=", True),
+            ("user_id", "=", assignee.id),
+            ("create_date", ">=", today_start),
+        ])
+        if count_today < limit:
+            return None
+
+        fallback = self.env["res.users"].browse()
+        raw_fb = icp.get_param(self._THROTTLE_ICP_FALLBACK, "")
+        try:
+            if raw_fb:
+                fallback = self.env["res.users"].sudo().browse(
+                    int(raw_fb)
+                ).exists()
+        except (TypeError, ValueError):
+            fallback = self.env["res.users"].browse()
+        if not fallback or not fallback.active or fallback.share:
+            _logger.warning(
+                "daadit_ai_mistral activity throttle: cap (%d/day) hit "
+                "for user %s but no valid fallback reviewer configured "
+                "(%s) — letting the activity through. Set the ICP to a "
+                "res.users id to activate bundling.",
+                limit, assignee.id, self._THROTTLE_ICP_FALLBACK,
+            )
+            return None
+        if fallback.id == assignee.id:
+            # The overflow target IS the fallback reviewer — bundling
+            # onto themselves adds nothing; let it through.
+            return None
+
+        # Bundle into one open digest activity on the fallback user's
+        # partner record (res.partner carries the activity mixin).
+        entry = (
+            "<li>%s #%s — %s (voor: %s)</li>" % (
+                model_name, record.id,
+                summary or "(geen samenvatting)",
+                assignee.display_name,
+            )
+        )
+        digest = Activity.search([
+            ("daadit_agent_created", "=", True),
+            ("user_id", "=", fallback.id),
+            ("res_model", "=", "res.partner"),
+            ("res_id", "=", fallback.partner_id.id),
+            ("summary", "=", self._THROTTLE_DIGEST_SUMMARY),
+        ], limit=1)
+        if digest:
+            digest.write({"note": (digest.note or "") + entry})
+        else:
+            act_type = self.env.ref(
+                "mail.mail_activity_data_todo", raise_if_not_found=False,
+            )
+            digest = Activity.create({
+                "activity_type_id": act_type.id if act_type else False,
+                "res_model": "res.partner",
+                "res_model_id": self.env["ir.model"]._get_id("res.partner"),
+                "res_id": fallback.partner_id.id,
+                "summary": self._THROTTLE_DIGEST_SUMMARY,
+                "note": (
+                    "<p>Agent-activiteiten die de daglimiet (%d per "
+                    "gebruiker) overschreden — beoordeel en verdeel "
+                    "handmatig:</p><ul>%s</ul>" % (limit, entry)
+                ),
+                "date_deadline": fields.Date.context_today(self),
+                "user_id": fallback.id,
+                "daadit_agent_created": True,
+            })
+        _logger.info(
+            "daadit_ai_mistral activity throttle: cap (%d/day) hit for "
+            "user %s — bundled into digest activity %s for %s",
+            limit, assignee.id, digest.id, fallback.login,
+        )
+        return {
+            "ok": True,
+            "throttled": True,
+            "reason": (
+                "Daily agent-activity cap (%d) reached for user %s. "
+                "The item was added to the overflow digest for %s "
+                "instead of creating a new activity." % (
+                    limit, assignee.display_name, fallback.display_name,
+                )
+            ),
+            "digest_activity_id": digest.id,
+            "model_name": model_name,
+            "record_id": record.id,
+        }
+
+    def _ai_tool_search_knowledge(self, query=None, top_n=5, **_extra):
+        """Semantic search over this agent's own knowledge sources.
+
+        Stock only retrieves in ``ai.agent._build_rag_context``, which
+        runs on the interactive chat path. The scheduled runner in
+        ``daadit_ai_agent_schedule`` calls ``request_llm`` directly, so a
+        scheduled agent can never reach its own sources. Pre-flight
+        retrieval would not fix that either: a schedule's prompt is a
+        task instruction ("run your hourly scan"), not the question that
+        needs answering — that only surfaces mid-run, inside a tool
+        result. So retrieval has to be a tool the agent calls with the
+        question once it has found it.
+
+        Returns ``{'ok': True, 'chunks': [{source, url, content}, ...]}``.
+        An empty ``chunks`` list means the sources hold no answer — the
+        caller is expected to say so rather than invent one.
+        """
+        self.ensure_one()
+        query = (query or "").strip()
+        if not query:
+            return {"error": "query is required — pass the question verbatim."}
+        if not self.sources_ids:
+            return {"ok": True, "chunks": [],
+                    "reason": "this agent has no knowledge sources attached"}
+        try:
+            top_n = max(1, min(int(top_n or 5), 10))
+        except (TypeError, ValueError):
+            top_n = 5
+
+        try:
+            from odoo.addons.ai.utils.llm_api_service import LLMApiService
+        except ImportError:
+            return {"error": "Odoo AI LLMApiService is not importable"}
+
+        # v19.0.4.10.0 made get_embedding Mistral-aware; without that
+        # patch this call raises "Unsupported provider 'mistral'".
+        llm_api_patch.patch_llm_api_service()
+        embedding_model = self._get_embedding_model()
+        try:
+            response = LLMApiService(
+                env=self.env, provider=self._get_provider(),
+            ).get_embedding(
+                input=query,
+                dimensions=self.env["ai.embedding"]._get_dimensions(),
+                model=embedding_model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral: knowledge search failed to embed query"
+            )
+            return {"error": "could not embed the query: %s" % exc}
+
+        data = (response or {}).get("data") or []
+        if not data:
+            return {"error": "the embedding service returned no vector"}
+
+        chunks = self.env["ai.embedding"]._get_similar_chunks(
+            query_embedding=data[0]["embedding"],
+            sources=self.sources_ids,
+            embedding_model=embedding_model,
+            top_n=top_n,
+        )
+        if not chunks:
+            return {"ok": True, "chunks": [],
+                    "reason": "no matching passage in this agent's sources"}
+
+        source_by_checksum = {
+            s.attachment_id.checksum: s
+            for s in self.sources_ids.filtered(lambda s: s.attachment_id)
+        }
+        results = []
+        for chunk in chunks:
+            source = source_by_checksum.get(chunk.attachment_id.checksum)
+            results.append({
+                "source": source.name if source else "",
+                "url": (source.url or "") if source else "",
+                "content": (chunk.content or "")[:_KNOWLEDGE_CHUNK_CHARS],
+            })
+        _logger.info(
+            "daadit_ai_mistral: knowledge search agent=%s q=%d chars -> %d chunk(s)",
+            self.id, len(query), len(results),
+        )
+        return {"ok": True, "chunks": results}
 
     def _ai_tool_schedule_activity(self, model_name=None, record_id=None,
                                    activity_type_xmlid=None,
@@ -1237,6 +1464,17 @@ class AIAgent(models.Model):
                 "user_id": assignee.id,
             }
 
+        # --- Fase-0 throttle: max N agent-activiteiten per gebruiker
+        # per dag (Governance & guardrails knowledge id 173, kernregel
+        # 4). Overschot wordt gebundeld in één digest-activiteit voor
+        # de fallback-reviewer in plaats van de assignee te blijven
+        # bestoken. Beschermt de reviewcapaciteit van een klein team.
+        throttled = self._daadit_activity_throttle(
+            assignee, model_name, record, target_summary,
+        )
+        if throttled is not None:
+            return throttled
+
         # --- Create the activity ---------------------------------------
         try:
             res_model_id = self.env["ir.model"]._get_id(model_name)
@@ -1249,6 +1487,7 @@ class AIAgent(models.Model):
                 "note": target_note,
                 "date_deadline": deadline,
                 "user_id": assignee.id,
+                "daadit_agent_created": True,
             })
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
@@ -1262,15 +1501,15 @@ class AIAgent(models.Model):
             )}
         self._daadit_post_agent_message(
             record,
-            _(
-                "🤖 <strong>%(agent)s</strong> scheduled activity "
-                "<strong>%(summary)s</strong> for <strong>%(user)s</strong> "
-                "on <strong>%(deadline)s</strong>.",
-                agent=self.name,
-                summary=target_summary or act_type.name or _("(no summary)"),
-                user=assignee.name,
-                deadline=deadline.strftime("%Y-%m-%d"),
-            ),
+            Markup(_(
+                "🤖 <strong>%(agent)s</strong> scheduled a to-do for "
+                "<strong>%(user)s</strong> (due %(deadline)s): %(summary)s"
+            )) % {
+                "agent": self.name,
+                "user": assignee.name,
+                "deadline": deadline.strftime("%Y-%m-%d"),
+                "summary": target_summary or act_type.name or _("(no summary)"),
+            },
         )
         return {
             "ok": True,

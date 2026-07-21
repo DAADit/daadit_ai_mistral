@@ -7,6 +7,41 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.6.0.0 — 2026-07-22
+
+Reconciliation release: merges two lineages that diverged after the
+module moved to its own product repo. The `adriedaadit/daadit`
+monorepo continued shipping Fase 0 guardrails to DAADit production
+(through its own v19.0.4.11.0) while this repo shipped store
+readiness and the dynamic model registry (v19.0.5.0.0). This release
+contains BOTH sets. Note: two different builds both called
+themselves 19.0.4.5.0 (this repo's store-readiness commit and the
+monorepo's backoff commit); from here on, versions are unique again
+and this repo is the single source of truth.
+
+### From the monorepo lineage (was 19.0.4.5.0–19.0.4.11.0 there)
+
+* 429/5xx backoff with full jitter, including connection-level
+  retries (this implementation superseded the store-readiness one;
+  it has been running on DAADit production).
+* API-key splitting: separate Mistral key for scheduled agents so
+  batch work can never starve customer-facing chat.
+* Activity throttle: max N agent activities per user per day.
+* Hard read-domain per agent (`daadit.ai.agent.read.scope` model),
+  domain sanitation, run deadline, usage per conversation.
+* Chatter HTML rendering fix; MAX_ITER became a tunable System
+  Parameter instead of a hardcoded constant.
+* Mistral embeddings wired into the RAG route.
+* Knowledge-search tool for scheduled runs.
+
+### From this repo's lineage (was 19.0.5.0.0 here)
+
+* Live-synced Mistral model list from the Mistral API
+  (`daadit.ai.mistral.model` registry, seed data, sync cron, views).
+* Store readiness: dynamic cross-provider hints, slimmed provider
+  help-card, store assets, original DAADit icon (see 19.0.4.5.0
+  entry below).
+
 ## 19.0.4.5.0 — 2026-07-11
 
 Store-readiness release. Everything a customer outside DAADit needs:

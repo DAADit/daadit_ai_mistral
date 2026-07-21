@@ -38,8 +38,15 @@ adapt the wrapper.
 """
 import json
 import logging
+import time
+import uuid
 
-from .mistral_client import MistralClient, is_mistral_model
+from .mistral_client import (
+    EMBEDDING_MODEL,
+    MistralClient,
+    is_mistral_embedding_model,
+    is_mistral_model,
+)
 from . import tool_dispatch
 
 _logger = logging.getLogger(__name__)
@@ -145,6 +152,11 @@ def patch_llm_api_service() -> bool:
     # but the internal dispatcher still falls into stock's
     # `raise NotImplementedError()` at the bottom of `_request_llm`.
     original_request_llm_internal = getattr(LLMApiService, "_request_llm", None)
+    # `ai.agent._build_rag_context` embeds the user's prompt by calling
+    # `get_embedding` on this class directly — it never goes through
+    # `ai.embedding`, where our `_generate_embeddings` override handles
+    # the indexing side. See `_patched_get_embedding` below.
+    original_get_embedding = getattr(LLMApiService, "get_embedding", None)
 
     def _resolve_force_provider(env):
         """Read the system parameter that forces a non-stock provider.
@@ -283,7 +295,76 @@ def patch_llm_api_service() -> bool:
         # request_llm-loop uses 4-tuple) can unpack uniformly.
         return (adapted, [], [], {})
 
+    def _patched_get_embedding(api_self, *args, **kwargs):
+        """Query-side embedding dispatch.
+
+        Stock `get_embedding` builds its headers via `_get_base_headers`
+        → `_get_api_token`, whose provider table holds only openai and
+        google, so it raises `UserError("Unsupported provider 'mistral'")`
+        for us. That is what breaks chatting with a Mistral agent that
+        has sources: `_build_rag_context` embeds the prompt before any
+        chat call happens. Scheduled runs never touch RAG, which is why
+        they kept working while the chat window did not.
+
+        Mistral's /embeddings response is already OpenAI-shaped, so
+        callers doing `response['data'][0]['embedding']` need no change.
+        """
+        if getattr(api_self, "provider", None) != "mistral":
+            _diag_nonmistral_delegation(api_self, "get_embedding", kwargs)
+            if original_get_embedding is None:
+                raise AttributeError(
+                    "LLMApiService.get_embedding not found on stock; "
+                    "cannot delegate non-Mistral call."
+                )
+            return original_get_embedding(api_self, *args, **kwargs)
+
+        inputs = kwargs.get("input", args[0] if args else None)
+        if inputs is None:
+            inputs = []
+        elif isinstance(inputs, str):
+            inputs = [inputs]
+        else:
+            inputs = list(inputs)
+
+        # `dimensions` is accepted and ignored: mistral-embed has a fixed
+        # 1024-wide output, and the stored vectors were written by
+        # ai_embedding._daadit_call_mistral_embeddings, which ignores it
+        # too. Honouring it here would query a different vector space
+        # than the one the sources were indexed into.
+        model = kwargs.get("model") or EMBEDDING_MODEL
+        if not is_mistral_embedding_model(model):
+            _logger.info(
+                "daadit_ai_mistral.llm_api_patch: get_embedding asked for "
+                "model=%r on provider='mistral'; using %r instead so the "
+                "query matches the indexed vectors.",
+                model, EMBEDDING_MODEL,
+            )
+            model = EMBEDDING_MODEL
+
+        client = MistralClient.from_env(api_self.env)
+        response = client.embeddings(inputs, model=model)
+
+        try:
+            usage = MistralClient.extract_usage(response)
+            api_self.env["daadit_ai_mistral.usage"].sudo().record_usage(
+                kind="embedding",
+                model=model,
+                prompt_tokens=usage.get("total_tokens")
+                or usage.get("prompt_tokens")
+                or 0,
+                completion_tokens=0,
+                iterations=1,
+                has_tools=False,
+            )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral: embedding usage row creation failed"
+            )
+        return response
+
     LLMApiService.__init__ = _patched_init
+    if original_get_embedding is not None:
+        LLMApiService.get_embedding = _patched_get_embedding
     if original_request_llm is not None:
         LLMApiService.request_llm = _patched_request_llm
     if original_request_llm_internal is not None:
@@ -292,12 +373,13 @@ def patch_llm_api_service() -> bool:
     LLMApiService._daadit_original_init = original_init
     LLMApiService._daadit_original_request_llm = original_request_llm
     LLMApiService._daadit_original_request_llm_internal = original_request_llm_internal
+    LLMApiService._daadit_original_get_embedding = original_get_embedding
 
     _PATCHED = True
     _logger.info(
         "daadit_ai_mistral.llm_api_patch: LLMApiService.__init__/"
-        "request_llm/_request_llm patched to support provider='mistral' "
-        "(class: %s.%s)",
+        "request_llm/_request_llm/get_embedding patched to support "
+        "provider='mistral' (class: %s.%s)",
         LLMApiService.__module__, LLMApiService.__name__,
     )
     return True
@@ -1457,12 +1539,23 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     iteration = 0
     # Fase 0 governance guardrail (Knowledge id 173): top-level loop
-    # budget bumped from 6 to 10 in v19.0.4.4.0. Sub-runs stay tighter
-    # — a dwaling sub-agent must never consume the whole parent turn.
-    MAX_ITER = 10
+    # budget. v19.0.4.9.0 — now a System Parameter so it can be tuned
+    # centrally without a deploy (Settings → Technical → System
+    # Parameters). Defaults: 20 top-level, 4 sub-run; fail-open to those.
+    # Sub-runs stay tighter — a dwaling sub-agent must never consume the
+    # whole parent turn.
+    try:
+        _icp = api_self.env["ir.config_parameter"].sudo()
+        MAX_ITER = int(_icp.get_param("daadit_ai_mistral.max_tool_iterations") or 20)
+        _max_iter_subrun = int(
+            _icp.get_param("daadit_ai_mistral.max_tool_iterations_subrun") or 4
+        )
+    except Exception:  # noqa: BLE001
+        MAX_ITER = 20
+        _max_iter_subrun = 4
     _router_depth = getattr(tool_dispatch.router_state, "depth", 0)
     if _router_depth > 0:
-        MAX_ITER = 4
+        MAX_ITER = _max_iter_subrun
     else:
         # Top-level turn: reset per-turn router width budget and
         # exhaustion flags so state from a previous turn on this
@@ -1477,11 +1570,18 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         # sub-run specific) to keep concerns clean.
         tool_dispatch.router_state.top_level_exhausted = False
         tool_dispatch.router_state.exhaustion_reason = None
+        # v19.0.4.8.0: one uuid per top-level turn. Every usage row
+        # this turn creates (including router sub-calls, which inherit
+        # the threadlocal) carries it, so the performance report can
+        # count QUESTIONS (distinct turn_uuid / depth-0 rows) instead
+        # of API calls.
+        tool_dispatch.router_state.turn_uuid = uuid.uuid4().hex
     # Fase 0 governance guardrail: cap hallucinated tool-name attempts.
     # After 2 "Unknown tool: ..." results in the same turn we bail out
     # instead of letting the model keep guessing and burn the cap.
     unknown_tool_count = 0
     unknown_tool_break = False
+    deadline_break = False
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
 
@@ -1511,6 +1611,25 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         )
 
     while iteration < MAX_ITER:
+        # v19.0.4.8.0: hard per-run time budget (Fase 0-gate). Callers
+        # that own a whole run (daadit_ai_agent_schedule) set
+        # ``router_state.run_deadline_monotonic`` before request_llm
+        # and clear it in their finally. Checked between round-trips —
+        # a run can overshoot by at most one Mistral call + its tools,
+        # never hang for the full MAX_ITER budget. Interactive chat
+        # never sets it, so this is a no-op there.
+        _run_deadline = getattr(
+            tool_dispatch.router_state, "run_deadline_monotonic", None,
+        )
+        if _run_deadline is not None and time.monotonic() >= _run_deadline:
+            deadline_break = True
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: run deadline reached "
+                "after %d iteration(s) — breaking the tool loop",
+                iteration,
+            )
+            break
+
         # Build the per-call `extra` payload. When the caller passed a
         # JSON schema (AI Fields, structured automation actions), turn
         # it into Mistral's `response_format` and drop tools — Mistral
@@ -1654,7 +1773,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # flag so callers (notably daadit_ai_agent_schedule) can reflect
     # the failure in their own state ('error' instead of 'done').
     bail_reason = None
-    if iteration >= MAX_ITER:
+    if deadline_break:
+        bail_reason = "deadline"
+    elif iteration >= MAX_ITER:
         bail_reason = "max_iter"
     elif unknown_tool_break:
         bail_reason = "unknown_tools"
@@ -1683,7 +1804,14 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             tool_dispatch.router_state.exhaustion_reason = bail_reason
         except Exception:  # noqa: BLE001
             pass
-        if bail_reason == "max_iter":
+        if bail_reason == "deadline":
+            en_message = (
+                "This run reached its hard time budget before the "
+                "task was finished. Partial work may have been done; "
+                "check the run log. Consider a narrower instruction "
+                "or a higher time budget."
+            )
+        elif bail_reason == "max_iter":
             en_message = (
                 f"I couldn't finish this in {MAX_ITER} tool-call steps. "
                 f"Try asking a more specific question, or break your "
@@ -1715,6 +1843,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 iterations=iteration,
                 has_tools=bool(normalized_tools),
                 error=f"bail:{bail_reason}",
+                depth=_router_depth,
+                turn_uuid=getattr(
+                    tool_dispatch.router_state, "turn_uuid", None,
+                ),
             )
         except Exception:  # noqa: BLE001
             _logger.exception(
@@ -1756,6 +1888,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 iterations=iteration + 1,
                 has_tools=bool(normalized_tools),
                 error=f"Access denied: {access_denial.get('model_name')}",
+                depth=_router_depth,
+                turn_uuid=getattr(
+                    tool_dispatch.router_state, "turn_uuid", None,
+                ),
             )
         except Exception:  # noqa: BLE001
             _logger.exception(
@@ -1792,6 +1928,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             completion_tokens=usage.get("completion_tokens") or 0,
             iterations=iteration + 1,
             has_tools=bool(normalized_tools),
+            depth=_router_depth,
+            turn_uuid=getattr(
+                tool_dispatch.router_state, "turn_uuid", None,
+            ),
         )
     except Exception:  # noqa: BLE001
         _logger.exception(

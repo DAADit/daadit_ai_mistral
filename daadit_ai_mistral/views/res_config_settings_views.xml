@@ -37,9 +37,15 @@
                 way around.
             -->
             <xpath expr="//block[@name='ai_providers']" position="before">
-                <div class="alert alert-info"
+                <!-- role="status": informational card; without a role
+                     Odoo 19's view checker logs a warning per load
+                     and builds must stay warning-free. -->
+                <div class="alert alert-info" role="status"
                      groups="base.group_system">
-                    <h5 class="alert-heading">
+                    <!-- geen alert-heading: elke alert-*-klasse zonder
+                         role triggert de view-checker (warning-vrije
+                         builds); fw-bold oogt gelijk. -->
+                    <h5 class="fw-bold">
                         <i class="fa fa-key me-1"/>
                         Where do I get an API key for these providers?
                     </h5>
@@ -106,6 +112,20 @@
                                    password="True"
                                    nolabel="1"
                                    class="w-100"/>
+                        </div>
+                        <div class="mt8">
+                            <label for="mistral_key_batch"
+                                   string="Aparte key voor geplande agents (batch)"/>
+                            <field name="mistral_key_batch"
+                                   placeholder="Optioneel — leeg = zelfde key"
+                                   password="True"
+                                   nolabel="1"
+                                   class="w-100"/>
+                            <div class="text-muted">
+                                Geplande agent-runs gebruiken deze key
+                                zodat batch-verkeer de livechat-key
+                                nooit kan leegtrekken (Fase 0).
+                            </div>
                         </div>
                         <div class="text-muted mt8 mb8">
                             <i class="fa fa-info-circle me-1"/>
