@@ -32,7 +32,7 @@ in their respective files. Multiple candidate names are wrapped to survive
 across Odoo versions; verify against the installed Enterprise source on your
 Odoo.sh dev branch before relying on this in production.
 """,
-    "version": "19.0.4.5.0",
+    "version": "19.0.5.0.0",
     "category": "Productivity/Discuss",
     "author": "DAADit",
     "website": "https://daadit.group",
@@ -52,9 +52,12 @@ Odoo.sh dev branch before relying on this in production.
         "security/mistral_usage_security.xml",
         "data/ai_tools.xml",
         "data/cost_cap_params.xml",
+        "data/mistral_models_seed.xml",
+        "data/model_sync_cron.xml",
         "views/res_config_settings_views.xml",
         "views/mistral_usage_views.xml",
         "views/ai_agent_views.xml",
+        "views/mistral_model_views.xml",
         "views/res_partner_views.xml",
         # data/debug_actions.xml was dropped in v3.5.2 — Odoo 19's
         # safe-eval forbids IMPORT_NAME/IMPORT_FROM opcodes in server
