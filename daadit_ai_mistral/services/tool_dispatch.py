@@ -100,37 +100,88 @@ def _tool_name_to_method(tool_name: str) -> str:
 _ACTION_ID_RE = re.compile(r"^action_(\d+)$")
 
 
+def _slugify(text):
+    """Lowercase, collapse non-alphanumerics to ``_``, strip edges."""
+    return re.sub(r"[^a-z0-9]+", "_", (text or "").strip().lower()).strip("_")
+
+
+def _action_name_slugs(name):
+    """Candidate semantic slugs for a server-action display name.
+
+    ``"AI Marketing: write_blog (Penny)"`` ⇒ {"write_blog",
+    "write_blog_penny", "ai_marketing_write_blog_penny"} — lets us also
+    resolve a tool name the model *hallucinated* from the description
+    when stock advertised the opaque ``action_<id>`` name.
+    """
+    part = name.split(":", 1)[1] if name and ":" in name else (name or "")
+    slugs = {
+        _slugify(name),
+        _slugify(part),
+        _slugify(re.sub(r"\([^)]*\)", "", part)),
+    }
+    slugs.discard("")
+    return slugs
+
+
+def _agent_tool_actions(agent):
+    """The server actions this agent may invoke = ``use_in_ai``
+    ``tool_ids`` across its topics, as a (sudo) recordset for metadata
+    reads. Membership is read via sudo because ``tool_ids`` is a
+    ``base.group_system`` field; this only decides *which* actions are
+    in scope — execution privilege is unchanged, ``_ai_tool_run`` runs
+    the effects as the real user."""
+    if getattr(agent, "env", None) is None:
+        return None
+    try:
+        return agent.sudo().topic_ids.tool_ids.filtered(
+            lambda a: a.use_in_ai
+        )
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.tool_dispatch: could not read topic "
+            "tool_ids for agent=%s", getattr(agent, "id", "?"),
+        )
+        return None
+
+
 def _resolve_tool_action(agent, fn_name):
-    """Resolve a tool name to its backing ``ir.actions.server`` record.
+    """Resolve a tool name to its backing ``ir.actions.server`` record,
+    STRICTLY within the agent's own topic tools.
 
     Executing the ACTION (via stock's ``_ai_tool_run``) instead of the
     underlying ``_ai_tool_*`` method matters twice over: custom tools
     (``action_<id>``) have no backing method at all, and operators put
     guard code in the action body that must run on every dispatch path.
+
+    Scoping to ``agent.topic_ids.tool_ids`` mirrors stock's implicit
+    scoping (tools are only ever advertised from the agent's own topic
+    set), so a model can never reach an action outside its advertised
+    tools — not even by guessing another agent's ``action_<id>``.
     Returns a record in the agent's (non-sudo) environment, or None.
     """
-    env = getattr(agent, "env", None)
-    if env is None:
+    candidates = _agent_tool_actions(agent)
+    if not candidates:
         return None
+    fn_name = fn_name or ""
     try:
-        Action = env["ir.actions.server"].sudo()
-        action = None
-        m = _ACTION_ID_RE.match(fn_name or "")
+        # 1) ``action_<id>`` — stock's default advertised name.
+        m = _ACTION_ID_RE.match(fn_name)
         if m:
-            candidate = Action.browse(int(m.group(1)))
-            if candidate.exists():
-                action = candidate
-        else:
-            imd = env["ir.model.data"].sudo().search(
-                [("model", "=", "ir.actions.server"), ("name", "=", fn_name)],
-                limit=1,
-            )
-            if imd:
-                candidate = Action.browse(imd.res_id)
-                if candidate.exists():
-                    action = candidate
-        if action is not None and action.use_in_ai:
-            return action.with_env(env)
+            hit = candidates.filtered(lambda a: a.id == int(m.group(1)))
+            return hit[:1].with_env(agent.env) if hit else None
+        # 2) Bare XML-id suffix (stock's name when the action has one).
+        ext = candidates.get_external_id()
+        for act in candidates:
+            xmlid = ext.get(act.id)
+            if xmlid and xmlid.split(".", 1)[-1] == fn_name:
+                return act.with_env(agent.env)
+        # 3) Semantic slug — a name hallucinated from the description
+        #    when the advertised ``action_<id>`` was opaque.
+        want = _slugify(fn_name)
+        if want:
+            for act in candidates:
+                if want in _action_name_slugs(act.name):
+                    return act.with_env(agent.env)
     except Exception:  # noqa: BLE001
         _logger.exception(
             "daadit_ai_mistral.tool_dispatch: action resolution raised "

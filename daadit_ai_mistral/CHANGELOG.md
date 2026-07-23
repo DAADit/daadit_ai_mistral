@@ -7,6 +7,36 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.6.2.0 — 2026-07-23
+
+Hardens the server-action dispatch introduced in 6.1.0 with two fixes
+found while wiring up the marketing content flow (Mark → Vince/Penny):
+
+- **Scoped to the agent's own tools (security).** `_resolve_tool_action`
+  now resolves *only* within `agent.topic_ids.tool_ids` (`use_in_ai`),
+  mirroring stock's implicit scoping. Before this, any `use_in_ai`
+  action was reachable by id, so an agent could invoke another agent's
+  write tool by guessing its `action_<id>`.
+- **Resolves hallucinated tool names.** When stock advertises a tool as
+  the opaque `action_<id>`, the model sometimes invents a semantic name
+  from the description (prod logs show `fn=write_blog` for
+  `action_1227`). Resolution now also matches a slug of the action name
+  (`write_blog`, `write_blog_penny`, …), still strictly within scope.
+
+Execution path is unchanged: matched actions run through stock's
+`_ai_tool_run` (schema validation + guard-code body) at the caller's
+privilege. Verified end-to-end in a local Odoo 19 registry.
+
+## 19.0.6.1.0 — 2026-07-23
+
+`tool_dispatch.run_tool_call`: resolve a called tool name to its
+backing `ir.actions.server` (`action_<id>` or xml-id suffix) and
+execute via stock's `_ai_tool_run`, so custom topic `tool_ids` (which
+have no `_ai_tool_*` method) stop returning `UNKNOWN_TOOL`. Also
+`mistral_model_registry`: `_rec_name='technical_name'` and rename the
+reserved stored field `display_name` → `label` (the model dropdown
+showed `daadit.ai.mistral.model,<id>`).
+
 ## 19.0.6.0.0 — 2026-07-22
 
 Reconciliation release: merges two lineages that diverged after the
