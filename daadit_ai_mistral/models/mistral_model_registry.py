@@ -21,14 +21,19 @@ class DaaditAiMistralModel(models.Model):
     _name = "daadit.ai.mistral.model"
     _description = "Mistral model (synced from Mistral API)"
     _order = "sequence, technical_name"
+    # Without _rec_name Odoo's computed display_name falls back to
+    # "model,id" — which is exactly what the agent dropdown then shows.
+    _rec_name = "technical_name"
 
     technical_name = fields.Char(
         required=True,
         index=True,
         help="Model id sent to the Mistral API, e.g. 'mistral-large-latest'.",
     )
-    display_name = fields.Char(
-        help="Human-readable label shown in the agent model dropdown.",
+    label = fields.Char(
+        help="Human-readable label shown in the agent model dropdown. "
+             "(Named 'label' because 'display_name' is reserved by base "
+             "and silently breaks the selection labels.)",
     )
     active = fields.Boolean(
         default=True,
@@ -60,7 +65,7 @@ class DaaditAiMistralModel(models.Model):
         recs = self.sudo().search(
             [("active", "=", True)], order="sequence, technical_name",
         )
-        return [(r.technical_name, r.display_name or r.technical_name)
+        return [(r.technical_name, r.label or r.technical_name)
                 for r in recs]
 
     @api.model
@@ -80,7 +85,7 @@ class DaaditAiMistralModel(models.Model):
         for seq, item in enumerate(models_data, start=1):
             mid = item["id"]
             vals = {
-                "display_name": item.get("display_name") or mid,
+                "label": item.get("display_name") or mid,
                 "synced_from_api": True,
                 "last_synced": now,
                 "active": True,
