@@ -7,6 +7,28 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.6.3.0 — 2026-07-26
+
+Two fixes from a prod session where Mark could not produce a marketing
+plan (`ir.logging` 11309–11333).
+
+- **Custom tools now advertise their own parameter schema.** Stock only
+  passes tool *names* on the Mistral branch; `annotate_tools` filled in
+  real JSON schemas for the ten built-in AI tools and an empty
+  `{properties: {}}` stub for everything else. Every operator-made tool
+  was therefore called with `args={}` and answered with a stock
+  ValidationError ("Could you please provide info about 'topic_hint'").
+  Unknown names are now resolved to their `ir.actions.server` (within
+  the agent's own topic tools, as before) and annotated from the
+  action's `ai_tool_schema` / `ai_tool_description`. Tool building moved
+  below agent resolution because it needs the agent to resolve names.
+- **Denial/bail messages follow the conversation language again.**
+  `_translate_to_chat_language` used the single last user message as its
+  language reference; a Dutch conversation whose previous turn was a
+  bare "?" got its access-denial message back in French. It now joins
+  the last three user messages that contain at least
+  `MIN_LANG_REF_LETTERS` letters and skips the rest.
+
 ## 19.0.6.2.0 — 2026-07-23
 
 Hardens the server-action dispatch introduced in 6.1.0 with two fixes
