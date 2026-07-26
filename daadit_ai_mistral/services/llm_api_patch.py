@@ -707,6 +707,16 @@ def _format_access_denied_message(info):
     return "\n".join(lines)
 
 
+# A language reference shorter than this carries no reliable language
+# signal — "?", "Mark?" and "ok" have all been mistaken for French.
+MIN_LANG_REF_LETTERS = 12
+
+
+def _letter_count(text):
+    """Number of alphabetic characters in ``text`` (any script)."""
+    return sum(1 for ch in text if ch.isalpha())
+
+
 def _translate_to_chat_language(client, model, ref_messages, text):
     """Use Mistral itself to translate ``text`` into whatever language
     the conversation is in.
@@ -727,17 +737,23 @@ def _translate_to_chat_language(client, model, ref_messages, text):
     if not text or not ref_messages:
         return text
 
-    # Pull the last user-authored message as the language reference.
-    user_msgs = [
-        m for m in ref_messages
+    # Pull the most recent user-authored messages as the language
+    # reference. Messages too short to carry a language ("?", "Mark?",
+    # "ok") are skipped: prod showed a Dutch conversation whose denial
+    # message came back in French because the turn before it was a bare
+    # "?". Up to three qualifying messages are joined so the language is
+    # unambiguous even for terse chatters.
+    user_texts = [
+        m["content"] for m in ref_messages
         if isinstance(m, dict)
         and m.get("role") == "user"
         and isinstance(m.get("content"), str)
         and m.get("content").strip()
     ]
-    if not user_msgs:
+    usable = [t for t in user_texts if _letter_count(t) >= MIN_LANG_REF_LETTERS]
+    if not usable:
         return text
-    last_user = user_msgs[-1]["content"]
+    last_user = "\n\n".join(usable[-3:])[-800:]
 
     prompt = [
         {
@@ -756,7 +772,7 @@ def _translate_to_chat_language(client, model, ref_messages, text):
             "role": "user",
             "content": (
                 f"Reference text (target language):\n"
-                f"---\n{last_user[:800]}\n---\n\n"
+                f"---\n{last_user}\n---\n\n"
                 f"Translate this:\n{text}"
             ),
         },
@@ -1369,16 +1385,26 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             kk=str(list(kwargs.keys())),
         ))
 
+    # ---- Tool-execution loop ----------------------------------------
+    # Run a bounded loop:
+    #   call → if tool_calls, run each on the agent and feed back as
+    #   ``role: tool`` messages → call again. Stop when the model
+    #   returns a final text response OR we hit ``MAX_ITER``.
+    _had_threadlocal = bool(getattr(tool_dispatch.current_agent, "record", None))
+    agent = _resolve_agent(api_self, request_kwargs=kwargs)
+
     # ---- Build proper tool definitions ------------------------------
     # If stock sent us a list of tool name strings, use the JSON-schema
     # definitions from ``tool_dispatch.TOOL_SCHEMAS`` for the standard
     # ten AI tools (Search / Read group / Get Fields / Open Menu *).
-    # For anything else (already-shaped dicts, etc.), fall back to the
-    # generic _normalize_tools converter from earlier versions.
+    # Operator-made tools (``action_<id>``) are annotated from their own
+    # ``ai_tool_schema``, which is why ``agent`` has to be resolved
+    # first. For anything else (already-shaped dicts, etc.), fall back
+    # to the generic _normalize_tools converter from earlier versions.
     normalized_tools = None
     if tools:
         if isinstance(tools, (list, tuple)) and all(isinstance(t, str) for t in tools):
-            normalized_tools = tool_dispatch.annotate_tools(tools)
+            normalized_tools = tool_dispatch.annotate_tools(tools, agent=agent)
         else:
             normalized_tools = _normalize_tools(tools)
         if not normalized_tools:
@@ -1389,14 +1415,6 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 type(tools).__name__,
                 _safe_repr(tools, limit=400),
             )
-
-    # ---- Tool-execution loop ----------------------------------------
-    # Run a bounded loop:
-    #   call → if tool_calls, run each on the agent and feed back as
-    #   ``role: tool`` messages → call again. Stop when the model
-    #   returns a final text response OR we hit ``MAX_ITER``.
-    _had_threadlocal = bool(getattr(tool_dispatch.current_agent, "record", None))
-    agent = _resolve_agent(api_self, request_kwargs=kwargs)
 
     # ---- Reconstruct tools from agent topics (v19.0.4.1.5) ----------
     # On the standalone AI chat-panel path the Enterprise controller
@@ -1427,7 +1445,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                         continue
                     names.append(slug)
             if names:
-                normalized_tools = tool_dispatch.annotate_tools(names)
+                normalized_tools = tool_dispatch.annotate_tools(
+                    names, agent=agent,
+                )
                 _logger.info(
                     "daadit_ai_mistral.llm_api_patch: caller passed no "
                     "tools — injected %d tool defs from agent %s topics "

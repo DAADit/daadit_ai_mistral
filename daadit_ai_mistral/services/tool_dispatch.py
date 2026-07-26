@@ -663,11 +663,55 @@ TOOL_SCHEMAS = {
 }
 
 
-def annotate_tools(tool_names):
+def _custom_tool_definition(agent, name):
+    """Build a tool definition for an operator-made server action from
+    the action's own ``ai_tool_description`` / ``ai_tool_schema``.
+
+    Stock stores a real JSON schema on every AI-enabled server action,
+    but only advertises the tool NAME on the Mistral branch. Without the
+    schema the model has no idea an ``action_1226`` takes a
+    ``topic_hint``, calls it with ``{}`` and stock's executor answers
+    with a ValidationError ("Could you please provide info about
+    'topic_hint'") — observed in prod for every custom tool call ever
+    made. Returns None when the action can't be resolved or carries no
+    usable schema, so the caller falls back to the stub definition.
+    """
+    if agent is None:
+        return None
+    try:
+        action = _resolve_tool_action(agent, name)
+        if action is None:
+            return None
+        action = action.sudo()
+        schema = json.loads(action.ai_tool_schema or "null")
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            return None
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": (
+                    action.ai_tool_description
+                    or action.name
+                    or name.replace("_", " ").strip()
+                ),
+                "parameters": schema,
+            },
+        }
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.tool_dispatch: could not build a schema "
+            "for custom tool %r — advertising it without parameters",
+            name,
+        )
+        return None
+
+
+def annotate_tools(tool_names, agent=None):
     """Given a list of tool name strings, return Mistral tool definitions
-    backed by ``TOOL_SCHEMAS`` for known names and a stub schema for
-    unknowns. The model gets real parameter docs for the standard 10
-    AI tools and at least a name+description for anything else.
+    backed by ``TOOL_SCHEMAS`` for known names, the action's own
+    ``ai_tool_schema`` for operator-made tools, and a stub schema for
+    anything that resolves to neither.
     """
     out = []
     for name in tool_names or []:
@@ -683,19 +727,23 @@ def annotate_tools(tool_names):
                     "parameters": schema["parameters"],
                 },
             })
-        else:
-            out.append({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": name.replace("_", " ").strip(),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                    },
+            continue
+        custom = _custom_tool_definition(agent, name)
+        if custom is not None:
+            out.append(custom)
+            continue
+        out.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name.replace("_", " ").strip(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
                 },
-            })
+            },
+        })
     return out
 
 
