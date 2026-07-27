@@ -1630,6 +1630,36 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             "failing open"
         )
 
+    # --- Per-agent / per-tenant budget + fair use (v19.0.7.0.0) ------
+    # The ICP cap above protects the database; a ``daadit.ai.budget``
+    # line protects the margin on ONE agent or ONE customer, counting
+    # spend across every installed provider. Warn in-chat from the
+    # threshold, refuse at 100%. Fail-open, like the cap.
+    fair_use_notice = ""
+    try:
+        blocked, budget_msg, detail = api_self.env[
+            "daadit.ai.budget"].sudo().evaluate(agent=agent)
+        if blocked:
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: budget exhausted "
+                "(%s) — refusing call for agent=%s",
+                detail, agent.id if agent else None,
+            )
+            return [_translate_to_chat_language(
+                client, model, conversation, budget_msg,
+            )]
+        if budget_msg:
+            _logger.info(
+                "daadit_ai_mistral.llm_api_patch: fair-use notice (%s)",
+                detail,
+            )
+            fair_use_notice = budget_msg
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.llm_api_patch: budget gate raised; "
+            "failing open"
+        )
+
     while iteration < MAX_ITER:
         # v19.0.4.8.0: hard per-run time budget (Fase 0-gate). Callers
         # that own a whole run (daadit_ai_agent_schedule) set
@@ -1768,6 +1798,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 content = json.dumps(result, default=str)
             except Exception:  # noqa: BLE001
                 content = str(result)
+            content = _cap_tool_result(api_self.env, content)
             conversation.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id"),
@@ -1991,10 +2022,58 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 client, model, conversation, fallback_en,
             )
         ]
+
+    # Fair-use notice rides along with the answer, but never inside a
+    # structured (AI Fields / JSON-schema) response — that has to stay
+    # parseable — and never inside a sub-run, whose text is consumed by
+    # the routing agent rather than shown to the user.
+    if fair_use_notice and adapted and not response_format_extra:
+        if not getattr(tool_dispatch.router_state, "depth", 0):
+            adapted.append(_translate_to_chat_language(
+                client, model, conversation, fair_use_notice,
+            ))
     return adapted
 
 
 _FIRST_CALL_LOGGED = False
+
+
+_DEFAULT_MAX_TOOL_RESULT_CHARS = 6000
+
+
+def _cap_tool_result(env, content):
+    """Bound the size of one tool result before it enters the context.
+
+    A tool result stays in the conversation for every following
+    round-trip, so an unbounded ``search`` of 80 full records is paid
+    for again on each iteration — the single biggest cost driver in
+    long tool loops. Truncate with an instruction the model can act on
+    (narrow the domain / ask for fewer fields) instead of silently
+    feeding it half a record.
+
+    Tunable via ``daadit_ai_mistral.max_tool_result_chars``; 0 disables.
+    """
+    try:
+        raw = env["ir.config_parameter"].sudo().get_param(
+            "daadit_ai_mistral.max_tool_result_chars",
+            _DEFAULT_MAX_TOOL_RESULT_CHARS,
+        )
+        limit = int(raw)
+    except Exception:  # noqa: BLE001
+        limit = _DEFAULT_MAX_TOOL_RESULT_CHARS
+    if limit <= 0 or not isinstance(content, str) or len(content) <= limit:
+        return content
+    _logger.info(
+        "daadit_ai_mistral.llm_api_patch: tool result truncated "
+        "%d → %d chars", len(content), limit,
+    )
+    return (
+        content[:limit]
+        + "\n\n[TRUNCATED: this result was %d characters; only the "
+          "first %d are shown. Do not guess the rest — narrow the "
+          "domain, request fewer fields, or aggregate with read_group.]"
+          % (len(content), limit)
+    )
 
 
 def _safe_repr(v, limit=600):
