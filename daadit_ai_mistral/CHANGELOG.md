@@ -7,6 +7,16 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.7.1.0 — 2026-07-27
+
+Follow-up to 19.0.6.3.0, from prod (`ir.logging` 11430). Now that the
+model finally sees a custom tool's real schema, it enriches calls with
+keys of its own invention — `action_1227` was called with `topic` plus
+`invalshoek` and `doelgroep`, and Odoo answered `ValidationError:
+Missing definition for invalshoek`, burning an iteration plus a retry.
+Undeclared arguments are now dropped before dispatch, and the advertised
+schema carries `additionalProperties: false`.
+
 ## 19.0.7.0.0 — 2026-07-27
 
 Cost governance for a fixed-price subscription. Measured over 163 prod
