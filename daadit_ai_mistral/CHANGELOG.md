@@ -7,6 +7,26 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.7.0.0 — 2026-07-27
+
+Cost governance for a fixed-price subscription. Measured over 163 prod
+calls: `mistral-large` averages $0.024/call (~11.2k tokens) against
+$0.0016 for `mistral-medium`, and over half of all spend sits in turns
+of six or more tool iterations — where every round re-sends the whole
+context, including tool results.
+
+- **`daadit.ai.budget`** — daily and monthly USD ceilings scoped to one
+  agent, one company (tenant) or the whole database, counting spend
+  across *both* provider tables so switching model cannot dodge the
+  ceiling. Below `warn_ratio` (default 0.6) nothing happens; from there
+  the answer carries one fair-use notice per day; at 100% the call is
+  refused and the operator is mailed. Fail-open throughout.
+- **Tool results are bounded** before they enter the conversation
+  (`daadit_ai_mistral.max_tool_result_chars`, default 6000, 0 disables).
+  An unbounded `search` of 80 full records used to be paid for again on
+  every following iteration; the truncation marker tells the model to
+  narrow the domain or aggregate instead of guessing.
+
 ## 19.0.6.3.0 — 2026-07-26
 
 Two fixes from a prod session where Mark could not produce a marketing

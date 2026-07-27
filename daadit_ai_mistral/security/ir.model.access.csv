@@ -5,3 +5,5 @@ access_daadit_ai_mistral_model_user,daadit.ai.mistral.model user read,model_daad
 access_daadit_ai_mistral_model_system,daadit.ai.mistral.model system,model_daadit_ai_mistral_model,base.group_system,1,1,1,1
 access_daadit_ai_agent_read_scope_user,daadit.ai.agent.read.scope user read,model_daadit_ai_agent_read_scope,base.group_user,1,0,0,0
 access_daadit_ai_agent_read_scope_system,daadit.ai.agent.read.scope system,model_daadit_ai_agent_read_scope,base.group_system,1,1,1,1
+access_daadit_ai_budget_user,daadit.ai.budget user read,model_daadit_ai_budget,base.group_user,1,0,0,0
+access_daadit_ai_budget_system,daadit.ai.budget system,model_daadit_ai_budget,base.group_system,1,1,1,1
