@@ -176,8 +176,14 @@ def _resolve_tool_action(agent, fn_name):
             if xmlid and xmlid.split(".", 1)[-1] == fn_name:
                 return act.with_env(agent.env)
         # 3) Semantic slug — a name hallucinated from the description
-        #    when the advertised ``action_<id>`` was opaque.
+        #    when the advertised ``action_<id>`` was opaque, or the
+        #    ``ir_actions_server_<slug>`` name we advertise ourselves for
+        #    an xml-id-less action created in the UI (llm_api_patch
+        #    ._slug_tool_name). Strip our own prefix before comparing:
+        #    the name slugs never carry it.
         want = _slugify(fn_name)
+        if want.startswith(_TOOL_PREFIX):
+            want = want[len(_TOOL_PREFIX):]
         if want:
             for act in candidates:
                 if want in _action_name_slugs(act.name):
