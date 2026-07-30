@@ -1604,6 +1604,22 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     deadline_break = False
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
+    # v19.0.7.3.0: concierge pass-through. When the TOP-LEVEL agent
+    # routes a question via the router tool and the specialist returns a
+    # real answer, that answer is relayed verbatim (with attribution)
+    # instead of feeding it back to the model for one more full
+    # generation that would only paraphrase it — the single biggest
+    # latency component of a routed chat answer (30-60s). Multi-route
+    # turns (several router calls in ONE assistant message) keep the
+    # normal combining path. Tunable kill-switch via System Parameter
+    # ``daadit_ai_mistral.router_passthrough`` (default on).
+    router_passthrough = None
+    try:
+        _passthrough_enabled = str(
+            _icp.get_param("daadit_ai_mistral.router_passthrough", "1")
+        ).strip().lower() not in ("0", "false")
+    except Exception:  # noqa: BLE001
+        _passthrough_enabled = True
 
     # --- Daily cost cap (v19.0.4.3.0) --------------------------------
     # Single choke point for every Mistral chat call. When today's spend
@@ -1794,6 +1810,24 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 access_denial = result
                 break
 
+            # v19.0.7.3.0: concierge pass-through (see init above).
+            # Conditions: top-level turn, feature on, the ONLY tool call
+            # of this assistant message, it is the router tool, and it
+            # returned a real specialist answer.
+            if (
+                router_passthrough is None
+                and _router_depth == 0
+                and _passthrough_enabled
+                and len(tool_calls) == 1
+                and (tc.get("function") or {}).get("name")
+                    == tool_dispatch.ROUTER_TOOL_SLUG
+                and isinstance(result, dict)
+                and result.get("ok")
+                and str(result.get("answer") or "").strip()
+            ):
+                router_passthrough = result
+                break
+
             try:
                 content = json.dumps(result, default=str)
             except Exception:  # noqa: BLE001
@@ -1806,7 +1840,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 "content": content,
             })
 
-        if access_denial or unknown_tool_break:
+        if access_denial or unknown_tool_break or router_passthrough:
             break
 
         iteration += 1
@@ -1948,6 +1982,44 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             _logger.exception(
                 "daadit_ai_mistral.llm_api_patch: usage row creation "
                 "failed during access-denial; continuing"
+            )
+        return adapted
+
+    # v19.0.7.3.0: concierge pass-through — relay the routed specialist's
+    # answer verbatim and skip the final paraphrasing generation.
+    if router_passthrough:
+        _pt_answer = str(router_passthrough.get("answer") or "").strip()
+        _pt_agent = router_passthrough.get("agent") or "?"
+        _via = agent.name if agent is not None else "concierge"
+        # Language-neutral attribution footer: no extra LLM call.
+        adapted = ["%s\n\n— %s · via %s" % (_pt_answer, _pt_agent, _via)]
+        _logger.info(
+            "daadit_ai_mistral.llm_api_patch: router pass-through "
+            "(specialist=%s chars=%d) — final generation skipped",
+            _pt_agent, len(_pt_answer),
+        )
+        try:
+            ch = api_self.env.context.get("discuss_channel")
+            channel_id = ch.id if ch and hasattr(ch, "id") else (
+                ch if isinstance(ch, int) else False
+            )
+            api_self.env["daadit_ai_mistral.usage"].sudo().record_usage(
+                kind="chat", model=model,
+                agent_id=agent.id if agent else False,
+                channel_id=channel_id,
+                prompt_tokens=usage.get("prompt_tokens") or 0,
+                completion_tokens=usage.get("completion_tokens") or 0,
+                iterations=iteration + 1,
+                has_tools=bool(normalized_tools),
+                depth=_router_depth,
+                turn_uuid=getattr(
+                    tool_dispatch.router_state, "turn_uuid", None,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.llm_api_patch: usage row creation "
+                "failed during pass-through; continuing"
             )
         return adapted
 

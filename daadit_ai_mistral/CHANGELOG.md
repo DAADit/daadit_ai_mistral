@@ -7,6 +7,40 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.7.3.0 — 2026-07-30
+
+Concierge router pass-through. A routed chat answer used to cost one
+extra full generation: the concierge received the specialist's finished
+answer through the router tool and then re-generated ~2000 tokens
+paraphrasing it, adding 30-60s to every routed turn (measured on
+`daadit_ai_mistral.usage`: Robin 12k prompt / 1.9k completion on top of
+Mark's own 8k/1.5k for a single question). The top-level loop now
+short-circuits when a single router call returns `ok` + `answer`: the
+specialist's text is posted verbatim with a language-neutral
+attribution footer (`— <specialist> · via <concierge>`) and the final
+LLM round is skipped.
+
+Guardrails: only at router depth 0; only when the assistant message
+contained exactly ONE tool call, so multi-route turns that must combine
+several specialists keep the normal path (the concierge prompt and the
+Agent Routing topic now instruct the model to fire multi-route calls in
+one message); kill-switch via System Parameter
+`daadit_ai_mistral.router_passthrough` (default on). The usage row is
+still recorded for the truncated turn.
+
+## 19.0.7.2.1 — 2026-07-30
+
+`daadit.ai.mistral.model` sync respects archived aliases. The nightly
+`/v1/models` sync forced `active=True` on every upsert and searched
+without `active_test=False`, so archiving alias rows — the Mistral API
+returns every alias (`mistral-tiny-latest`, `open-mistral-nemo-2407`, …)
+as a separate model carrying the canonical `display_name`, which made
+the `llm_model` dropdown show the same model up to four times — was
+undone, or duplicated, on the next run. The sync now finds archived rows
+and leaves their `active` flag alone; only genuinely new models are
+created active. Data change applied on prod 2026-07-30: 26 alias rows
+archived, canonical `-latest` rows kept.
+
 ## 19.0.7.1.0 — 2026-07-27
 
 Follow-up to 19.0.6.3.0, from prod (`ir.logging` 11430). Now that the
