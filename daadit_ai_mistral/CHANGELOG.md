@@ -7,6 +7,17 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.7.4.0 — 2026-08-02
+
+Agents kept handing decisions back to the user. Prod, 2026-07-27:
+`create_draft_blogpost` returned the list of the two blogs and the
+agent relayed *"in welke blog moet het concept?"* to the user instead of
+picking `Nieuws` — a whole extra round-trip, and a colleague that feels
+useless. `_SELF_SERVICE_INSTRUCTION` is now appended to every system
+prompt (both providers): look it up, decide, state your choice, and ask
+only when the answer cannot exist in Odoo or the action is irreversible
+or costly.
+
 ## 19.0.7.3.0 — 2026-07-30
 
 Concierge router pass-through. A routed chat answer used to cost one
