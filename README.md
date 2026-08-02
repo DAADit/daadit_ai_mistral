@@ -34,6 +34,30 @@ When syncing to a deployment repo, take a **tagged release**, never an
 untagged `main` snapshot, so the version deployed is always traceable back to
 a release here.
 
+### Prefer a submodule over a copied folder
+
+Copying the folder is what created the 2026-08-01 split: the deploy repo grew
+its own 19.0.6.x line while this repo was at 19.0.7.x, so product work never
+reached production and a deploy-side fix nearly got wiped by the next sync.
+A submodule makes that second line impossible — upgrading becomes moving the
+pin, and the deployed revision is always a release here.
+
+`tools/adopt_as_submodule.sh` performs the one-off conversion inside a
+deployment repo:
+
+```bash
+# in the deployment repo, on a fresh branch
+./adopt_as_submodule.sh --release v19.0.8.0.0
+```
+
+It refuses to run while the copied folder differs from the release you pin to
+and writes the difference to `deploy-only.diff` — that difference is
+deploy-only work which must be PR'd here and re-tagged first, otherwise the
+conversion deletes it. The submodule is mounted next to the old folder
+(default `submodules/daadit_ai_mistral`) because this repo's root already
+holds `daadit_ai_mistral/`; Odoo.sh scans recursively for manifests, so no
+addons-path change is needed.
+
 ## Relation to sibling modules
 
 Per DAADit policy each LLM provider lives in its own module/repo — never mix
