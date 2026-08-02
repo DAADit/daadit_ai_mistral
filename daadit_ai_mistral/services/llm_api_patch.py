@@ -1077,6 +1077,30 @@ def _record_resolution_diagnostics(api_self, request_kwargs, resolved_via):
         pass
 
 
+# Why this exists: prod chats keep ending in a question the agent could
+# have answered itself. Observed 2026-07-27: the blog tool RETURNED the
+# list of two blogs, and the agent relayed "which blog should I use?" to
+# the user instead of picking one. Every such turn costs a full extra
+# round-trip and, worse, makes the colleague feel useless.
+_SELF_SERVICE_INSTRUCTION = (
+    "CRITICAL — DECIDE, DON'T ASK: You have tools that read this Odoo "
+    "database. Never ask the user for anything you can look up, and "
+    "never hand back a choice you can make yourself. Before you ask a "
+    "question: (1) search Odoo for the answer; (2) if a tool result "
+    "already lists the options, pick the one that best fits the task; "
+    "(3) if the options are genuinely equivalent, take the most "
+    "obvious one, act, and state which one you took and how to change "
+    "it. Asking 'which blog should I use?' right after a tool handed "
+    "you the list of blogs is a failure, not caution. Only ask the "
+    "user when the answer cannot exist in Odoo, or when the action is "
+    "irreversible or costly (publishing, sending email, deleting, "
+    "spending money) — and then ask once, with your recommendation "
+    "already in the question. If the work belongs to another "
+    "colleague and you have a tool to reach them, use it; do not tell "
+    "the user to go ask that colleague."
+)
+
+
 _LANGUAGE_MIRROR_INSTRUCTION = (
     "IMPORTANT: Always respond in the same language as the user's most "
     "recent message. If the user writes in Dutch, reply in Dutch. If "
@@ -1094,7 +1118,8 @@ _LANGUAGE_MIRROR_INSTRUCTION = (
     "`ir_actions_server_velden_oproepen`, `..._zoeken`) do not "
     "exist and will be rejected as 'Unknown tool'. If a tool you "
     "need isn't in the provided tools list, do not invent one — "
-    "tell the user in plain language which capability is missing."
+    "tell the user in plain language which capability is missing.\n\n"
+    + _SELF_SERVICE_INSTRUCTION
 )
 
 
