@@ -7,6 +7,81 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.7.4.0 — 2026-08-02
+
+Agents kept handing decisions back to the user. Prod, 2026-07-27:
+`create_draft_blogpost` returned the list of the two blogs and the
+agent relayed *"in welke blog moet het concept?"* to the user instead of
+picking `Nieuws` — a whole extra round-trip, and a colleague that feels
+useless. `_SELF_SERVICE_INSTRUCTION` is now appended to every system
+prompt (both providers): look it up, decide, state your choice, and ask
+only when the answer cannot exist in Odoo or the action is irreversible
+or costly.
+
+## 19.0.7.3.0 — 2026-07-30
+
+Concierge router pass-through. A routed chat answer used to cost one
+extra full generation: the concierge received the specialist's finished
+answer through the router tool and then re-generated ~2000 tokens
+paraphrasing it, adding 30-60s to every routed turn (measured on
+`daadit_ai_mistral.usage`: Robin 12k prompt / 1.9k completion on top of
+Mark's own 8k/1.5k for a single question). The top-level loop now
+short-circuits when a single router call returns `ok` + `answer`: the
+specialist's text is posted verbatim with a language-neutral
+attribution footer (`— <specialist> · via <concierge>`) and the final
+LLM round is skipped.
+
+Guardrails: only at router depth 0; only when the assistant message
+contained exactly ONE tool call, so multi-route turns that must combine
+several specialists keep the normal path (the concierge prompt and the
+Agent Routing topic now instruct the model to fire multi-route calls in
+one message); kill-switch via System Parameter
+`daadit_ai_mistral.router_passthrough` (default on). The usage row is
+still recorded for the truncated turn.
+
+## 19.0.7.2.1 — 2026-07-30
+
+`daadit.ai.mistral.model` sync respects archived aliases. The nightly
+`/v1/models` sync forced `active=True` on every upsert and searched
+without `active_test=False`, so archiving alias rows — the Mistral API
+returns every alias (`mistral-tiny-latest`, `open-mistral-nemo-2407`, …)
+as a separate model carrying the canonical `display_name`, which made
+the `llm_model` dropdown show the same model up to four times — was
+undone, or duplicated, on the next run. The sync now finds archived rows
+and leaves their `active` flag alone; only genuinely new models are
+created active. Data change applied on prod 2026-07-30: 26 alias rows
+archived, canonical `-latest` rows kept.
+
+## 19.0.7.1.0 — 2026-07-27
+
+Follow-up to 19.0.6.3.0, from prod (`ir.logging` 11430). Now that the
+model finally sees a custom tool's real schema, it enriches calls with
+keys of its own invention — `action_1227` was called with `topic` plus
+`invalshoek` and `doelgroep`, and Odoo answered `ValidationError:
+Missing definition for invalshoek`, burning an iteration plus a retry.
+Undeclared arguments are now dropped before dispatch, and the advertised
+schema carries `additionalProperties: false`.
+
+## 19.0.7.0.0 — 2026-07-27
+
+Cost governance for a fixed-price subscription. Measured over 163 prod
+calls: `mistral-large` averages $0.024/call (~11.2k tokens) against
+$0.0016 for `mistral-medium`, and over half of all spend sits in turns
+of six or more tool iterations — where every round re-sends the whole
+context, including tool results.
+
+- **`daadit.ai.budget`** — daily and monthly USD ceilings scoped to one
+  agent, one company (tenant) or the whole database, counting spend
+  across *both* provider tables so switching model cannot dodge the
+  ceiling. Below `warn_ratio` (default 0.6) nothing happens; from there
+  the answer carries one fair-use notice per day; at 100% the call is
+  refused and the operator is mailed. Fail-open throughout.
+- **Tool results are bounded** before they enter the conversation
+  (`daadit_ai_mistral.max_tool_result_chars`, default 6000, 0 disables).
+  An unbounded `search` of 80 full records used to be paid for again on
+  every following iteration; the truncation marker tells the model to
+  narrow the domain or aggregate instead of guessing.
+
 ## 19.0.6.3.0 — 2026-07-26
 
 Two fixes from a prod session where Mark could not produce a marketing

@@ -1100,6 +1100,30 @@ def _record_resolution_diagnostics(api_self, request_kwargs, resolved_via):
         pass
 
 
+# Why this exists: prod chats keep ending in a question the agent could
+# have answered itself. Observed 2026-07-27: the blog tool RETURNED the
+# list of two blogs, and the agent relayed "which blog should I use?" to
+# the user instead of picking one. Every such turn costs a full extra
+# round-trip and, worse, makes the colleague feel useless.
+_SELF_SERVICE_INSTRUCTION = (
+    "CRITICAL — DECIDE, DON'T ASK: You have tools that read this Odoo "
+    "database. Never ask the user for anything you can look up, and "
+    "never hand back a choice you can make yourself. Before you ask a "
+    "question: (1) search Odoo for the answer; (2) if a tool result "
+    "already lists the options, pick the one that best fits the task; "
+    "(3) if the options are genuinely equivalent, take the most "
+    "obvious one, act, and state which one you took and how to change "
+    "it. Asking 'which blog should I use?' right after a tool handed "
+    "you the list of blogs is a failure, not caution. Only ask the "
+    "user when the answer cannot exist in Odoo, or when the action is "
+    "irreversible or costly (publishing, sending email, deleting, "
+    "spending money) — and then ask once, with your recommendation "
+    "already in the question. If the work belongs to another "
+    "colleague and you have a tool to reach them, use it; do not tell "
+    "the user to go ask that colleague."
+)
+
+
 _LANGUAGE_MIRROR_INSTRUCTION = (
     "IMPORTANT: Always respond in the same language as the user's most "
     "recent message. If the user writes in Dutch, reply in Dutch. If "
@@ -1117,7 +1141,8 @@ _LANGUAGE_MIRROR_INSTRUCTION = (
     "`ir_actions_server_velden_oproepen`, `..._zoeken`) do not "
     "exist and will be rejected as 'Unknown tool'. If a tool you "
     "need isn't in the provided tools list, do not invent one — "
-    "tell the user in plain language which capability is missing."
+    "tell the user in plain language which capability is missing.\n\n"
+    + _SELF_SERVICE_INSTRUCTION
 )
 
 
@@ -1627,6 +1652,22 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     deadline_break = False
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
+    # v19.0.7.3.0: concierge pass-through. When the TOP-LEVEL agent
+    # routes a question via the router tool and the specialist returns a
+    # real answer, that answer is relayed verbatim (with attribution)
+    # instead of feeding it back to the model for one more full
+    # generation that would only paraphrase it — the single biggest
+    # latency component of a routed chat answer (30-60s). Multi-route
+    # turns (several router calls in ONE assistant message) keep the
+    # normal combining path. Tunable kill-switch via System Parameter
+    # ``daadit_ai_mistral.router_passthrough`` (default on).
+    router_passthrough = None
+    try:
+        _passthrough_enabled = str(
+            _icp.get_param("daadit_ai_mistral.router_passthrough", "1")
+        ).strip().lower() not in ("0", "false")
+    except Exception:  # noqa: BLE001
+        _passthrough_enabled = True
 
     # --- Daily cost cap (v19.0.4.3.0) --------------------------------
     # Single choke point for every Mistral chat call. When today's spend
@@ -1650,6 +1691,36 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     except Exception:  # noqa: BLE001
         _logger.exception(
             "daadit_ai_mistral.llm_api_patch: cost-cap gate raised; "
+            "failing open"
+        )
+
+    # --- Per-agent / per-tenant budget + fair use (v19.0.7.0.0) ------
+    # The ICP cap above protects the database; a ``daadit.ai.budget``
+    # line protects the margin on ONE agent or ONE customer, counting
+    # spend across every installed provider. Warn in-chat from the
+    # threshold, refuse at 100%. Fail-open, like the cap.
+    fair_use_notice = ""
+    try:
+        blocked, budget_msg, detail = api_self.env[
+            "daadit.ai.budget"].sudo().evaluate(agent=agent)
+        if blocked:
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: budget exhausted "
+                "(%s) — refusing call for agent=%s",
+                detail, agent.id if agent else None,
+            )
+            return [_translate_to_chat_language(
+                client, model, conversation, budget_msg,
+            )]
+        if budget_msg:
+            _logger.info(
+                "daadit_ai_mistral.llm_api_patch: fair-use notice (%s)",
+                detail,
+            )
+            fair_use_notice = budget_msg
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.llm_api_patch: budget gate raised; "
             "failing open"
         )
 
@@ -1787,10 +1858,29 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 access_denial = result
                 break
 
+            # v19.0.7.3.0: concierge pass-through (see init above).
+            # Conditions: top-level turn, feature on, the ONLY tool call
+            # of this assistant message, it is the router tool, and it
+            # returned a real specialist answer.
+            if (
+                router_passthrough is None
+                and _router_depth == 0
+                and _passthrough_enabled
+                and len(tool_calls) == 1
+                and (tc.get("function") or {}).get("name")
+                    == tool_dispatch.ROUTER_TOOL_SLUG
+                and isinstance(result, dict)
+                and result.get("ok")
+                and str(result.get("answer") or "").strip()
+            ):
+                router_passthrough = result
+                break
+
             try:
                 content = json.dumps(result, default=str)
             except Exception:  # noqa: BLE001
                 content = str(result)
+            content = _cap_tool_result(api_self.env, content)
             conversation.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id"),
@@ -1798,7 +1888,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 "content": content,
             })
 
-        if access_denial or unknown_tool_break:
+        if access_denial or unknown_tool_break or router_passthrough:
             break
 
         iteration += 1
@@ -1982,6 +2072,44 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             )
         return adapted
 
+    # v19.0.7.3.0: concierge pass-through — relay the routed specialist's
+    # answer verbatim and skip the final paraphrasing generation.
+    if router_passthrough:
+        _pt_answer = str(router_passthrough.get("answer") or "").strip()
+        _pt_agent = router_passthrough.get("agent") or "?"
+        _via = agent.name if agent is not None else "concierge"
+        # Language-neutral attribution footer: no extra LLM call.
+        adapted = ["%s\n\n— %s · via %s" % (_pt_answer, _pt_agent, _via)]
+        _logger.info(
+            "daadit_ai_mistral.llm_api_patch: router pass-through "
+            "(specialist=%s chars=%d) — final generation skipped",
+            _pt_agent, len(_pt_answer),
+        )
+        try:
+            ch = api_self.env.context.get("discuss_channel")
+            channel_id = ch.id if ch and hasattr(ch, "id") else (
+                ch if isinstance(ch, int) else False
+            )
+            api_self.env["daadit_ai_mistral.usage"].sudo().record_usage(
+                kind="chat", model=model,
+                agent_id=agent.id if agent else False,
+                channel_id=channel_id,
+                prompt_tokens=usage.get("prompt_tokens") or 0,
+                completion_tokens=usage.get("completion_tokens") or 0,
+                iterations=iteration + 1,
+                has_tools=bool(normalized_tools),
+                depth=_router_depth,
+                turn_uuid=getattr(
+                    tool_dispatch.router_state, "turn_uuid", None,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.llm_api_patch: usage row creation "
+                "failed during pass-through; continuing"
+            )
+        return adapted
+
     adapted = _adapt_response_to_text_messages(response)
     _logger.info(
         "daadit_ai_mistral.llm_api_patch: Mistral chat ok "
@@ -2053,10 +2181,58 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 client, model, conversation, fallback_en,
             )
         ]
+
+    # Fair-use notice rides along with the answer, but never inside a
+    # structured (AI Fields / JSON-schema) response — that has to stay
+    # parseable — and never inside a sub-run, whose text is consumed by
+    # the routing agent rather than shown to the user.
+    if fair_use_notice and adapted and not response_format_extra:
+        if not getattr(tool_dispatch.router_state, "depth", 0):
+            adapted.append(_translate_to_chat_language(
+                client, model, conversation, fair_use_notice,
+            ))
     return adapted
 
 
 _FIRST_CALL_LOGGED = False
+
+
+_DEFAULT_MAX_TOOL_RESULT_CHARS = 6000
+
+
+def _cap_tool_result(env, content):
+    """Bound the size of one tool result before it enters the context.
+
+    A tool result stays in the conversation for every following
+    round-trip, so an unbounded ``search`` of 80 full records is paid
+    for again on each iteration — the single biggest cost driver in
+    long tool loops. Truncate with an instruction the model can act on
+    (narrow the domain / ask for fewer fields) instead of silently
+    feeding it half a record.
+
+    Tunable via ``daadit_ai_mistral.max_tool_result_chars``; 0 disables.
+    """
+    try:
+        raw = env["ir.config_parameter"].sudo().get_param(
+            "daadit_ai_mistral.max_tool_result_chars",
+            _DEFAULT_MAX_TOOL_RESULT_CHARS,
+        )
+        limit = int(raw)
+    except Exception:  # noqa: BLE001
+        limit = _DEFAULT_MAX_TOOL_RESULT_CHARS
+    if limit <= 0 or not isinstance(content, str) or len(content) <= limit:
+        return content
+    _logger.info(
+        "daadit_ai_mistral.llm_api_patch: tool result truncated "
+        "%d → %d chars", len(content), limit,
+    )
+    return (
+        content[:limit]
+        + "\n\n[TRUNCATED: this result was %d characters; only the "
+          "first %d are shown. Do not guess the rest — narrow the "
+          "domain, request fewer fields, or aggregate with read_group.]"
+          % (len(content), limit)
+    )
 
 
 def _safe_repr(v, limit=600):

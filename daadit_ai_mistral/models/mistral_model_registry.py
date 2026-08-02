@@ -88,16 +88,22 @@ class DaaditAiMistralModel(models.Model):
                 "label": item.get("display_name") or mid,
                 "synced_from_api": True,
                 "last_synced": now,
-                "active": True,
                 "sequence": seq,
             }
-            rec = self.sudo().search(
+            # active_test=False: an archived row must be FOUND and updated,
+            # not shadowed by a fresh duplicate. Deliberately no
+            # ``active`` in ``vals`` for existing rows — the Mistral API
+            # returns every alias (mistral-tiny-latest, open-mistral-nemo-2407,
+            # …) as a separate model with the canonical display_name, so an
+            # admin who archives aliases to dedupe the llm_model dropdown
+            # must not see them resurrected by the nightly sync.
+            rec = self.sudo().with_context(active_test=False).search(
                 [("technical_name", "=", mid)], limit=1,
             )
             if rec:
                 rec.write(vals)
             else:
-                self.sudo().create(dict(vals, technical_name=mid))
+                self.sudo().create(dict(vals, technical_name=mid, active=True))
             touched += 1
         _logger.info(
             "daadit_ai_mistral: synced %d Mistral models from the API",

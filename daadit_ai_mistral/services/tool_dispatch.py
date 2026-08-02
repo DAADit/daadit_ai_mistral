@@ -176,8 +176,14 @@ def _resolve_tool_action(agent, fn_name):
             if xmlid and xmlid.split(".", 1)[-1] == fn_name:
                 return act.with_env(agent.env)
         # 3) Semantic slug — a name hallucinated from the description
-        #    when the advertised ``action_<id>`` was opaque.
+        #    when the advertised ``action_<id>`` was opaque, or the
+        #    ``ir_actions_server_<slug>`` name we advertise ourselves for
+        #    an xml-id-less action created in the UI (llm_api_patch
+        #    ._slug_tool_name). Strip our own prefix before comparing:
+        #    the name slugs never carry it.
         want = _slugify(fn_name)
+        if want.startswith(_TOOL_PREFIX):
+            want = want[len(_TOOL_PREFIX):]
         if want:
             for act in candidates:
                 if want in _action_name_slugs(act.name):
@@ -663,6 +669,25 @@ TOOL_SCHEMAS = {
 }
 
 
+def _custom_tool_properties(action):
+    """Argument names an operator-made tool declares, or ``None``.
+
+    ``None`` (schema absent or unreadable) means "unknown", which the
+    caller must treat as "don't filter" — an empty set would silently
+    strip every argument.
+    """
+    try:
+        schema = json.loads(action.sudo().ai_tool_schema or "null")
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(schema, dict):
+        return None
+    props = schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return None
+    return set(props)
+
+
 def _custom_tool_definition(agent, name):
     """Build a tool definition for an operator-made server action from
     the action's own ``ai_tool_description`` / ``ai_tool_schema``.
@@ -686,6 +711,10 @@ def _custom_tool_definition(agent, name):
         schema = json.loads(action.ai_tool_schema or "null")
         if not isinstance(schema, dict) or schema.get("type") != "object":
             return None
+        # Say out loud that invented arguments aren't welcome; the
+        # dispatch drops them anyway, but the schema keeps the model
+        # from spending an iteration on them.
+        schema.setdefault("additionalProperties", False)
         return {
             "type": "function",
             "function": {
@@ -1506,6 +1535,28 @@ def run_tool_call(agent, tool_call):
             f"Tool {fn_name} arguments must be a JSON object, got "
             f"{type(kwargs).__name__}."
         )}
+
+    # ----- Drop arguments the tool doesn't declare --------------------
+    # Since v19.0.6.3.0 the model finally sees a custom tool's real
+    # schema, and promptly started enriching calls with extra keys of
+    # its own invention (observed: action_1227 called with 'topic' plus
+    # 'invalshoek' and 'doelgroep'). Odoo's action dispatch answers
+    # those with ValidationError "Missing definition for invalshoek",
+    # which costs a full iteration and usually a retry. The declared
+    # arguments are all the action can use, so silently drop the rest
+    # and run the call.
+    if action is not None:
+        declared = _custom_tool_properties(action)
+        if declared:
+            extra = [k for k in kwargs if k not in declared]
+            if extra:
+                _logger.info(
+                    "daadit_ai_mistral.tool_dispatch: dropping "
+                    "undeclared argument(s) %s from %s", extra, fn_name,
+                )
+                kwargs = {
+                    k: v for k, v in kwargs.items() if k in declared
+                }
 
     # ----- Required-arg pre-validation --------------------------------
     # Return a crisp instruction instead of letting the dispatch raise
