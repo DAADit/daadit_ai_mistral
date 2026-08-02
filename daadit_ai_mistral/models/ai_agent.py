@@ -272,6 +272,76 @@ class AIAgent(models.Model):
         allowed = set(self.daadit_allowed_model_ids.mapped("model"))
         return model_name in allowed
 
+    def _daadit_find_delegate_for_model(self, model_name):
+        """Find the best active Mistral agent allowed to query ``model_name``.
+
+        Candidates in the current agent's management tree are preferred over
+        unrelated agents. Missing optional management fields are treated as
+        empty so this remains safe on databases without those custom fields.
+        """
+        self.ensure_one()
+        Agent = self.env["ai.agent"]
+        if not model_name:
+            return Agent.browse()
+        try:
+            candidates = Agent.search([
+                ("active", "=", True),
+                ("id", "!=", self.id),
+            ])
+        except Exception:  # noqa: BLE001
+            return Agent.browse()
+
+        eligible = []
+        for candidate in candidates:
+            try:
+                if not is_mistral_model(candidate.llm_model or ""):
+                    continue
+                if not candidate._daadit_is_model_allowed(model_name):
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            eligible.append(candidate)
+
+        if not eligible:
+            return Agent.browse()
+
+        def _field_ids(record, field_name):
+            try:
+                value = getattr(record, field_name, False)
+                return set(value.ids) if value else set()
+            except Exception:  # noqa: BLE001
+                return set()
+
+        subordinate_ids = _field_ids(self, "x_subordinate_agent_ids")
+        try:
+            manager = getattr(self, "x_manager_agent_id", False)
+        except Exception:  # noqa: BLE001
+            manager = False
+        sibling_ids = (
+            _field_ids(manager, "x_subordinate_agent_ids") - {self.id}
+            if manager
+            else set()
+        )
+        try:
+            manager_id = manager.id if manager else False
+        except Exception:  # noqa: BLE001
+            manager_id = False
+        priority_ids = {candidate_id: 0 for candidate_id in subordinate_ids}
+        priority_ids.update(
+            {candidate_id: 1 for candidate_id in sibling_ids}
+        )
+        if manager_id:
+            priority_ids[manager_id] = 2
+
+        def _sort_key(candidate):
+            return (
+                priority_ids.get(candidate.id, 3),
+                (candidate.name or "").casefold(),
+                candidate.id,
+            )
+
+        return sorted(eligible, key=_sort_key)[0]
+
     # ------------------------------------------------------------------
     # Field-level blocklist — PII gate of last resort. Same semantics as
     # mcp.instance.field_blocklist so admins see one consistent rule
