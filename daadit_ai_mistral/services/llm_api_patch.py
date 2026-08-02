@@ -707,6 +707,29 @@ def _format_access_denied_message(info):
     return "\n".join(lines)
 
 
+def _last_user_message_text(messages):
+    """Return the last user message as plain text, best effort."""
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, (list, tuple)):
+            parts = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    text = part.get("text") or part.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+            value = "\n".join(parts).strip()
+            if value:
+                return value
+    return ""
+
+
 # A language reference shorter than this carries no reliable language
 # signal — "?", "Mark?" and "ok" have all been mistaken for French.
 MIN_LANG_REF_LETTERS = 12
@@ -1967,21 +1990,57 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
 
-    # If the loop short-circuited on admin-policy denial, format the
-    # user-facing message NOW and bypass Mistral's interpretation
-    # entirely. Mistral never sees the denial; the user gets a clear
-    # statement of what's blocked and by whom — translated into the
-    # language of the conversation (overrides env.user.lang).
+    # If the loop short-circuited on admin-policy denial, automatically
+    # route the question once to a capable Mistral agent when possible.
+    # Routed sub-runs must not route again; they fall through to denial.
     if access_denial:
-        en_message = _format_access_denied_message(access_denial)
+        model_name = access_denial.get("model_name")
+        routed = False
+        en_message = ""
+        if (
+            agent
+            and model_name
+            and getattr(tool_dispatch.router_state, "depth", 0) == 0
+        ):
+            try:
+                delegate = agent._daadit_find_delegate_for_model(model_name)
+            except Exception:  # noqa: BLE001
+                delegate = False
+            user_question = _last_user_message_text(conversation)
+            if delegate and user_question:
+                try:
+                    routed_result = agent._ai_tool_ask_agent(
+                        agent_name=delegate.name,
+                        question=user_question,
+                    )
+                except Exception:  # noqa: BLE001
+                    routed_result = {"error": "Automatic routing failed."}
+                if (
+                    isinstance(routed_result, dict)
+                    and not routed_result.get("error")
+                    and routed_result.get("answer")
+                ):
+                    en_message = (
+                        f"{str(routed_result['answer']).strip()}\n\n"
+                        f"_Automatically forwarded to {delegate.name}, "
+                        f"who has access to `{model_name}`._"
+                    )
+                    routed = True
+
+        if not routed:
+            en_message = _format_access_denied_message(access_denial)
+            en_message += (
+                "\n\nNo other AI agent has access to this model either — "
+                "please hand this to a human colleague."
+            )
         translated = _translate_to_chat_language(
             client, model, conversation, en_message,
         )
         adapted = [translated]
         _logger.info(
-            "daadit_ai_mistral.llm_api_patch: chat short-circuited "
-            "by admin-policy denial — model=%s requested=%s",
-            model, access_denial.get("model_name"),
+            "daadit_ai_mistral.llm_api_patch: chat ended after "
+            "admin-policy denial (routed=%s) — model=%s requested=%s",
+            routed, model, model_name,
         )
         # Token-usage from the truncated call is still worth recording.
         try:
@@ -1997,7 +2056,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 completion_tokens=usage.get("completion_tokens") or 0,
                 iterations=iteration + 1,
                 has_tools=bool(normalized_tools),
-                error=f"Access denied: {access_denial.get('model_name')}",
+                error=(
+                    None if routed
+                    else f"Access denied: {access_denial.get('model_name')}"
+                ),
                 depth=_router_depth,
                 turn_uuid=getattr(
                     tool_dispatch.router_state, "turn_uuid", None,
