@@ -53,6 +53,27 @@ _logger = logging.getLogger(__name__)
 
 _PATCHED = False
 
+_ASK_AGENT_NAME_KEYS = (
+    "agent_name", "agent", "name", "target",
+    "target_agent", "agent_id", "specialist",
+)
+
+
+def _delegate_target_name(tool_call):
+    """Best-effort: pull the delegated-to agent name out of a router
+    tool call's arguments. Returns a str or None; never raises."""
+    try:
+        raw = (tool_call.get("function") or {}).get("arguments") or "{}"
+        data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        if isinstance(data, dict):
+            for key in _ASK_AGENT_NAME_KEYS:
+                val = data.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
 
 def _diag_nonmistral_delegation(api_self, where, kwargs):
     """Persist a structure-only record to ir.logging every time our
@@ -1724,6 +1745,15 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             "failing open"
         )
 
+    try:
+        _ch = api_self.env.context.get("discuss_channel")
+        _status_channel_id = (
+            _ch.id if _ch is not None and hasattr(_ch, "id")
+            else (_ch if isinstance(_ch, int) else False)
+        )
+    except Exception:  # noqa: BLE001
+        _status_channel_id = False
+
     while iteration < MAX_ITER:
         # v19.0.4.8.0: hard per-run time budget (Fase 0-gate). Callers
         # that own a whole run (daadit_ai_agent_schedule) set
@@ -1836,6 +1866,19 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         })
 
         for tc in tool_calls:
+            if (
+                _router_depth == 0
+                and _status_channel_id
+                and agent is not None
+                and (tc.get("function") or {}).get("name")
+                    == tool_dispatch.ROUTER_TOOL_SLUG
+            ):
+                agent._daadit_post_channel_status(
+                    _status_channel_id,
+                    agent._daadit_delegation_status_body(
+                        _delegate_target_name(tc)
+                    ),
+                )
             result = tool_dispatch.run_tool_call(agent, tc)
 
             # v19.0.4.4.0: Fase 0 governance — tally hallucinated tool
@@ -2008,6 +2051,11 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 delegate = False
             user_question = _last_user_message_text(conversation)
             if delegate and user_question:
+                if _status_channel_id:
+                    agent._daadit_post_channel_status(
+                        _status_channel_id,
+                        agent._daadit_delegation_status_body(delegate.name),
+                    )
                 try:
                     routed_result = agent._ai_tool_ask_agent(
                         agent_name=delegate.name,
