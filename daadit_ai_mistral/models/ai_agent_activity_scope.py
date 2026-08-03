@@ -28,6 +28,7 @@ Default is DICHT: een agent zonder scoperegels mag niets.
 """
 import json
 import logging
+from datetime import timedelta
 
 from odoo import _, api, fields, models
 from odoo.exceptions import ValidationError
@@ -115,12 +116,72 @@ SEED_ACTIVITY_SCOPES = {
 }
 
 
+# De code die in de serveractie achter de plan-activiteit-tool hoort te
+# staan. Hij beslist niets meer zelf: de grens, de reparatiekanaal-
+# uitzondering en de logging leven in dit bestand en zijn dus
+# versiebeheerd, gereviewd en getest. De actie leest alleen de optionele
+# parameters uit — die bestaan als naam niet in de eval-context zodra het
+# model ze niet meestuurt, en Odoo's safe-eval laat geen getattr-truc toe.
+SERVER_ACTION_CODE = '''# SCOPE-GUARD — de beslissing staat in daadit_ai_mistral,
+# model ai.agent, methode _daadit_schedule_activity_guarded.
+# Wijzig de grens daar en niet hier: deze code is een doorgeefluik.
+try:
+    _ati = activity_type_id
+except Exception:
+    _ati = False
+try:
+    _atx = activity_type_xmlid
+except Exception:
+    _atx = False
+try:
+    _note = note
+except Exception:
+    _note = ''
+try:
+    _deadline = date_deadline
+except Exception:
+    _deadline = False
+try:
+    _uid = user_id
+except Exception:
+    _uid = False
+try:
+    _summary = summary
+except Exception:
+    _summary = ''
+
+ai['result'] = record._daadit_schedule_activity_guarded(
+    model_name=model_name,
+    record_id=record_id,
+    activity_type_id=_ati,
+    activity_type_xmlid=_atx,
+    summary=_summary,
+    note=_note,
+    date_deadline=_deadline,
+    user_id=_uid,
+)
+'''
+
+# Een AUTO-APPLY van de assurance-watchdog is geen herinnering maar een
+# opdracht aan de applier. De cap op open to-do's per record hoort er niet
+# op te gelden — zonder deze uitzondering liep artikel 182 vol en werd
+# twaalf dagen lang elke autonome reparatie geweigerd (taak 722).
+REPAIR_CHANNEL_PREFIX = "AUTO-APPLY"
+REPAIR_CHANNEL_BACKLOG = 5
+
+
 class AIAgent(models.Model):
     _inherit = "ai.agent"
 
     daadit_activity_scope_ids = fields.One2many(
         "daadit.ai.agent.activity.scope", "agent_id",
         string="Activity write scope",
+    )
+    daadit_repair_channel = fields.Boolean(
+        string="Repair channel (AUTO-APPLY)", default=False,
+        help="Deze agent mag reparatievoorstellen indienen langs de cap op "
+             "open herinneringen. Alleen voor de assurance-watchdog; de "
+             "schrijfscope blijft onverkort gelden.",
     )
 
     @api.model
@@ -207,3 +268,133 @@ class AIAgent(models.Model):
                 model=model_name, rid=record_id,
             )
         return True, ""
+
+    def _daadit_schedule_activity_guarded(
+        self, model_name, record_id, summary=None, note=None,
+        date_deadline=False, user_id=False, activity_type_id=False,
+        activity_type_xmlid=False,
+    ):
+        """Plan een activiteit, of weiger met uitleg.
+
+        Dit is het enige pad waarlangs een agent een activiteit plant.
+        De serveractie achter de tool roept alleen deze methode aan
+        (:data:`SERVER_ACTION_CODE`), zodat de grens niet meer in een
+        databaseveld leeft.
+        """
+        self.ensure_one()
+        allowed, reason = self._daadit_activity_scope(model_name, record_id)
+        if allowed and not (summary or "").strip():
+            allowed = False
+            reason = _(
+                "SCOPE-GUARD: een activiteit zonder samenvatting is "
+                "nutteloos voor de ontvanger. Roep de tool opnieuw aan "
+                "met een korte, concrete summary.")
+        if not allowed:
+            _logger.warning(
+                "SCOPE-GUARD blokkeerde write: agent %s -> %s #%s",
+                self.id, model_name, record_id)
+            return {
+                "ok": False,
+                "blocked_by_scope_guard": True,
+                "error": reason,
+            }
+
+        if not activity_type_id and not activity_type_xmlid:
+            activity_type_xmlid = "mail.mail_activity_data_todo"
+
+        is_repair = (
+            self.daadit_repair_channel
+            and (summary or "").strip().upper().startswith(
+                REPAIR_CHANNEL_PREFIX)
+        )
+        if is_repair:
+            return self._daadit_repair_channel_activity(
+                model_name, int(record_id), summary, note,
+                date_deadline, user_id, activity_type_id)
+
+        return self._ai_tool_schedule_activity(
+            model_name=model_name,
+            record_id=record_id,
+            activity_type_xmlid=activity_type_xmlid,
+            activity_type_id=activity_type_id,
+            summary=summary,
+            note=note,
+            date_deadline=date_deadline,
+            user_id=user_id,
+        )
+
+    def _daadit_repair_channel_activity(
+        self, model_name, record_id, summary, note, date_deadline,
+        user_id, activity_type_id,
+    ):
+        """Dien een reparatievoorstel in, langs de herinneringencap.
+
+        Met eigen dedup (exact dezelfde samenvatting bestaat al) en een
+        bovengrens: staan er vijf onverwerkte voorstellen van het
+        afgelopen etmaal, dan hapert de applier zelf en helpt een zesde
+        voorstel niemand.
+        """
+        self.ensure_one()
+        Act = self.env["mail.activity"].sudo()
+        base = [("res_model", "=", model_name), ("res_id", "=", record_id)]
+        same = Act.search(base + [("summary", "=", summary)], limit=1)
+        if same:
+            return {
+                "ok": True, "skipped": True,
+                "reason": "duplicate_autoapply",
+                "activity_id": same.id,
+                "message": _(
+                    "Er staat al een openstaand AUTO-APPLY-voorstel met "
+                    "exact deze samenvatting (activiteit %s). Er is niets "
+                    "aangemaakt; rapporteer dat en dien geen tweede "
+                    "voorstel voor hetzelfde blok in.", same.id),
+            }
+
+        since = fields.Datetime.to_string(
+            fields.Datetime.now() - timedelta(days=1))
+        pending = Act.search_count(base + [
+            ("summary", "ilike", REPAIR_CHANNEL_PREFIX),
+            ("create_date", ">=", since),
+        ])
+        if pending >= REPAIR_CHANNEL_BACKLOG:
+            return {
+                "ok": False, "error": "applier_backlog",
+                "message": _(
+                    "Er staan al %s onverwerkte AUTO-APPLY-voorstellen van "
+                    "het afgelopen etmaal op dit record. De applier "
+                    "verwerkt ze normaal binnen tien minuten; dat gebeurt "
+                    "kennelijk niet. Er is niets aangemaakt — meld dit als "
+                    "storing in de herstelketen zelf.", pending),
+            }
+
+        owner = int(user_id or 0) or self._daadit_repair_channel_user()
+        new = Act.create({
+            "res_model_id": self.env["ir.model"]._get_id(model_name),
+            "res_id": record_id,
+            "activity_type_id": (
+                int(activity_type_id) if activity_type_id
+                else self.env.ref("mail.mail_activity_data_todo").id),
+            "user_id": owner,
+            "summary": summary,
+            "note": note or "",
+            "date_deadline": date_deadline or fields.Date.context_today(self),
+        })
+        _logger.warning(
+            "REPARATIEKANAAL: AUTO-APPLY %s aangemaakt op %s #%s langs de "
+            "herinneringencap.", new.id, model_name, record_id)
+        return {
+            "ok": True, "activity_id": new.id, "model_name": model_name,
+            "record_id": record_id, "summary": summary,
+            "user_id": owner, "bypassed_reminder_cap": True,
+            "message": _(
+                "Reparatievoorstel ingediend. De applier pikt het binnen "
+                "tien minuten op."),
+        }
+
+    def _daadit_repair_channel_user(self):
+        """Wie krijgt een reparatievoorstel als niemand is meegegeven?"""
+        param = self.env["ir.config_parameter"].sudo().get_param(
+            "daadit_ai_mistral.repair_channel_user_id")
+        if param and param.isdigit() and int(param):
+            return int(param)
+        return self.env.ref("base.user_admin").id

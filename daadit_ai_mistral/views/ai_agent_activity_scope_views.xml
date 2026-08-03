@@ -2,7 +2,7 @@
 <odoo>
 
     <!--
-        Hard per-agent activity write scope (v19.0.6.18.0).
+        Hard per-agent activity write scope (v19.0.6.19.0).
 
         Zelfde opbouw als de leesscope: geen ingebedde <list> in een
         <field> (de validator van Odoo 19 weigert dat), dus losse
@@ -63,6 +63,9 @@
                     <field name="daadit_activity_scope_ids"
                            nolabel="1"
                            context="{'default_agent_id': id, 'active_test': False}"/>
+                    <group>
+                        <field name="daadit_repair_channel"/>
+                    </group>
                 </div>
 
             </xpath>
