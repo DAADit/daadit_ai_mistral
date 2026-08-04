@@ -272,76 +272,6 @@ class AIAgent(models.Model):
         allowed = set(self.daadit_allowed_model_ids.mapped("model"))
         return model_name in allowed
 
-    def _daadit_find_delegate_for_model(self, model_name):
-        """Find the best active Mistral agent allowed to query ``model_name``.
-
-        Candidates in the current agent's management tree are preferred over
-        unrelated agents. Missing optional management fields are treated as
-        empty so this remains safe on databases without those custom fields.
-        """
-        self.ensure_one()
-        Agent = self.env["ai.agent"]
-        if not model_name:
-            return Agent.browse()
-        try:
-            candidates = Agent.search([
-                ("active", "=", True),
-                ("id", "!=", self.id),
-            ])
-        except Exception:  # noqa: BLE001
-            return Agent.browse()
-
-        eligible = []
-        for candidate in candidates:
-            try:
-                if not is_mistral_model(candidate.llm_model or ""):
-                    continue
-                if not candidate._daadit_is_model_allowed(model_name):
-                    continue
-            except Exception:  # noqa: BLE001
-                continue
-            eligible.append(candidate)
-
-        if not eligible:
-            return Agent.browse()
-
-        def _field_ids(record, field_name):
-            try:
-                value = getattr(record, field_name, False)
-                return set(value.ids) if value else set()
-            except Exception:  # noqa: BLE001
-                return set()
-
-        subordinate_ids = _field_ids(self, "x_subordinate_agent_ids")
-        try:
-            manager = getattr(self, "x_manager_agent_id", False)
-        except Exception:  # noqa: BLE001
-            manager = False
-        sibling_ids = (
-            _field_ids(manager, "x_subordinate_agent_ids") - {self.id}
-            if manager
-            else set()
-        )
-        try:
-            manager_id = manager.id if manager else False
-        except Exception:  # noqa: BLE001
-            manager_id = False
-        priority_ids = {candidate_id: 0 for candidate_id in subordinate_ids}
-        priority_ids.update(
-            {candidate_id: 1 for candidate_id in sibling_ids}
-        )
-        if manager_id:
-            priority_ids[manager_id] = 2
-
-        def _sort_key(candidate):
-            return (
-                priority_ids.get(candidate.id, 3),
-                (candidate.name or "").casefold(),
-                candidate.id,
-            )
-
-        return sorted(eligible, key=_sort_key)[0]
-
     # ------------------------------------------------------------------
     # Field-level blocklist — PII gate of last resort. Same semantics as
     # mcp.instance.field_blocklist so admins see one consistent rule
@@ -1198,6 +1128,65 @@ class AIAgent(models.Model):
     _THROTTLE_ICP_LIMIT = "daadit_ai_mistral.activity_throttle_per_day"
     _THROTTLE_ICP_FALLBACK = "daadit_ai_mistral.activity_throttle_fallback_user_id"
     _THROTTLE_DIGEST_SUMMARY = "Agent-activiteiten boven daglimiet (bundel)"
+    _OPEN_PER_RECORD_ICP = "daadit_ai_mistral.open_activities_per_record"
+
+    # Words that carry no topic: dropping them keeps the comparison on
+    # the meaningful terms. NL + EN, since agents write in both.
+    _ACTIVITY_STOPWORDS = frozenset("""
+        de het een en of van voor naar op in bij te ten ter met dan als
+        dat die deze dit is zijn wordt worden was waren er nog al niet
+        geen om aan door over uit meer langer dan naar toe
+        the a an and or of for to on in at by with is are was were be
+        been this that these those not no more than into from
+    """.split())
+
+    # Het zelfherstel-pad. Argus dient een promptfix in als activiteit
+    # met deze prefix; de applier pikt hem daar op. Waargenomen 01-08:
+    # zijn eerste autonome fix strandde op de cap van twee open taken
+    # per record, omdat Nick er al 42 open had staan op datzelfde
+    # artikel. De cap is er om lijsten leesbaar te houden — niet om het
+    # enige mechanisme te blokkeren waarmee het systeem zichzelf
+    # repareert. Deze route komt hooguit een paar keer per maand langs.
+    _SELF_HEAL_PREFIX = "AUTO-APPLY"
+
+    @classmethod
+    def _daadit_is_self_heal(cls, summary):
+        return (summary or "").strip().upper().startswith(
+            cls._SELF_HEAL_PREFIX
+        )
+
+    @classmethod
+    def _daadit_activity_tokens(cls, text):
+        """Normalise a summary to a set of meaningful lowercase tokens."""
+        import re as _re
+        cleaned = _re.sub(r"[^0-9a-zà-ÿ]+", " ", (text or "").lower())
+        return {
+            token for token in cleaned.split()
+            if len(token) > 1 and token not in cls._ACTIVITY_STOPWORDS
+        }
+
+    @classmethod
+    def _daadit_same_activity_topic(cls, summary_a, summary_b):
+        """True when two activity summaries describe the same to-do.
+
+        Compared as normalised token sets with a Jaccard threshold, so
+        rewordings of one signal collapse together
+        ("Escalatie: Ticket langer dan 2 werkuur onopgelost" ≈ "Ticket
+        >2 werkuur onopgelost — prioriteit herzien") while unrelated
+        to-dos on the same record stay separate ("Ticket wacht op
+        triage" vs "Geboekte uren zonder gekoppelde verkooporder").
+        """
+        if not summary_a or not summary_b:
+            return False
+        if summary_a.strip().lower() == summary_b.strip().lower():
+            return True
+        tokens_a = cls._daadit_activity_tokens(summary_a)
+        tokens_b = cls._daadit_activity_tokens(summary_b)
+        if not tokens_a or not tokens_b:
+            return False
+        union = tokens_a | tokens_b
+        overlap = len(tokens_a & tokens_b) / len(union) if union else 0.0
+        return overlap >= 0.5
 
     def _daadit_activity_throttle(self, assignee, model_name, record,
                                   summary):
@@ -1466,10 +1455,12 @@ class AIAgent(models.Model):
             return {"error": "Unknown model '%s'." % model_name}
         Model = self.env[model_name]
         if not hasattr(Model, "activity_schedule"):
-            return {"error": (
-                "Model '%s' does not support activities (it does not "
-                "inherit mail.activity.mixin)." % model_name
-            )}
+            # Naming the limitation alone made Sem repeat the same call
+            # every day for three days (runs 496, 508, 536): his work
+            # list is about website.page records, and an activity on the
+            # record was the only way he knew to write a finding down.
+            # Name where it CAN go instead.
+            return {"error": self._daadit_no_activity_hint(model_name)}
         record = Model.browse(record_id).exists()
         if not record:
             return {"error": (
@@ -1547,25 +1538,96 @@ class AIAgent(models.Model):
         target_note = note or ""
 
         # --- Idempotence: skip if an equivalent open activity exists ---
-        existing_domain = [
+        # Matching on the EXACT summary text does not hold: the model
+        # rewords the same signal every run ("Escalatie: Ticket langer
+        # dan 2 werkuur onopgelost" → "Ticket >2 werkuur onopgelost —
+        # prioriteit herzien" → …), so the check never fired and one
+        # helpdesk ticket collected five identical open escalations for
+        # the same assignee. Compare on MEANING instead (normalised
+        # token overlap), so a rephrasing is recognised while a
+        # genuinely different to-do on the same record still gets
+        # through.
+        existing_open = self.env["mail.activity"].search([
             ("res_model", "=", model_name),
             ("res_id", "=", record.id),
             ("activity_type_id", "=", act_type.id),
             ("user_id", "=", assignee.id),
-        ]
-        if target_summary:
-            existing_domain.append(("summary", "=", target_summary))
-        existing = self.env["mail.activity"].search(existing_domain, limit=1)
+        ])
+        existing = self.env["mail.activity"]
+        if existing_open:
+            if not target_summary:
+                # No summary to compare — any open activity of the same
+                # type for this assignee is the same reminder.
+                existing = existing_open[:1]
+            else:
+                for candidate in existing_open:
+                    if self._daadit_same_activity_topic(
+                        target_summary, candidate.summary or "",
+                    ):
+                        existing = candidate
+                        break
         if existing:
             return {
                 "ok": True,
                 "skipped": True,
                 "reason": "duplicate",
+                "message": (
+                    "An open activity for this record and assignee "
+                    "already covers this ("
+                    + (existing.summary or "no summary")
+                    + "). Nothing was created — do NOT reword it and "
+                    "try again; report it as already outstanding."
+                ),
                 "model_name": model_name,
                 "record_id": record.id,
                 "activity_id": existing.id,
                 "existing_activity_id": existing.id,
+                "existing_summary": existing.summary or "",
                 "activity_type_id": act_type.id,
+                "user_id": assignee.id,
+            }
+
+        # --- Cap on OPEN activities per record+assignee ----------------
+        # Second net under the topic comparison above: wording can drift
+        # far enough that two summaries no longer overlap, and the
+        # assignee still ends up with a stack of open to-dos on a single
+        # record (ticket 683 collected five). Past the cap we stop
+        # adding — the outstanding to-do is the reminder.
+        try:
+            open_cap = int(self.env["ir.config_parameter"].sudo().get_param(
+                self._OPEN_PER_RECORD_ICP, "2",
+            ) or 2)
+        except (TypeError, ValueError):
+            open_cap = 2
+        if (
+            open_cap > 0
+            and len(existing_open) >= open_cap
+            and not self._daadit_is_self_heal(summary)
+        ):
+            _logger.info(
+                "daadit_ai_mistral._ai_tool_schedule_activity: %s already "
+                "has %s open activities for user %s on %s(%s) — capped",
+                self.name, len(existing_open), assignee.id,
+                model_name, record.id,
+            )
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "open_activity_cap",
+                "message": (
+                    "%s already has %s open to-do(s) on this record: %s. "
+                    "No new activity was created. Report the situation "
+                    "instead of adding another reminder." % (
+                        assignee.name, len(existing_open),
+                        "; ".join(
+                            a.summary or "(no summary)"
+                            for a in existing_open[:3]
+                        ),
+                    )
+                ),
+                "model_name": model_name,
+                "record_id": record.id,
+                "open_activity_ids": existing_open.ids,
                 "user_id": assignee.id,
             }
 
@@ -1574,11 +1636,15 @@ class AIAgent(models.Model):
         # 4). Overschot wordt gebundeld in één digest-activiteit voor
         # de fallback-reviewer in plaats van de assignee te blijven
         # bestoken. Beschermt de reviewcapaciteit van een klein team.
-        throttled = self._daadit_activity_throttle(
-            assignee, model_name, record, target_summary,
-        )
-        if throttled is not None:
-            return throttled
+        # Zelfherstel gaat ook langs de dagbundel heen: gebundeld in een
+        # verzameltaak zou de applier de fix nooit vinden, en dan is het
+        # mechanisme er wel maar werkt het niet.
+        if not self._daadit_is_self_heal(summary):
+            throttled = self._daadit_activity_throttle(
+                assignee, model_name, record, target_summary,
+            )
+            if throttled is not None:
+                return throttled
 
         # --- Create the activity ---------------------------------------
         try:
@@ -1764,10 +1830,58 @@ class AIAgent(models.Model):
                 "Refusing to route to myself. Answer with your own "
                 "tools instead."
             )}
-        if not is_mistral_model(target.llm_model or ""):
+        # v19.0.6.5.4: route to non-Mistral agents too. The sub-run runs
+        # on whichever provider the TARGET uses, so a Mistral concierge
+        # can delegate to a Claude specialist (Sem, Vince, Maud, …)
+        # instead of refusing. Falls back to the old refusal only when
+        # no provider add-on claims the model.
+        sub_provider = "mistral" if is_mistral_model(
+            target.llm_model or ""
+        ) else None
+        sub_patch = None
+        if sub_provider is None:
+            try:
+                from odoo.addons.daadit_ai_claude.services.claude_client import (
+                    is_claude_model,
+                )
+                if is_claude_model(target.llm_model or ""):
+                    from odoo.addons.daadit_ai_claude.services import (
+                        llm_api_patch as sub_patch,
+                    )
+                    sub_provider = "anthropic"
+            except ImportError:
+                _logger.info(
+                    "daadit_ai_mistral.router: daadit_ai_claude not "
+                    "importable — cannot route to Claude agents"
+                )
+        if sub_provider is None:
             return {"error": (
-                "Agent '%s' does not run on the Mistral path; cannot "
-                "route. Answer with your own tools instead." % target.name
+                "Agent '%s' runs on model '%s', for which no provider "
+                "path is available; cannot route. Answer with your own "
+                "tools instead." % (target.name, target.llm_model or "?")
+            )}
+
+        # Delegating a question that was just refused on policy grounds
+        # only pays off if the receiver may read what the caller may
+        # not. Eva was denied on account.move.line and asked Bram in the
+        # next call; Bram's whitelist does not hold it either, so the
+        # hop cost two iterations and produced nothing. Runs 558, 501,
+        # 500 and 499 all show it, with four different models.
+        blocked_for_target = self._daadit_denied_for_target(target)
+        if blocked_for_target:
+            names = ", ".join(sorted(blocked_for_target))
+            _logger.info(
+                "daadit_ai_mistral.router: refusing hop %s(%s) -> %s(%s), "
+                "receiver may not read %s either",
+                self.name, self.id, target.name, target.id, names,
+            )
+            return {"error": (
+                "Agent '%s' is not permitted to read %s either, so "
+                "delegating this question cannot produce that data. Do "
+                "not ask another colleague for it. Report it as NOT "
+                "ESTABLISHED, name the missing source, and continue with "
+                "what you can establish yourself — never invent figures, "
+                "names or amounts to fill the gap." % (target.name, names)
             )}
 
         # Build the sub-run tool list from the TARGET's topics. Strip
@@ -1818,12 +1932,16 @@ class AIAgent(models.Model):
         prev_record = getattr(tool_dispatch.current_agent, "record", None)
         prev_exhausted = getattr(tool_dispatch.router_state, "exhausted", False)
         prev_sub_failed = getattr(tool_dispatch.router_state, "sub_failed", False)
+        prev_denied = getattr(
+            tool_dispatch.router_state, "sub_denied_model", "",
+        )
         # Set state and run inside one try/finally so a raise anywhere —
         # including before request_llm — can never leak depth or the
         # active-agent record onto this worker thread.
         try:
             tool_dispatch.router_state.depth = depth + 1
             tool_dispatch.router_state.exhausted = False
+            tool_dispatch.router_state.sub_denied_model = ""
             tool_dispatch.current_agent.record = target
             _logger.info(
                 "daadit_ai_mistral.router: agent %s(%s) routing question "
@@ -1831,7 +1949,11 @@ class AIAgent(models.Model):
                 self.name, self.id, target.name, target.id, self.env.uid,
                 depth, depth + 1, calls + 1, len(tool_names),
             )
-            service = LLMApiService(env=self.env, provider="mistral")
+            if sub_patch is not None:
+                # Cross-provider hop: patch the target's provider in
+                # before we ask LLMApiService for it.
+                sub_patch.patch_llm_api_service()
+            service = LLMApiService(env=self.env, provider=sub_provider)
             result = service.request_llm(
                 model=target.llm_model,
                 inputs=messages,
@@ -1843,6 +1965,9 @@ class AIAgent(models.Model):
             sub_failed = bool(
                 getattr(tool_dispatch.router_state, "sub_failed", False)
             )
+            denied_model = getattr(
+                tool_dispatch.router_state, "sub_denied_model", "",
+            ) or ""
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 "daadit_ai_mistral.router: sub-run on %s(%s) raised %s: %s",
@@ -1857,6 +1982,7 @@ class AIAgent(models.Model):
             tool_dispatch.router_state.depth = depth
             tool_dispatch.router_state.exhausted = prev_exhausted
             tool_dispatch.router_state.sub_failed = prev_sub_failed
+            tool_dispatch.router_state.sub_denied_model = prev_denied
 
         if isinstance(result, (list, tuple)):
             answer = "\n\n".join(
@@ -1877,9 +2003,23 @@ class AIAgent(models.Model):
                 "(exhausted=%s sub_failed=%s) — signalling hybrid fallback",
                 target.name, target.id, exhausted, sub_failed,
             )
+            # A policy denial has a nameable cause, and a delegating
+            # manager must report it as unverified rather than fill the
+            # gap with invented figures (run 463).
+            if denied_model:
+                return {"error": (
+                    "Agent '%s' could not answer: reading model '%s' is "
+                    "not permitted for that agent, so the data does not "
+                    "exist for this run. Report this explicitly as NOT "
+                    "ESTABLISHED and name the missing source. Do NOT "
+                    "invent numbers, customer names, amounts or links to "
+                    "fill the gap." % (target.name, denied_model)
+                )}
             return {"error": (
                 "Agent '%s' could not complete the question. Answer with "
-                "your own tools instead." % target.name
+                "your own tools instead, and report anything you could "
+                "not establish as NOT ESTABLISHED — never invent data."
+                % target.name
             )}
         if not answer or answer.lstrip().startswith((
             "_(Mistral wanted to call", "_(Empty response",
@@ -1889,6 +2029,67 @@ class AIAgent(models.Model):
                 "own tools instead." % target.name
             )}
         return {"ok": True, "agent": target.name, "answer": answer}
+
+    def _daadit_no_activity_hint(self, model_name):
+        """Message for a model that cannot carry an activity.
+
+        Says where the finding CAN go, in this order: the record's own
+        chatter when the model has one (the note lands on the record the
+        agent is actually looking at), otherwise a project task. Without
+        an alternative the agent has nowhere to put its work and simply
+        retries tomorrow.
+        """
+        self.ensure_one()
+        Model = self.env[model_name]
+        if hasattr(Model, "message_post"):
+            where = (
+                "This model does have a chatter, so log your finding as "
+                "a note on the record instead of as an activity."
+            )
+        else:
+            where = (
+                "This model has no chatter either, so the record itself "
+                "cannot hold your finding."
+            )
+        return (
+            "Model '%s' does not support activities (it does not inherit "
+            "mail.activity.mixin), and it never will for this call — do "
+            "not retry it on this model. %s If the finding needs an owner "
+            "and a deadline, put it on a project.task (which does support "
+            "activities) and reference the '%s' record id in the "
+            "description." % (model_name, where, model_name)
+        )
+
+    def _daadit_denied_for_target(self, target):
+        """Models refused to me this turn that ``target`` may not read
+        either.
+
+        Only the models this turn was actually denied on are considered
+        — a policy refusal is the one hard signal that the caller wants
+        data it cannot reach. The question text is not parsed: guessing
+        which model a Dutch sentence needs would refuse legitimate
+        delegations.
+        """
+        self.ensure_one()
+        denied = getattr(tool_dispatch.router_state, "denied_models", None)
+        if not denied:
+            return set()
+        checker = getattr(target, "_daadit_is_model_allowed", None)
+        if not callable(checker):
+            return set()
+        out = set()
+        for model_name in denied:
+            try:
+                if not checker(model_name):
+                    out.add(model_name)
+            except Exception:  # noqa: BLE001
+                # Fail open: a bug in the check must never block a hop
+                # that might have worked.
+                _logger.exception(
+                    "daadit_ai_mistral.router: allow-check raised for "
+                    "target=%s model=%s", target.id, model_name,
+                )
+        return out
 
     def _daadit_language_hint(self):
         """Return a one-line system instruction pinning the sub-run's

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Terugvalprovider (taak 709, v19.0.6.13.0).
+
+    Als Mistral onbereikbaar is - verbinding weg, 5xx, of een rate limit
+    die alle retries overleefde - wordt dezelfde beurt door Claude
+    beantwoord in plaats van als fout te eindigen. Een 4xx valt hier
+    bewust NIET onder: dat is de vraag die niet klopt, en die klopt bij
+    Anthropic net zo min.
+
+    noupdate="1": startwaarden. Zet fallback_provider op "off" om de
+    terugval uit te zetten zonder release.
+-->
+<odoo>
+    <data noupdate="1">
+        <record id="fallback_provider" model="ir.config_parameter">
+            <field name="key">daadit_ai_mistral.fallback_provider</field>
+            <field name="value">claude</field>
+        </record>
+        <record id="fallback_model" model="ir.config_parameter">
+            <field name="key">daadit_ai_mistral.fallback_model</field>
+            <field name="value">claude-sonnet-4-6</field>
+        </record>
+    </data>
+</odoo>

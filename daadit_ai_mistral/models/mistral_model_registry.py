@@ -82,6 +82,9 @@ class DaaditAiMistralModel(models.Model):
         models_data = client.list_models()
         now = fields.Datetime.now()
         touched = 0
+        # Één router-push aan het einde i.p.v. één per rij — de
+        # ORM-hooks hieronder zouden anders per upsert vuren.
+        Registry = self.sudo().with_context(daadit_skip_router_push=True)
         for seq, item in enumerate(models_data, start=1):
             mid = item["id"]
             vals = {
@@ -90,26 +93,73 @@ class DaaditAiMistralModel(models.Model):
                 "last_synced": now,
                 "sequence": seq,
             }
-            # active_test=False: an archived row must be FOUND and updated,
-            # not shadowed by a fresh duplicate. Deliberately no
-            # ``active`` in ``vals`` for existing rows — the Mistral API
-            # returns every alias (mistral-tiny-latest, open-mistral-nemo-2407,
-            # …) as a separate model with the canonical display_name, so an
-            # admin who archives aliases to dedupe the llm_model dropdown
-            # must not see them resurrected by the nightly sync.
-            rec = self.sudo().with_context(active_test=False).search(
+            # active_test=False: an archived row must be FOUND and
+            # updated, not shadowed by a fresh duplicate. Deliberately
+            # no ``active`` in ``vals`` for existing rows — the Mistral
+            # API returns every alias (mistral-tiny-latest,
+            # open-mistral-nemo-2407, …) as a separate model carrying
+            # the canonical display_name, so an admin who archives
+            # aliases to dedupe the llm_model dropdown must not see them
+            # resurrected by the nightly sync.
+            rec = Registry.with_context(active_test=False).search(
                 [("technical_name", "=", mid)], limit=1,
             )
             if rec:
                 rec.write(vals)
             else:
-                self.sudo().create(dict(vals, technical_name=mid, active=True))
+                Registry.create(dict(vals, technical_name=mid, active=True))
             touched += 1
         _logger.info(
             "daadit_ai_mistral: synced %d Mistral models from the API",
             touched,
         )
+        self._daadit_push_to_router()
         return touched
+
+    # ------------------------------------------------------------------
+    # Directe doorstuur naar de AI Router (daadit_ai_router).
+    #
+    # De routerpagina "Providers & modellen" spiegelt dit register. Door
+    # elke wijziging (API-sync én handmatige edits) direct door te duwen
+    # is er geen wachttijd op de dagelijkse router-cron en is dit
+    # register de enige beheerplek. Losjes gekoppeld: als de router niet
+    # geïnstalleerd is, gebeurt er niets.
+    # ------------------------------------------------------------------
+    def _daadit_push_to_router(self):
+        if self.env.context.get("daadit_skip_router_push"):
+            return
+        if "ai.router.model" not in self.env:
+            return
+        try:
+            self.env["ai.router.model"].sudo()._sync_from_registries()
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral: push van modelregister naar "
+                "ai.router.model mislukt")
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        records = super().create(vals_list)
+        records._daadit_push_to_router()
+        return records
+
+    def write(self, vals):
+        result = super().write(vals)
+        self._daadit_push_to_router()
+        return result
+
+    def unlink(self):
+        env = self.env
+        skip = env.context.get("daadit_skip_router_push")
+        result = super().unlink()
+        if not skip and "ai.router.model" in env:
+            try:
+                env["ai.router.model"].sudo()._sync_from_registries()
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "daadit_ai_mistral: push van modelregister naar "
+                    "ai.router.model mislukt")
+        return result
 
     @api.model
     def _cron_sync_models(self):

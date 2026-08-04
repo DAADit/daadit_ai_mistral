@@ -54,10 +54,8 @@
         </field>
     </record>
 
-    <menuitem id="menu_mistral_model"
-              name="Mistral Models"
-              parent="ai_app.ai_config_menu"
-              action="action_mistral_model"
-              sequence="91"
-              groups="base.group_system"/>
+    <!-- Het losse Models-menu is vervallen (2026-07-29): het register
+         wordt beheerd via AI . Configuration . Router: Providers &
+         modellen, dat live met dit register meeloopt. De action blijft
+         bestaan voor de "Refresh models"-knop in Settings. -->
 </odoo>
