@@ -180,6 +180,56 @@ def _notify_once(env, spent, cap):
         )
 
 
+def agent_state(env, agent):
+    """Budgetstand van één agent, of None als die niet te bepalen is.
+
+    De teller zelf leeft in ``daadit_ai_agent_schedule`` omdat daar de
+    grenzen per agent en per vestiging staan; deze module vraagt hem
+    alleen op. Staat die module niet geïnstalleerd, dan blijft alleen
+    de systeembrede dagcap hierboven over — dat is de oude situatie en
+    dus veilig.
+
+    Fail-open: chat mag nooit stukgaan op een kapotte meter.
+    """
+    if not agent:
+        return None
+    try:
+        if "daadit.ai.agent.schedule" not in env:
+            return None
+        return env["daadit.ai.agent.schedule"].sudo()._agent_budget_state(
+            agent.sudo()
+        )
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.cost_cap: agent_state raised for agent "
+            "%s; failing open", getattr(agent, "id", None),
+        )
+        return None
+
+
+def fair_use_notice_en(state):
+    """English source for the fair-use line shown above the answer.
+
+    Returns an empty string when there is nothing to say — below the
+    threshold the customer should not be bothered at all.
+    """
+    if not state or not state.get("message"):
+        return ""
+    return state["message"]
+
+
+def should_drop_tools(state):
+    """True when this agent may still talk but no longer act.
+
+    A hard stop that also kills the conversation reads as an outage:
+    the customer asks something, gets nothing, and calls support.
+    Keeping the answer while dropping the tools costs one cheap
+    completion instead of a runaway tool chain, and the customer hears
+    *why* his colleague suddenly cannot do things.
+    """
+    return bool(state and state.get("blocked"))
+
+
 def blocked_message_en(spent, cap):
     """English source for the user-facing 'budget reached' message.
     Translated into the chat language by the caller."""
