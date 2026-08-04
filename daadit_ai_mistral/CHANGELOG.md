@@ -7,6 +7,23 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.7.6.0 — 2026-08-04
+
+Consolidatie (OAS 711), portie 2 van 4: `services/tool_dispatch.py` uit de
+deploy-lijn. Wat hier ontbrak: normalisatie van verzonnen toolargumenten
+(`_remap_arg_names`, `_alias_targets`, `_normalize_key`,
+`_missing_required_args`), het platslaan van genestelde domeingroepen
+(`_flatten_domain_groups`) en één voorspelbare resultaatlimiet
+(`_result_cap_chars`): de parameter `daadit_ai_mistral.max_tool_result_chars`
+stond in productie op 6000 terwijl de code 50 000 afdwong, zodat de limiet
+in de foutmelding niet de limiet was die gold.
+
+Behouden uit deze lijn: het echte JSON-schema van een door de operator
+gemaakte serveractie (`_custom_tool_definition`, `annotate_tools(...,
+agent=...)`). De deploy-lijn adverteert zo'n tool alleen op naam, waarna
+het model hem met `{}` aanroept. `llm_api_patch` geeft de agent nu door,
+en resolvet die daarvoor één blok eerder in `_request_llm_mistral`.
+
 ## 19.0.7.5.0 — 2026-08-04
 
 Consolidatie (OAS 711), portie 1 van 4: de servicelaag van de deploy-repo

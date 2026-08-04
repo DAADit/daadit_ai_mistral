@@ -42,6 +42,17 @@ _logger = logging.getLogger(__name__)
 # leftover state doesn't leak across requests on the same worker.
 current_agent = threading.local()
 
+# Optional observer for a top-level turn, set by whoever wants to audit
+# one. ``daadit_ai_agent_schedule`` registers itself here so a chat turn
+# gets the same action log a scheduled run already had — without that,
+# an agent answering in chat could claim anything and nothing recorded
+# what it actually did. Left as None when that module is absent, and
+# every call site guards for it, so this stays optional.
+#
+# Contract: ``begin(agent)`` before a depth-0 turn, ``end(agent, answer)``
+# after it, always, including on failure.
+turn_hooks = None
+
 # Router state for the ``AI: Ask Agent`` tool (v19.0.4.2.0). ``depth``
 # counts how many routed sub-runs are active on this thread; the tool
 # refuses to route when depth >= 1 (Concierge → specialist only, no
@@ -144,6 +155,160 @@ def _agent_tool_actions(agent):
         return None
 
 
+def _missing_required_args(action, kwargs):
+    """Required parameters of an action's schema that are absent or blank.
+
+    Returns a list of names, empty when the call is complete or the
+    action declares no schema.
+    """
+    raw = getattr(action, "ai_tool_schema", None)
+    if not raw:
+        return []
+    try:
+        schema = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    required = schema.get("required") or []
+    missing = []
+    for name in required:
+        value = kwargs.get(name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing.append(name)
+    return missing
+
+
+# Dutch parameter names seen in the action log, mapped to the English
+# schema names the tools actually declare. The agents write Dutch — they
+# are prompted in Dutch and their tool descriptions are Dutch — so a
+# Dutch key is not a mistake the model can reliably avoid, and half the
+# custom tools already accept them (their action bodies read Dutch keys,
+# which is why the same call sometimes works and sometimes does not).
+# Mapping them here makes the whole tool surface behave the same way.
+_ARG_ALIASES = {
+    "naam": "name",
+    "titel": "title",
+    "onderwerp": "title",
+    "beschrijving": "description",
+    "omschrijving": "description",
+    "toelichting": "description",
+    "inhoud": "body",
+    "tekst": "body",
+    "bericht": "body",
+    "doel": "objective",
+    "doelstelling": "objective",
+    "datum": "date",
+    "startdatum": "date_start",
+    "einddatum": "date_end",
+    "deadline": "date_deadline",
+    "kanaal": "channel",
+    "uitvoerder": "assignee",
+    "verantwoordelijke": "assignee",
+    "eigenaar": "assignee",
+    "klant": "partner",
+    "campagne": "campaign",
+    "campagne_id": "campaign_id",
+    "briefing": "brief",
+    "reden": "reason",
+    "prioriteit": "priority",
+    "status": "state",
+    "model": "model_name",
+    "modelnaam": "model_name",
+    "velden": "fields",
+    "limiet": "limit",
+    "aantal": "limit",
+    "domein": "domain",
+    "zoekdomein": "domain",
+    "notitie": "note",
+    "samenvatting": "summary",
+    "vraag": "question",
+    "antwoord": "answer",
+}
+
+
+def _normalize_key(key):
+    """Fold a parameter name to its comparable form."""
+    return re.sub(r"[^a-z0-9]", "", (key or "").strip().lower())
+
+
+_NORM_ALIASES = {
+    _normalize_key(k): _normalize_key(v) for k, v in _ARG_ALIASES.items()
+}
+
+
+def _alias_targets(norm_key):
+    """Candidate schema names for an already-normalised supplied key.
+
+    Both with and without the ``id`` suffix, because a Dutch key can be
+    either side of it: ``campagne_id`` -> ``campaign_id`` and
+    ``campagne`` -> ``campaign_id`` both occur in the log.
+    """
+    alias = _NORM_ALIASES.get(norm_key)
+    out = [norm_key, f"{norm_key}id"]
+    if alias:
+        out += [alias, f"{alias}id"]
+    if norm_key.endswith("id"):
+        stem = _NORM_ALIASES.get(norm_key[:-2])
+        if stem:
+            out += [stem, f"{stem}id"]
+    return out
+
+
+def _schema_properties(action):
+    """Property names an action's tool schema declares, or ()."""
+    raw = getattr(action, "ai_tool_schema", None)
+    if not raw:
+        return ()
+    try:
+        schema = json.loads(raw)
+    except (ValueError, TypeError):
+        return ()
+    props = schema.get("properties")
+    return tuple(props) if isinstance(props, dict) else ()
+
+
+def _remap_arg_names(action, kwargs):
+    """Rename supplied arguments onto the names the schema declares.
+
+    Returns ``(kwargs, renames)``; ``kwargs`` is a new dict when
+    anything moved. Three ways a key is matched, all conservative — a
+    key is only ever moved onto a schema name that the call left empty,
+    and a key the schema itself declares is never touched:
+
+        "Campaign ID" -> campaign_id   (punctuation / case)
+        "campagne_id" -> campaign_id   (Dutch alias)
+        "campaign"    -> campaign_id   (bare name of an id parameter)
+
+    This is deliberately not "one unknown key, one missing parameter, so
+    they must belong together": guessing that way would silently write a
+    campaign title into a channel field.
+    """
+    props = _schema_properties(action)
+    if not props or not isinstance(kwargs, dict):
+        return kwargs, {}
+    by_norm = {_normalize_key(p): p for p in props}
+    renames = {}
+    out = dict(kwargs)
+    for key in list(out):
+        if key in props:
+            continue
+        target = None
+        for candidate in _alias_targets(_normalize_key(key)):
+            target = by_norm.get(candidate)
+            if target:
+                break
+        if not target or target == key:
+            continue
+        current = out.get(target)
+        if current is not None and not (
+            isinstance(current, str) and not current.strip()
+        ):
+            # The schema name is already filled in — the model sent both.
+            continue
+        out[target] = out.pop(key)
+        renames[key] = target
+    return (out, renames) if renames else (kwargs, {})
+
+
 def _resolve_tool_action(agent, fn_name):
     """Resolve a tool name to its backing ``ir.actions.server`` record,
     STRICTLY within the agent's own topic tools.
@@ -176,18 +341,30 @@ def _resolve_tool_action(agent, fn_name):
             if xmlid and xmlid.split(".", 1)[-1] == fn_name:
                 return act.with_env(agent.env)
         # 3) Semantic slug — a name hallucinated from the description
-        #    when the advertised ``action_<id>`` was opaque, or the
-        #    ``ir_actions_server_<slug>`` name we advertise ourselves for
-        #    an xml-id-less action created in the UI (llm_api_patch
-        #    ._slug_tool_name). Strip our own prefix before comparing:
-        #    the name slugs never carry it.
+        #    when the advertised ``action_<id>`` was opaque.
         want = _slugify(fn_name)
-        if want.startswith(_TOOL_PREFIX):
-            want = want[len(_TOOL_PREFIX):]
         if want:
             for act in candidates:
                 if want in _action_name_slugs(act.name):
                     return act.with_env(agent.env)
+        # 4) ``ir_actions_server_<slug-of-the-action-name>`` — the shape
+        #    ``daadit_ai_agent_schedule._get_tool_names`` advertises to
+        #    scheduled runs. Stock tools resolve through their backing
+        #    ``_ai_tool_*`` method, so only custom actions ever reach
+        #    here; gating on "no method behind this name" keeps the chat
+        #    route's dispatch path for the stock tools untouched.
+        #    Without this, every custom action in a scheduled run came
+        #    back as ``Unknown tool: ir_actions_server_<slug>`` (Eva's
+        #    ask_bram / ask_pim / ask_sanne, run 460).
+        if fn_name.startswith(_TOOL_PREFIX):
+            bare = _slugify(fn_name[len(_TOOL_PREFIX):])
+            has_method = callable(
+                getattr(agent, _tool_name_to_method(fn_name), None)
+            )
+            if bare and not has_method:
+                for act in candidates:
+                    if bare in _action_name_slugs(act.name):
+                        return act.with_env(agent.env)
     except Exception:  # noqa: BLE001
         _logger.exception(
             "daadit_ai_mistral.tool_dispatch: action resolution raised "
@@ -669,25 +846,6 @@ TOOL_SCHEMAS = {
 }
 
 
-def _custom_tool_properties(action):
-    """Argument names an operator-made tool declares, or ``None``.
-
-    ``None`` (schema absent or unreadable) means "unknown", which the
-    caller must treat as "don't filter" — an empty set would silently
-    strip every argument.
-    """
-    try:
-        schema = json.loads(action.sudo().ai_tool_schema or "null")
-    except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(schema, dict):
-        return None
-    props = schema.get("properties")
-    if not isinstance(props, dict) or not props:
-        return None
-    return set(props)
-
-
 def _custom_tool_definition(agent, name):
     """Build a tool definition for an operator-made server action from
     the action's own ``ai_tool_description`` / ``ai_tool_schema``.
@@ -834,6 +992,7 @@ def _safe_jsonable(value, depth=0):
 # Mistral medium context, leaving room for system prompt, conversation
 # history, and additional tool calls in the same turn.
 _MAX_TOOL_RESULT_CHARS = 50_000
+_RESULT_CAP_ICP = "daadit_ai_mistral.max_tool_result_chars"
 
 
 def _is_binary_key(key):
@@ -879,42 +1038,102 @@ def _strip_binary_fields(value):
     return value
 
 
-def _enforce_result_size_cap(safe, fn_name):
-    """If ``safe`` (a JSON-safe value) is too large, return an error
-    dict instructing the LLM to scope down. Otherwise return ``safe``
-    unchanged.
+def _result_cap_chars(env):
+    """The cap that actually applies, in characters.
+
+    ``daadit_ai_mistral.max_tool_result_chars`` wins; the module
+    constant is the fallback. Both numbers existed before — the
+    parameter was set to 6000 in production while this function
+    enforced 50 000, so the cap named in the error message was not the
+    cap being applied and nobody could predict when a query would fit.
+    0 disables the cap.
+    """
+    if env is None:
+        return _MAX_TOOL_RESULT_CHARS
+    try:
+        raw = env["ir.config_parameter"].sudo().get_param(
+            _RESULT_CAP_ICP, _MAX_TOOL_RESULT_CHARS,
+        )
+        return max(0, int(str(raw).strip()))
+    except Exception:  # noqa: BLE001
+        return _MAX_TOOL_RESULT_CHARS
+
+
+def _truncate_to_cap(safe, fn_name, cap):
+    """Cut an over-cap result down to size instead of refusing it.
+
+    A refusal costs an iteration and yields nothing, so the model
+    re-asks — run 519 sent the same 262k-character query five times in a
+    row and then died on the iteration limit. A list is the common
+    shape, and half a list plus an explicit ``truncated`` marker is
+    genuinely useful: the model can answer from the first records, and
+    it knows there are more, so it can narrow down *on purpose* instead
+    of guessing whether the call failed.
+
+    Records are dropped from the tail one at a time rather than
+    estimated, because record sizes differ by orders of magnitude
+    (a ``res.users`` row vs a ``mail.message`` body).
+    """
+    if isinstance(safe, list) and safe:
+        kept = list(safe)
+        while kept and len(json.dumps(
+            {"records": kept}, default=str,
+        )) > cap:
+            kept.pop()
+        return {
+            "records": kept,
+            "truncated": True,
+            "returned_records": len(kept),
+            "total_records": len(safe),
+            "note": (
+                f"The full result was over the {cap}-character cap, so "
+                f"only the first {len(kept)} of {len(safe)} records are "
+                f"included. These are real records — use them. Do not "
+                f"repeat this call unchanged: to see the rest, narrow "
+                f"the `domain`, pass a shorter `fields` list, or page "
+                f"with `offset`."
+            ),
+        }
+    serialized = json.dumps(safe, default=str)
+    return {
+        "truncated": True,
+        "result_chars": len(serialized),
+        "cap_chars": cap,
+        "partial_result": serialized[:max(0, cap - 400)],
+        "note": (
+            f"The result was over the {cap}-character cap and is cut off "
+            f"mid-way. Do not repeat this call unchanged: ask for fewer "
+            f"fields or a narrower scope."
+        ),
+    }
+
+
+def _enforce_result_size_cap(safe, fn_name, env=None):
+    """Bring ``safe`` (a JSON-safe value) within the result cap.
 
     Sized in characters of the JSON encoding — measuring tokens would
     require the model's tokenizer, and char-count is a good-enough
     proxy at this scale (Mistral / OpenAI tokenisers run ~3-4 chars
     per token for mixed JSON content).
     """
+    cap = _result_cap_chars(env)
+    if not cap:
+        return safe
     try:
         serialized = json.dumps(safe, default=str)
     except Exception:  # noqa: BLE001
         serialized = str(safe)
     n = len(serialized)
-    if n <= _MAX_TOOL_RESULT_CHARS:
+    if n <= cap:
         return safe
     _logger.warning(
         "daadit_ai_mistral.tool_dispatch: result for %s exceeded cap "
-        "(%d chars > %d) — returning error to LLM",
-        fn_name, n, _MAX_TOOL_RESULT_CHARS,
+        "(%d chars > %d) — truncating",
+        fn_name, n, cap,
     )
-    return {
-        "error": (
-            f"Tool result too large ({n} chars; cap is "
-            f"{_MAX_TOOL_RESULT_CHARS}). Re-call with a narrower scope: "
-            f"pass an explicit short `fields` list (e.g. "
-            f"['id', 'name', 'list_price']), tighten the `domain`, or "
-            f"lower `limit`. Binary fields (image_*, datas, raw) are "
-            f"already stripped server-side, so over-cap means the "
-            f"non-binary content alone is too big."
-        ),
-        "tool_name": fn_name,
-        "result_chars": n,
-        "cap_chars": _MAX_TOOL_RESULT_CHARS,
-    }
+    out = _truncate_to_cap(safe, fn_name, cap)
+    out["tool_name"] = fn_name
+    return out
 
 
 # Stock methods whose parameter is a JSON-string (stock json.loads-es it
@@ -1057,12 +1276,58 @@ def _eval_relative_date(expr):
     return None
 
 
+_DOMAIN_LOGIC_OPS = ("&", "|", "!")
+
+
+def _flatten_domain_groups(obj):
+    """Unwrap an operator group the model wrapped in its own list.
+
+    Odoo's domain is flat prefix notation, but the models keep writing
+    the OR as a nested group:
+
+        [("a", "=", 1), ["|", ("b", ">=", x), ("b", "=", False)]]
+
+    That inner list has three elements and a string first element, so
+    the ORM reads it as a LEAF, takes ``"|"`` for the field name and the
+    next element — a list — for the operator, and dies on
+    ``AttributeError: 'list' object has no attribute 'lower'``. The
+    whole call is lost, and the model has no way to see why: run 565
+    (Eva) spent 14 of its 46 tool calls on exactly this, alternating
+    search and read_group on the same two domains.
+
+    Splicing the group's contents into the parent restores the prefix
+    form the ORM expects and keeps the operator's arity intact.
+    """
+    if not isinstance(obj, list):
+        return obj
+    out = []
+    for token in obj:
+        token = _flatten_domain_groups(token)
+        if (
+            isinstance(token, list)
+            and len(token) >= 2
+            and isinstance(token[0], str)
+            and token[0] in _DOMAIN_LOGIC_OPS
+            and all(
+                isinstance(x, (list, tuple))
+                or (isinstance(x, str) and x in _DOMAIN_LOGIC_OPS)
+                for x in token[1:]
+            )
+        ):
+            out.extend(token)
+            continue
+        out.append(token)
+    return out
+
+
 def _coerce_domain_obj(obj):
     """Recursively normalise a parsed domain: tuples → lists, and
     relative-date string leaves → concrete timestamps. Returns a
     JSON-safe structure."""
     if isinstance(obj, (list, tuple)):
-        return [_coerce_domain_obj(x) for x in obj]
+        return _flatten_domain_groups(
+            [_coerce_domain_obj(x) for x in obj]
+        )
     if isinstance(obj, str):
         rel = _eval_relative_date(obj)
         return rel if rel is not None else obj
@@ -1536,27 +1801,69 @@ def run_tool_call(agent, tool_call):
             f"{type(kwargs).__name__}."
         )}
 
-    # ----- Drop arguments the tool doesn't declare --------------------
-    # Since v19.0.6.3.0 the model finally sees a custom tool's real
-    # schema, and promptly started enriching calls with extra keys of
-    # its own invention (observed: action_1227 called with 'topic' plus
-    # 'invalshoek' and 'doelgroep'). Odoo's action dispatch answers
-    # those with ValidationError "Missing definition for invalshoek",
-    # which costs a full iteration and usually a retry. The declared
-    # arguments are all the action can use, so silently drop the rest
-    # and run the call.
+    # ----- Required-arg pre-validation for action tools ----------------
+    # Stock's validator raises a polite English question ("Could you
+    # please provide info about 'topic_hint'"), which reaches the model
+    # as a generic execution error. Mistral reads that as "something
+    # broke", retries the same empty call, and burns the whole iteration
+    # budget — which is exactly what a chat looked like: three tools all
+    # called with args={}, over and over, and a very slow answer.
+    #
+    # Naming the parameter and showing the shape lets the model correct
+    # itself on the next attempt instead.
     if action is not None:
-        declared = _custom_tool_properties(action)
-        if declared:
-            extra = [k for k in kwargs if k not in declared]
-            if extra:
-                _logger.info(
-                    "daadit_ai_mistral.tool_dispatch: dropping "
-                    "undeclared argument(s) %s from %s", extra, fn_name,
+        kwargs, renames = _remap_arg_names(action, kwargs)
+        if renames:
+            _logger.info(
+                "daadit_ai_mistral.tool_dispatch: %s — remapped argument "
+                "names %s onto the schema", fn_name, renames,
+            )
+            if env is not None:
+                _record_in_ir_logging(
+                    env, "INFO", "daadit_ai_mistral.tool_dispatch",
+                    f"REMAPPED_ARGS fn={fn_name} renames={renames}",
                 )
-                kwargs = {
-                    k: v for k, v in kwargs.items() if k in declared
-                }
+        missing = _missing_required_args(action, kwargs)
+        if missing:
+            _record_in_ir_logging(
+                env, "INFO", "daadit_ai_mistral.tool_dispatch",
+                f"MISSING_ARGS fn={fn_name} missing={missing} "
+                f"received={sorted(kwargs)}",
+            ) if env is not None else None
+            names = ", ".join(f"'{name}'" for name in missing)
+            example = ", ".join(f'"{name}": "…"' for name in missing)
+            # The old text ended in "Do not call this tool with empty
+            # arguments", which was false whenever the call *did* carry
+            # arguments under other names — so the model corrected the
+            # wrong thing and burned another iteration. Say which keys
+            # arrived and which ones the tool accepts, and the model can
+            # fix it in one attempt.
+            received = (
+                "You sent: "
+                + ", ".join(f"'{k}'" for k in sorted(kwargs)) + ". "
+            ) if kwargs else "You sent no arguments at all. "
+            accepted = _schema_properties(action)
+            accepts = (
+                "This tool accepts: "
+                + ", ".join(f"'{p}'" for p in accepted) + ". "
+                if accepted else ""
+            )
+            hint = ""
+            if "domain" in missing:
+                # Every "give me the whole short table" call died here:
+                # model_name and fields were correct, only `domain` was
+                # absent, and the message suggested the call was empty.
+                hint = (
+                    "For 'domain', an Odoo search domain is expected; to "
+                    "match every record pass an empty list: "
+                    '{"domain": []}. '
+                )
+            return {"error": (
+                f"Tool {fn_name} is missing required argument(s): {names}. "
+                f"{received}{accepts}{hint}"
+                f"Call it again with the missing one(s) filled in, for "
+                f"example: {{{example}}}."
+            )}
 
     # ----- Required-arg pre-validation --------------------------------
     # Return a crisp instruction instead of letting the dispatch raise
@@ -1582,6 +1889,40 @@ def run_tool_call(agent, tool_call):
     # re-strategize ("the agent can only access X, Y, Z — try those
     # instead") rather than treating the failure as a generic crash.
     requested_model = kwargs.get("model_name")
+
+    # A model the agent invented is not an access problem, and saying so
+    # sends the operator hunting for a permission they cannot grant —
+    # the whitelist only offers models that exist. Mistral asked for
+    # 'mail.tag' (there is no such model in Odoo 19) and the guardrail
+    # answered "blocked by your administrator", which is misleading.
+    if requested_model and env is not None:
+        try:
+            exists = bool(
+                env["ir.model"].sudo().search_count(
+                    [("model", "=", requested_model)]
+                )
+            )
+        except Exception:  # noqa: BLE001
+            exists = True  # never block on a bug in our own check
+        if not exists:
+            _record_in_ir_logging(
+                env, "INFO", "daadit_ai_mistral.tool_dispatch",
+                f"NO_SUCH_MODEL fn={fn_name} model={requested_model} "
+                f"agent={getattr(agent, 'id', '?')}",
+            )
+            allowed_list = sorted(
+                agent.daadit_allowed_model_ids.mapped("model")
+            ) if getattr(agent, "daadit_allowed_model_ids", False) else []
+            hint = (
+                f" Models you may use: {', '.join(allowed_list)}."
+                if allowed_list else ""
+            )
+            return {"error": (
+                f"There is no model named '{requested_model}' in this "
+                f"Odoo. You invented that name — do not retry it, and do "
+                f"not ask the user for access to it.{hint}"
+            )}
+
     if requested_model and hasattr(agent, "_daadit_is_model_allowed"):
         try:
             allowed = agent._daadit_is_model_allowed(requested_model)
@@ -1623,6 +1964,20 @@ def run_tool_call(agent, tool_call):
                     f" Model '{requested_model}' is on this agent's "
                     f"block list."
                 )
+            # Remember what this turn was refused, so a delegation that
+            # follows can be checked against the receiver's whitelist
+            # before it costs a second iteration (taak 743): Eva was
+            # denied on account.move.line and immediately asked Bram,
+            # who may not read it either. Four runs, four models, same
+            # pattern; two of them died on the iteration limit.
+            try:
+                denied = getattr(router_state, "denied_models", None)
+                if not isinstance(denied, set):
+                    denied = set()
+                    router_state.denied_models = denied
+                denied.add(requested_model)
+            except Exception:  # noqa: BLE001
+                pass
             # NOTE: ``_daadit_access_denied`` is the sentinel that
             # ``llm_api_patch._request_llm_mistral`` watches for. When
             # set, the dispatch loop short-circuits and surfaces a
@@ -2021,7 +2376,7 @@ def run_tool_call(agent, tool_call):
     # tool result lands in the next request and trips Mistral's
     # "prompt too large" HTTP 400.
     # ------------------------------------------------------------------
-    safe = _enforce_result_size_cap(safe, fn_name)
+    safe = _enforce_result_size_cap(safe, fn_name, env=env)
     # Surface domain rewrites (non-searchable-field repair) to the
     # model so it knows the result set may be wider than it asked for.
     if _domain_notes and isinstance(safe, dict):
