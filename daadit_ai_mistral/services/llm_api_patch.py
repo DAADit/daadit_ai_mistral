@@ -950,6 +950,62 @@ def _notify_step(agent, text, depth=0, kind="think", done=False):
                done=done)
 
 
+_READ_TOOL_SLUGS = (
+    "ir_actions_server_search",
+    "ir_actions_server_read_group",
+    "ir_actions_server_search_knowledge",
+)
+
+
+def _looks_empty(result):
+    """True when a read tool came back without a single record."""
+    if result is None:
+        return True
+    if isinstance(result, list):
+        return not result
+    if isinstance(result, dict):
+        if result.get("error"):
+            return False  # a failure is not the same as "nothing found"
+        for sleutel in ("records", "results", "groups", "rows", "items"):
+            if sleutel in result:
+                return not result.get(sleutel)
+        if "count" in result:
+            try:
+                return int(result.get("count") or 0) == 0
+            except Exception:  # noqa: BLE001
+                return False
+    return False
+
+
+def _empty_search_hint(tc, colleagues):
+    """Replace an empty read result with an instruction to ask a colleague.
+
+    An empty result is ambiguous: it can mean "does not exist" or "not
+    visible from where I am looking". The concierge consistently read it
+    as the first and asked the user for an exact name — even when the
+    user had just said which colleague to ask. Naming the colleagues who
+    *can* see the model removes that ambiguity.
+    """
+    namen = [c.name for c in colleagues[:3] if c.name]
+    eerste = namen[0] if namen else ""
+    return {
+        "ok": True,
+        "records": [],
+        "leeg": True,
+        "colleagues_with_access": namen,
+        "instruction": (
+            "Geen resultaat gevonden. Dit betekent NIET automatisch dat het "
+            "niet bestaat: jouw blik op de gegevens is beperkter dan die van "
+            "een specialist. Vraag NIET om een exacte naam of een nummer "
+            "voordat je een collega hebt geraadpleegd. Roep eerst "
+            "ir_actions_server_ask_agent aan met agent_name='%s' en de "
+            "volledige oorspronkelijke vraag. Levert die collega ook niets "
+            "op, dan pas meld je dat het er niet is, en dan noem je erbij wie "
+            "je hebt geraadpleegd." % (eerste or "de betrokken specialist")
+        ),
+    }
+
+
 def _colleagues_allowed_for_model(agent, model_name):
     """Return active agents whose own scope permits ``model_name``.
 
@@ -2089,6 +2145,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # a routing instruction instead of ending the turn. Capped so a model
     # that keeps reaching for out-of-scope models can't loop.
     scope_redirects = 0
+    # v19.0.6.11.0: hooguit een keer per beurt een lege zoekopdracht
+    # omzetten in een routeer-aanwijzing.
+    empty_search_hints = 0
     # v19.0.6.5.4: concierge pass-through. When the TOP-LEVEL agent
     # routes a question via the router tool and the specialist returns a
     # real answer, that answer is relayed verbatim (with attribution)
@@ -2331,6 +2390,46 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 )
 
             result = tool_dispatch.run_tool_call(agent, tc)
+
+            # v19.0.6.11.0: een lege zoekopdracht is een routeersignaal,
+            # geen eindpunt. Robin zocht zelf, vond niets, en vroeg de
+            # gebruiker om een exact klantnummer — terwijl die er net bij
+            # had gezegd dat de sales order bij Sanne hoort en de
+            # projectvoortgang bij Pim. Ook dat stond al in zijn prompt.
+            # Hier krijgt hij het op het moment dat het telt.
+            _fn_naam = (tc.get("function") or {}).get("name") or ""
+            if (
+                _router_depth == 0
+                and empty_search_hints < 1
+                and _fn_naam in _READ_TOOL_SLUGS
+                and _looks_empty(result)
+            ):
+                _zoekmodel = ""
+                try:
+                    _a = json.loads(
+                        (tc.get("function") or {}).get("arguments") or "{}"
+                    )
+                    _zoekmodel = str((_a or {}).get("model_name") or "")
+                except Exception:  # noqa: BLE001
+                    _zoekmodel = ""
+                _hulp = _colleagues_allowed_for_model(agent, _zoekmodel)
+                _kan_routeren = False
+                try:
+                    _kan_routeren = any(
+                        (t.get("function") or {}).get("name")
+                        == tool_dispatch.ROUTER_TOOL_SLUG
+                        for t in (active_tools or [])
+                    )
+                except Exception:  # noqa: BLE001
+                    _kan_routeren = False
+                if _kan_routeren and _hulp:
+                    empty_search_hints += 1
+                    _logger.info(
+                        "daadit_ai_mistral.llm_api_patch: lege zoekopdracht "
+                        "op %s omgezet in een routeer-aanwijzing naar %s",
+                        _zoekmodel or "?", _hulp[0].name,
+                    )
+                    result = _empty_search_hint(tc, _hulp)
 
             # A routed answer is the slowest step of all, so close it
             # off explicitly rather than leaving the last line hanging.
