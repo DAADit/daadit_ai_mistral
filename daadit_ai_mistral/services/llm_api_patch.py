@@ -1860,6 +1860,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             kk=str(list(kwargs.keys())),
         ))
 
+    # De agent is hier al nodig: een tool die de operator zelf maakte
+    # krijgt zijn schema uit de serveractie van déze agent.
+    agent = _resolve_agent(api_self, request_kwargs=kwargs)
+
     # ---- Build proper tool definitions ------------------------------
     # If stock sent us a list of tool name strings, use the JSON-schema
     # definitions from ``tool_dispatch.TOOL_SCHEMAS`` for the standard
@@ -1869,7 +1873,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     normalized_tools = None
     if tools:
         if isinstance(tools, (list, tuple)) and all(isinstance(t, str) for t in tools):
-            normalized_tools = tool_dispatch.annotate_tools(tools)
+            normalized_tools = tool_dispatch.annotate_tools(tools, agent=agent)
         else:
             normalized_tools = _normalize_tools(tools)
         if not normalized_tools:
@@ -1887,7 +1891,6 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     #   ``role: tool`` messages → call again. Stop when the model
     #   returns a final text response OR we hit ``MAX_ITER``.
     _had_threadlocal = bool(getattr(tool_dispatch.current_agent, "record", None))
-    agent = _resolve_agent(api_self, request_kwargs=kwargs)
 
     # ---- Reconstruct tools from agent topics (v19.0.4.1.5) ----------
     # On the standalone AI chat-panel path the Enterprise controller
@@ -1918,7 +1921,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                         continue
                     names.append(slug)
             if names:
-                normalized_tools = tool_dispatch.annotate_tools(names)
+                normalized_tools = tool_dispatch.annotate_tools(
+                    names, agent=agent,
+                )
                 _logger.info(
                     "daadit_ai_mistral.llm_api_patch: caller passed no "
                     "tools — injected %d tool defs from agent %s topics "
