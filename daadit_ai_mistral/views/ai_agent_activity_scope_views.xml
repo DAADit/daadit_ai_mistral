@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!--
+        Hard per-agent activity write scope (v19.0.6.18.0).
+
+        Zelfde opbouw als de leesscope: geen ingebedde <list> in een
+        <field> (de validator van Odoo 19 weigert dat), dus losse
+        list-/form-views en een One2many die de externe lijst gebruikt.
+    -->
+
+    <record id="view_daadit_ai_agent_activity_scope_list" model="ir.ui.view">
+        <field name="name">daadit.ai.agent.activity.scope.list</field>
+        <field name="model">daadit.ai.agent.activity.scope</field>
+        <field name="arch" type="xml">
+            <list editable="bottom">
+                <field name="model_name"/>
+                <field name="record_domain"/>
+                <field name="active" widget="boolean_toggle"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_daadit_ai_agent_activity_scope_form" model="ir.ui.view">
+        <field name="name">daadit.ai.agent.activity.scope.form</field>
+        <field name="model">daadit.ai.agent.activity.scope</field>
+        <field name="arch" type="xml">
+            <form>
+                <sheet>
+                    <group>
+                        <field name="agent_id"/>
+                        <field name="model_name"
+                               placeholder="knowledge.article"/>
+                        <field name="record_domain"
+                               placeholder='[["id", "=", 332]]'/>
+                        <field name="active"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="ai_agent_view_form_inherit_daadit_activity_scope"
+            model="ir.ui.view">
+        <field name="name">ai.agent.view.form.inherit.daadit.activity.scope</field>
+        <field name="model">ai.agent</field>
+        <field name="inherit_id" ref="ai_app.ai_agent_view_form"/>
+        <field name="arch" type="xml">
+
+            <xpath expr="//form//sheet" position="inside">
+
+                <separator string="Activity write scope"/>
+
+                <div>
+                    <p class="text-muted">
+                        Waar deze collega een activiteit mag plannen,
+                        afgedwongen in de tool-laag en niet in de prompt.
+                        Geen regel = geen enkele bestemming. Een model dat
+                        geen activiteit kan dragen (zoals
+                        <code>website.page</code>) wordt geweigerd met de
+                        bestemmingen die wél werken erbij.
+                    </p>
+                    <field name="daadit_activity_scope_ids"
+                           nolabel="1"
+                           context="{'default_agent_id': id, 'active_test': False}"/>
+                </div>
+
+            </xpath>
+
+        </field>
+    </record>
+
+</odoo>
