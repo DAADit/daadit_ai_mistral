@@ -1054,6 +1054,41 @@ class AIAgent(models.Model):
                 record._name, record.id, self.name,
             )
 
+    def _daadit_post_channel_status(self, channel_id, body):
+        """Post a short live progress line to a discuss channel in a
+        separate, immediately-committed transaction. Best-effort:
+        never raises — a status hiccup must not break the answer."""
+        self.ensure_one()
+        if not channel_id or not body:
+            return
+        author_id = self.partner_id.id if self.partner_id else False
+        try:
+            with self.env.registry.cursor() as new_cr:
+                new_env = api.Environment(
+                    new_cr, self.env.uid, dict(self.env.context),
+                )
+                channel = new_env["discuss.channel"].browse(channel_id).exists()
+                if channel:
+                    channel.message_post(
+                        body=body,
+                        author_id=author_id or False,
+                        message_type="comment",
+                        subtype_xmlid="mail.mt_comment",
+                    )
+                # new_cr commits on clean __exit__ → bus NOTIFY delivers it live
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "daadit_ai_mistral: interim status post failed on "
+                "channel=%s by agent=%s — answer unaffected",
+                channel_id, self.name,
+            )
+
+    def _daadit_delegation_status_body(self, target_name):
+        """Dutch progress line shown while the concierge delegates a turn."""
+        if target_name:
+            return _("Even bij %s navragen…", target_name)
+        return _("Even dit intern navragen…")
+
     def _ai_tool_assign_user(self, model_name=None, record_id=None,
                              user_id=None, **_extra):
         """Assign a user to a record by setting its ``user_id`` field.

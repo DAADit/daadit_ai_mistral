@@ -7,6 +7,11 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.7.4.1 — 2026-08-03
+
+Live tussenstap-berichten in de chat terwijl de concierge delegeert
+(aparte gecommitte transactie, fail-open).
+
 ## 19.0.7.4.0 — 2026-08-02
 
 Agents kept handing decisions back to the user. Prod, 2026-07-27:
