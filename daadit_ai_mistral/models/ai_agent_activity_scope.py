@@ -113,6 +113,27 @@ SEED_ACTIVITY_SCOPES = {
         ("account.move", []), ("sale.order", []),
         ("project.project", []), ("project.task", []),
     ],
+    # De financiële bezetting onder Floris. Elk van de vier levert op één
+    # eigen artikel af; de bredere modellen staan erbij zodat een
+    # bevinding ook op het record zelf zichtbaar wordt. Geen van hen mag
+    # een boeking, factuur of prijs wijzigen — dat blijft buiten de
+    # activiteit-scope en buiten hun modellijst.
+    "Bo": [
+        ("knowledge.article", [["id", "=", 350]]),
+        ("account.move", []),
+    ],
+    "Dirk": [
+        ("knowledge.article", [["id", "=", 351]]),
+        ("account.move", [["move_type", "=", "out_invoice"]]),
+    ],
+    "Fenna": [
+        ("knowledge.article", [["id", "=", 352]]),
+        ("sale.order", []),
+    ],
+    "Coen": [
+        ("knowledge.article", [["id", "=", 353]]),
+        ("res.partner", []),
+    ],
 }
 
 

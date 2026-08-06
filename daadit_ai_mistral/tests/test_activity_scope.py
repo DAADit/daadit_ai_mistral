@@ -14,6 +14,9 @@ Twee gevallen komen rechtstreeks uit productie:
 * Een agent zonder scoperegels mag niets, ook niet als de prompt hem
   ergens naartoe stuurt.
 """
+from odoo.addons.daadit_ai_mistral.models.ai_agent_activity_scope import (
+    SEED_ACTIVITY_SCOPES,
+)
 from odoo.tests import common, tagged
 
 
@@ -96,6 +99,47 @@ class TestActivityScope(common.TransactionCase):
             "knowledge.article", self.postbus.id)
         self.assertFalse(blocked)
         self.assertIn("project.task", reason)
+
+    def test_every_finance_role_has_exactly_one_postbox(self):
+        """De vier rollen onder Floris leveren elk op één artikel af.
+
+        Een tweede artikel per rol zou betekenen dat niemand weet waar
+        het werk van die dag staat; dat is precies wat de postbus moet
+        voorkomen.
+        """
+        for name in ("Bo", "Dirk", "Fenna", "Coen"):
+            lines = SEED_ACTIVITY_SCOPES[name]
+            articles = [
+                domain for model, domain in lines
+                if model == "knowledge.article"
+            ]
+            self.assertEqual(
+                len(articles), 1,
+                "%s hoort precies één postbusartikel te hebben" % name,
+            )
+            self.assertTrue(
+                articles[0],
+                "%s mag niet op elk artikel schrijven" % name,
+            )
+
+    def test_no_finance_role_may_touch_a_booking_line_or_a_payment(self):
+        """Boeken en betalen blijft mensenwerk.
+
+        De agents leveren lijsten en concepten op; zodra een van hen een
+        boekingsregel of een betaling als bestemming krijgt, is de grens
+        tussen voorbereiden en uitvoeren weg.
+        """
+        forbidden = {
+            "account.move.line", "account.payment", "account.full.reconcile",
+            "account.partial.reconcile", "account.bank.statement.line",
+        }
+        for name in ("Bo", "Dirk", "Fenna", "Coen"):
+            models_for_role = {model for model, _ in SEED_ACTIVITY_SCOPES[name]}
+            self.assertFalse(
+                models_for_role & forbidden,
+                "%s heeft een bestemming die uitvoert in plaats van "
+                "voorbereidt: %s" % (name, models_for_role & forbidden),
+            )
 
     def test_seeding_is_idempotent_and_never_widens(self):
         """De seeding mag een handmatige aanscherping niet terugdraaien."""
