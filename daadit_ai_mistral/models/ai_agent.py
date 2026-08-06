@@ -1089,7 +1089,12 @@ class AIAgent(models.Model):
         previous_user = record.user_id
         if previous_user.id == user.id:
             return {
-                "ok": True,
+                # 5-8-2026 (taak 779): een overgeslagen schrijfactie gaf
+                # ok=True terug. Voor het model niet te onderscheiden van
+                # succes — 75 keer in 7 dagen gerapporteerd als gedaan werk.
+                # De boodschap eronder was steeds correct; de envelop niet.
+                "ok": False,
+                "written": False,
                 "skipped": True,
                 "reason": "already_assigned",
                 "model_name": model_name,
@@ -1568,7 +1573,12 @@ class AIAgent(models.Model):
                         break
         if existing:
             return {
-                "ok": True,
+                # 5-8-2026 (taak 779): een overgeslagen schrijfactie gaf
+                # ok=True terug. Voor het model niet te onderscheiden van
+                # succes — 75 keer in 7 dagen gerapporteerd als gedaan werk.
+                # De boodschap eronder was steeds correct; de envelop niet.
+                "ok": False,
+                "written": False,
                 "skipped": True,
                 "reason": "duplicate",
                 "message": (
@@ -1580,7 +1590,8 @@ class AIAgent(models.Model):
                 ),
                 "model_name": model_name,
                 "record_id": record.id,
-                "activity_id": existing.id,
+                # Bewust GEEN activity_id: dat is het id van een
+                # activiteit die deze agent niet heeft aangemaakt.
                 "existing_activity_id": existing.id,
                 "existing_summary": existing.summary or "",
                 "activity_type_id": act_type.id,
@@ -1611,7 +1622,12 @@ class AIAgent(models.Model):
                 model_name, record.id,
             )
             return {
-                "ok": True,
+                # 5-8-2026 (taak 779): een overgeslagen schrijfactie gaf
+                # ok=True terug. Voor het model niet te onderscheiden van
+                # succes — 75 keer in 7 dagen gerapporteerd als gedaan werk.
+                # De boodschap eronder was steeds correct; de envelop niet.
+                "ok": False,
+                "written": False,
                 "skipped": True,
                 "reason": "open_activity_cap",
                 "message": (
