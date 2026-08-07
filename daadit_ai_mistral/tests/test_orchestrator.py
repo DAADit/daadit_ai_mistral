@@ -115,3 +115,43 @@ class TestOrchestratorMode(common.TransactionCase):
         finally:
             td.router_state.calls = 0
             td.router_state.depth = 0
+
+    def test_channel_from_action_reads_res_id(self):
+        Channel = self.env["discuss.channel"]
+        # Some DBs lack ai_chat; create a plain channel and point the
+        # action at it — the helper only needs an id it can browse.
+        channel = Channel.create({"name": "handoff-test"})
+        found = self.robin._daadit_channel_from_action({
+            "type": "ir.actions.act_window",
+            "res_model": "discuss.channel",
+            "res_id": channel.id,
+        })
+        self.assertEqual(found, channel)
+
+    def test_channel_from_action_reads_context_active_id(self):
+        channel = self.env["discuss.channel"].create({"name": "handoff-ctx"})
+        found = self.robin._daadit_channel_from_action({
+            "type": "ir.actions.client",
+            "tag": "mail.action_discuss",
+            "context": {"active_id": channel.id},
+        })
+        self.assertEqual(found, channel)
+
+    def test_channel_from_action_reads_discuss_channel_token(self):
+        channel = self.env["discuss.channel"].create({"name": "handoff-tok"})
+        found = self.robin._daadit_channel_from_action({
+            "type": "ir.actions.client",
+            "context": {
+                "default_active_id": "discuss.channel_%s" % channel.id,
+            },
+        })
+        self.assertEqual(found, channel)
+
+    def test_open_chat_refuses_inside_sub_run(self):
+        td.router_state.depth = 1
+        try:
+            res = self.robin._ai_tool_open_agent_chat(agent_name="Test-Bram")
+            self.assertIn("error", res)
+            self.assertIn("orchestrator", res["error"].lower())
+        finally:
+            td.router_state.depth = 0

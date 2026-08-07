@@ -2219,7 +2219,9 @@ class AIAgent(models.Model):
             )
             action = None
 
-        channel = self._daadit_find_or_create_agent_chat(target)
+        channel = self._daadit_channel_from_action(action)
+        if not channel:
+            channel = self._daadit_find_or_create_agent_chat(target)
         if not channel:
             return {"error": (
                 "Could not open a chat with '%s'. %s"
@@ -2231,8 +2233,11 @@ class AIAgent(models.Model):
         if seed:
             try:
                 from markupsafe import escape as _esc
+                # Preserve line breaks so a multi-line brief stays
+                # readable in Discuss.
+                html = "<p>%s</p>" % _esc(seed).replace("\n", "<br/>")
                 channel.message_post(
-                    body=Markup("<p>%s</p>") % _esc(seed),
+                    body=Markup(html),
                     message_type="comment",
                     author_id=self.env.user.partner_id.id,
                     subtype_xmlid="mail.mt_comment",
@@ -2263,17 +2268,11 @@ class AIAgent(models.Model):
             if safe_action.get("type"):
                 payload["action"] = safe_action
 
-        try:
-            partner = self.env.user.partner_id
-            if partner:
-                self.env["bus.bus"]._sendone(
-                    partner, "daadit_open_agent_chat", payload,
-                )
-        except Exception:  # noqa: BLE001
-            _logger.exception(
-                "daadit_ai_mistral.handoff: bus notify failed for "
-                "channel %s", channel.id,
-            )
+        # Own cursor + immediate commit, same reason as denkstappen: a
+        # whole chat turn is one transaction, and bus messages only
+        # leave on commit. Without this the UI would open the specialist
+        # chat only after Robin's confirmation is already posted.
+        self._daadit_notify_open_agent_chat(payload)
 
         _logger.info(
             "daadit_ai_mistral.handoff: %s(%s) opened chat with %s(%s) "
@@ -2294,6 +2293,60 @@ class AIAgent(models.Model):
                 "not call more tools for this request." % target.name
             ),
         }
+
+    def _daadit_channel_from_action(self, action):
+        """Pull a ``discuss.channel`` id out of a stock client action."""
+        Channel = self.env["discuss.channel"]
+        if not isinstance(action, dict):
+            return Channel.browse()
+        if (
+            action.get("res_model") == "discuss.channel"
+            and action.get("res_id")
+        ):
+            return Channel.browse(action["res_id"]).exists()
+        for bag_name in ("context", "params"):
+            bag = action.get(bag_name) or {}
+            if not isinstance(bag, dict):
+                continue
+            for key in ("active_id", "default_active_id", "channel_id"):
+                val = bag.get(key)
+                if isinstance(val, int):
+                    found = Channel.browse(val).exists()
+                    if found:
+                        return found
+                if isinstance(val, str) and "discuss.channel_" in val:
+                    try:
+                        cid = int(val.rsplit("_", 1)[-1])
+                    except ValueError:
+                        continue
+                    found = Channel.browse(cid).exists()
+                    if found:
+                        return found
+        return Channel.browse()
+
+    def _daadit_notify_open_agent_chat(self, payload):
+        """Push the handoff bus event on a short-lived cursor (best-effort)."""
+        partner = self.env.user.partner_id
+        if not partner:
+            return
+        try:
+            import odoo
+            from odoo import api, SUPERUSER_ID
+            partner_id = partner.id
+            dbname = self.env.cr.dbname
+            with odoo.registry(dbname).cursor() as cr2:
+                env2 = api.Environment(cr2, SUPERUSER_ID, {})
+                env2["bus.bus"]._sendone(
+                    env2["res.partner"].browse(partner_id),
+                    "daadit_open_agent_chat",
+                    payload,
+                )
+                cr2.commit()
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.handoff: bus notify failed for "
+                "channel %s", payload.get("channel_id"),
+            )
 
     def _daadit_find_or_create_agent_chat(self, target):
         """Return the user's newest ``ai_chat`` with ``target``, creating
