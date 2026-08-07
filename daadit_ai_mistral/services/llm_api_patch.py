@@ -1275,19 +1275,21 @@ def _resolve_agent(api_self, request_kwargs=None):
             # ``ch`` may be a recordset or an id; normalize.
             if isinstance(ch, int):
                 ch = api_self.env["discuss.channel"].sudo().browse(ch)
-            if hasattr(ch, "sudo") and hasattr(ch, "ai_agent_id"):
-                agent_id = ch.sudo().ai_agent_id.id
-                if agent_id:
-                    # Re-browse on the non-sudo env so subsequent
-                    # _ai_tool_* calls run as the actual user.
-                    ag = api_self.env["ai.agent"].browse(agent_id)
-                    _logger.info(
-                        "daadit_ai_mistral.llm_api_patch: agent resolved "
-                        "via env.context['discuss_channel'].ai_agent_id "
-                        "(threadlocal was empty) → ai.agent(%s) as user %s",
-                        agent_id, api_self.env.uid,
-                    )
-                    return ag
+            if hasattr(ch, "sudo"):
+                ch_sudo = ch.sudo()
+                if "ai_agent_id" in getattr(ch_sudo, "_fields", {}):
+                    agent_id = ch_sudo.ai_agent_id.id
+                    if agent_id:
+                        # Re-browse on the non-sudo env so subsequent
+                        # _ai_tool_* calls run as the actual user.
+                        ag = api_self.env["ai.agent"].browse(agent_id)
+                        _logger.info(
+                            "daadit_ai_mistral.llm_api_patch: agent resolved "
+                            "via env.context['discuss_channel'].ai_agent_id "
+                            "(threadlocal was empty) → ai.agent(%s) as user %s",
+                            agent_id, api_self.env.uid,
+                        )
+                        return ag
     except Exception:  # noqa: BLE001
         _logger.exception(
             "daadit_ai_mistral.llm_api_patch: agent fallback lookup raised"
