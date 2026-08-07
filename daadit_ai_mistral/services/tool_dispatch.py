@@ -28,6 +28,7 @@ This module:
   ten stock AI tools, replacing the empty ``{}`` schema used in
   v3.6.6–v3.6.8. With these, Mistral knows what args each tool takes.
 """
+from odoo.fields import Domain as _Domain
 import ast
 import json
 import logging
@@ -499,7 +500,10 @@ TOOL_SCHEMAS = {
             "properties": {
                 "model_name": {
                     "type": "string",
-                    "description": "Technical model name, e.g. 'res.partner', 'account.move', 'sale.order'.",
+                    "description": (
+                        "Technical model name, e.g. 'res.partner', "
+                        "'account.move', 'sale.order'."
+                    ),
                 },
                 "domain": _domain_schema(),
                 "fields": _string_array(
@@ -530,10 +534,10 @@ TOOL_SCHEMAS = {
             "type": "object",
             "properties": {
                 "model_name": {"type": "string",
-                    "description": "Technical model name. Common ones: "
-                    "'account.move' (invoices/bills), 'sale.order', "
-                    "'purchase.order', 'product.template', 'res.partner', "
-                    "'stock.picking', 'crm.lead', 'project.task'."},
+                               "description": "Technical model name. Common ones: "
+                               "'account.move' (invoices/bills), 'sale.order', "
+                               "'purchase.order', 'product.template', 'res.partner', "
+                               "'stock.picking', 'crm.lead', 'project.task'."},
                 "domain": _domain_schema(),
                 "groupby": _string_array(
                     "JSON array of field names to group by. "
@@ -556,8 +560,8 @@ TOOL_SCHEMAS = {
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 80},
                 "order": {"type": "string",
-                    "description": "Sort spec on aggregates, e.g. "
-                    "'amount_total desc' to find biggest values first."},
+                          "description": "Sort spec on aggregates, e.g. "
+                          "'amount_total desc' to find biggest values first."},
             },
             "required": ["model_name", "groupby", "aggregates"],
         },
@@ -578,7 +582,10 @@ TOOL_SCHEMAS = {
         },
     },
     "ir_actions_server_get_menu_details": {
-        "description": "Return menu metadata (model, default views, etc.) for one or more menu IDs.",
+        "description": (
+            "Return menu metadata (model, default views, etc.) "
+            "for one or more menu IDs."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -599,7 +606,9 @@ TOOL_SCHEMAS = {
                 "menu_id": {"type": "integer"},
                 "model_name": {"type": "string"},
                 "selected_filters": _string_array("Names of search filters to apply.", default=[]),
-                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
+                "selected_groupbys": _string_array(
+                    "Names of group-by fields to apply.", default=[],
+                ),
                 "search": {"type": "string", "description": "Free-text search.", "default": ""},
                 "custom_domain": _domain_schema(),
             },
@@ -614,7 +623,9 @@ TOOL_SCHEMAS = {
                 "menu_id": {"type": "integer"},
                 "model_name": {"type": "string"},
                 "selected_filters": _string_array("Names of search filters to apply.", default=[]),
-                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
+                "selected_groupbys": _string_array(
+                    "Names of group-by fields to apply.", default=[],
+                ),
                 "search": {"type": "string", "description": "Free-text search.", "default": ""},
                 "custom_domain": _domain_schema(),
             },
@@ -629,8 +640,13 @@ TOOL_SCHEMAS = {
                 "menu_id": {"type": "integer"},
                 "model_name": {"type": "string"},
                 "selected_filters": _string_array("Names of search filters to apply.", default=[]),
-                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
-                "measure": {"type": "string", "description": "Measure to plot, e.g. 'amount_total:sum'."},
+                "selected_groupbys": _string_array(
+                    "Names of group-by fields to apply.", default=[],
+                ),
+                "measure": {
+                    "type": "string",
+                    "description": "Measure to plot, e.g. 'amount_total:sum'.",
+                },
                 "mode": {"type": "string", "enum": ["bar", "line", "pie"], "default": "bar"},
                 "order": {"type": "string", "default": ""},
                 "search": {"type": "string", "default": ""},
@@ -642,7 +658,10 @@ TOOL_SCHEMAS = {
         },
     },
     "ir_actions_server_open_menu_pivot": {
-        "description": "Open a menu's pivot view (cross-tab) with row/column groupings and measures.",
+        "description": (
+            "Open a menu's pivot view (cross-tab) with "
+            "row/column groupings and measures."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -651,7 +670,10 @@ TOOL_SCHEMAS = {
                 "selected_filters": _string_array("Filters to apply.", default=[]),
                 "row_groupbys": _string_array("Row group-by fields.", default=[]),
                 "col_groupbys": _string_array("Column group-by fields.", default=[]),
-                "measures": _string_array("Measures to compute, e.g. ['amount_total:sum'].", default=[]),
+                "measures": _string_array(
+                    "Measures to compute, e.g. ['amount_total:sum'].",
+                    default=[],
+                ),
                 "search": {"type": "string", "default": ""},
                 "custom_domain": _domain_schema(),
             },
@@ -678,13 +700,23 @@ TOOL_SCHEMAS = {
                 "stacked": {"type": "boolean", "default": False},
                 "cumulated": {"type": "boolean", "default": False},
                 "custom_domain": _domain_schema(),
-                "switch_view_type": {"type": "string", "description": "Switch to 'list', 'kanban', 'graph', 'pivot', etc.", "default": ""},
+                "switch_view_type": {
+                    "type": "string",
+                    "description": (
+                        "Switch to 'list', 'kanban', 'graph', "
+                        "'pivot', etc."
+                    ),
+                    "default": "",
+                },
             },
             "required": ["model_name"],
         },
     },
     "ir_actions_server_compute_report_measures": {
-        "description": "Get the list of available measures for a report action (used before plotting).",
+        "description": (
+            "Get the list of available measures for a report "
+            "action (used before plotting)."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -1285,11 +1317,11 @@ def _eval_relative_date(expr):
         return None
     norm = (
         s.replace("fields.Datetime.now()", "datetime.now()")
-         .replace("fields.Datetime.today()", "datetime.now()")
-         .replace("fields.Date.today()", "date.today()")
-         .replace("fields.Date.context_today()", "date.today()")
-         .replace("datetime.datetime.now()", "datetime.now()")
-         .replace("datetime.date.today()", "date.today()")
+        .replace("fields.Datetime.today()", "datetime.now()")
+        .replace("fields.Date.today()", "date.today()")
+        .replace("fields.Date.context_today()", "date.today()")
+        .replace("datetime.datetime.now()", "datetime.now()")
+        .replace("datetime.date.today()", "date.today()")
     )
     low = norm.lower()
     if low in ("now", "now()"):
@@ -1454,7 +1486,6 @@ def _normalize_json_string_param(v):
 # must stay warning-free). odoo.fields.Domain is the 19-native
 # equivalent; ``list(Domain)`` yields the classic domain list, which
 # json.dumps serialises fine.
-from odoo.fields import Domain as _Domain
 
 _TRUE_LEAF = (1, "=", 1)
 
@@ -1465,6 +1496,7 @@ def _domain_and(domains):
 
 def _domain_or(domains):
     return list(_Domain.OR(domains))
+
 
 _DOMAIN_TOOLS = ("ir_actions_server_search", "ir_actions_server_read_group")
 
