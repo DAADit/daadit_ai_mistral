@@ -2002,6 +2002,14 @@ class AIAgent(models.Model):
                 "what you can establish yourself — never invent figures, "
                 "names or amounts to fill the gap." % (target.name, names)
             )}
+        try:
+            llm_api_patch._notify_step(
+                self,
+                "Oké, ik vraag het even aan %s." % target.name,
+                kind="route",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         # Build the sub-run tool list from the TARGET's topics. Strip
         # orchestrator tools (no chains / no handoffs) AND all

@@ -1705,6 +1705,61 @@ _EMPTY_AFTER_STRIP = (
     "Er ging iets mis bij het opstellen van dit antwoord. "
     "Stel je vraag opnieuw."
 )
+_COMPACT_CHAT_INSTRUCTION = (
+    "Chatstijl: antwoord kort en direct. Geef eerst het antwoord, daarna "
+    "hoogstens 3 bullets met alleen noodzakelijke details. Geen uitgebreide "
+    "werkwijze, geen herhaling van de vraag, geen afsluitende samenvatting "
+    "tenzij de gebruiker daarom vraagt."
+)
+_COMPACT_ROUTED_INSTRUCTION = (
+    "Je antwoord gaat via een collega-agent terug naar de gebruiker. Geef "
+    "alleen het korte bruikbare antwoord: maximaal 5 korte bullets, geen "
+    "procesbeschrijving en geen interne tool- of delegatiedetails."
+)
+_MAX_CHAT_ANSWER_CHARS = 1800
+
+
+def _add_compact_chat_instruction(conversation, routed=False):
+    """Nudge interactive chat toward concise replies.
+
+    The frontend now shows progress steps while tools run; the final
+    assistant message should therefore be the outcome, not a logbook.
+    """
+    if not isinstance(conversation, list):
+        return conversation
+    instruction = (
+        _COMPACT_ROUTED_INSTRUCTION if routed else _COMPACT_CHAT_INSTRUCTION
+    )
+    if any(
+        isinstance(m, dict)
+        and m.get("role") == "system"
+        and instruction in (m.get("content") or "")
+        for m in conversation
+    ):
+        return conversation
+    conversation.insert(0, {"role": "system", "content": instruction})
+    return conversation
+
+
+def _compact_answer_text(text):
+    """Keep runaway but otherwise valid answers chat-sized."""
+    if not isinstance(text, str):
+        return text, False
+    stripped = text.rstrip()
+    if len(stripped) <= _MAX_CHAT_ANSWER_CHARS:
+        return stripped, False
+    cut = stripped.rfind("\n", 0, _MAX_CHAT_ANSWER_CHARS)
+    if cut < int(_MAX_CHAT_ANSWER_CHARS * 0.6):
+        cut = stripped.rfind(". ", 0, _MAX_CHAT_ANSWER_CHARS)
+        if cut >= 0:
+            cut += 1
+    if cut < int(_MAX_CHAT_ANSWER_CHARS * 0.6):
+        cut = _MAX_CHAT_ANSWER_CHARS
+    return (
+        stripped[:cut].rstrip()
+        + "\n\n(Verder ingekort voor de chat; vraag om details als je die wilt.)",
+        True,
+    )
 
 
 def _strip_runaway_and_leaks(text):
@@ -1765,10 +1820,16 @@ def _clean_adapted(adapted, where):
         if isinstance(item, str):
             cleaned, trimmed = _strip_runaway_and_leaks(item)
             cleaned = cleaned or (_EMPTY_AFTER_STRIP if trimmed else cleaned)
+            if cleaned:
+                cleaned, compacted = _compact_answer_text(cleaned)
+                trimmed = trimmed or compacted
         elif isinstance(item, dict) and isinstance(item.get("content"), str):
             cleaned_text, trimmed = _strip_runaway_and_leaks(item["content"])
             if trimmed and not cleaned_text:
                 cleaned_text = _EMPTY_AFTER_STRIP
+            if cleaned_text:
+                cleaned_text, compacted = _compact_answer_text(cleaned_text)
+                trimmed = trimmed or compacted
             cleaned = dict(item, content=cleaned_text)
         else:
             out.append(item)
@@ -2110,6 +2171,11 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     conversation = _inject_language_mirror(conversation)
     conversation = _inject_runtime_context(conversation)
     conversation = _inject_orchestrator_prompt(agent, conversation)
+    if not response_format_extra:
+        conversation = _add_compact_chat_instruction(
+            conversation,
+            routed=bool(getattr(tool_dispatch.router_state, "depth", 0)),
+        )
 
     # ---- Request-structure telemetry (v19.0.4.1.5) -------------------
     # One INFO row per chat turn with SHAPE only (roles, counts,
