@@ -78,6 +78,18 @@ WRITE_SIDE_TOOL_SLUGS = frozenset({
 # (depth guard is defence-in-depth; this is the primary strip).
 ROUTER_TOOL_SLUG = "ir_actions_server_ask_agent"
 
+# Open a fresh chat with a specialist so the *user* can continue there.
+# Orchestrator-only (same strip rules as the router tool in sub-runs).
+OPEN_CHAT_TOOL_SLUG = "ir_actions_server_open_agent_chat"
+
+# Tools an orchestrator (Robin) may keep when ``daadit_is_orchestrator``
+# is set. Everything else is stripped in the top-level loop so the
+# concierge cannot "helpfully" search or write itself.
+ORCHESTRATOR_TOOL_SLUGS = frozenset({
+    ROUTER_TOOL_SLUG,
+    OPEN_CHAT_TOOL_SLUG,
+})
+
 
 # ---------------------------------------------------------------------------
 # Tool name → ai.agent method mapping
@@ -686,18 +698,20 @@ TOOL_SCHEMAS = {
     "ir_actions_server_ask_agent": {
         "description": (
             "ROUTER TOOL — delegate a question to a specialist AI agent "
-            "by name and return its answer. Use this FIRST for any "
-            "domain question that matches a specialist (e.g. 'Sales "
-            "Agent' for pipeline/leads/quotes, 'Project Agent' for "
-            "projects/tasks/hours, 'Product Agent' for products/owners, "
-            "'Marketing Agent' for lead sources/campaigns, 'Helpdesk "
-            "SLA Agent' for tickets/SLA). Formulate the question "
-            "self-contained (the specialist does not see this "
-            "conversation). If the result contains 'error', answer the "
-            "question yourself with your other tools instead and briefly "
-            "mention that the specialist could not be reached; do not "
-            "show the raw error text, and do not retry the same failing "
-            "route this turn. Route at most a few times per turn."
+            "by name and return its answer in THIS chat. Use this for "
+            "quick domain questions that match a specialist (e.g. "
+            "'Bram' / sales for pipeline/leads/quotes, 'Pim' / project "
+            "for projects/tasks/hours, 'Nova' / product, marketing "
+            "agents for campaigns, helpdesk agents for tickets/SLA). "
+            "Formulate the question self-contained (the specialist "
+            "does not see this conversation). If the result contains "
+            "'error', try another specialist OR open a chat with that "
+            "specialist via ir_actions_server_open_agent_chat so the "
+            "user can continue there; do not show the raw error text, "
+            "and do not retry the same failing route this turn. Route "
+            "at most a few times per turn. Prefer ask_agent for one-"
+            "shot answers; prefer open_agent_chat when the user wants "
+            "to keep talking with that specialist."
         ),
         "parameters": {
             "type": "object",
@@ -706,9 +720,8 @@ TOOL_SCHEMAS = {
                     "type": "string",
                     "description": (
                         "Exact display name of the target agent, e.g. "
-                        "'Sales Agent', 'Project Agent', 'Product "
-                        "Agent', 'Marketing Agent', 'Helpdesk SLA "
-                        "Agent'."
+                        "'Bram', 'Pim', 'Sem', 'Nova', 'Sales Agent', "
+                        "'Project Agent'."
                     ),
                 },
                 "question": {
@@ -723,6 +736,43 @@ TOOL_SCHEMAS = {
                 },
             },
             "required": ["agent_name", "question"],
+        },
+    },
+    # --- DAADit handoff tool (v19.0.6.22.0) ----------------------------
+    "ir_actions_server_open_agent_chat": {
+        "description": (
+            "HANDOFF TOOL — open a NEW chat between the user and a "
+            "specialist AI agent so the user can continue the "
+            "conversation there. Use this when (a) the user asks to "
+            "talk to / switch to a named colleague, (b) the topic needs "
+            "a longer back-and-forth with that specialist, or (c) "
+            "ask_agent failed and the user should take over with the "
+            "specialist. Optional opening_message is posted as the "
+            "user's first message in that new chat (self-contained "
+            "context). After success, briefly tell the user the chat "
+            "is open — do not restate the whole conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent_name": {
+                    "type": "string",
+                    "description": (
+                        "Exact display name of the specialist to open "
+                        "a chat with, e.g. 'Bram', 'Sem', 'Pim'."
+                    ),
+                },
+                "opening_message": {
+                    "type": "string",
+                    "description": (
+                        "Optional first message to post in the new "
+                        "chat (user's language). Include the context "
+                        "the specialist needs to continue. Omit when "
+                        "the user only asked to be connected."
+                    ),
+                },
+            },
+            "required": ["agent_name"],
         },
     },
     # --- DAADit write-side tools (v19.0.4.0.0) --------------------------

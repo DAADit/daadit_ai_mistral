@@ -136,6 +136,27 @@ class AIAgent(models.Model):
     )
 
     # ------------------------------------------------------------------ #
+    # Orchestrator mode (Robin)                                          #
+    #                                                                    #
+    # When set, the chat loop keeps ONLY Ask Agent + Open Agent Chat.    #
+    # The agent may discuss everything with the user, but never executes #
+    # domain tools itself — it asks specialists or opens a chat so the   #
+    # user can continue with them.                                       #
+    # ------------------------------------------------------------------ #
+    daadit_is_orchestrator = fields.Boolean(
+        string="Orchestrator (no own tools)",
+        default=False,
+        help=(
+            "Tick for the concierge (Robin). The agent keeps only "
+            "'AI: Ask Agent' and 'AI: Open Agent Chat': it asks "
+            "specialists and returns their answers, or opens a new "
+            "chat with a specialist so the user can continue there. "
+            "All other tools (search, write, …) are stripped even if "
+            "they are still linked via topics."
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
     # Per-agent model access control                                     #
     #                                                                    #
     # Tools that take a ``model_name`` parameter (Search, Read group,    #
@@ -1759,6 +1780,101 @@ class AIAgent(models.Model):
         "message": "question", "text": "question", "vraag": "question",
     }
 
+    @api.model
+    def _daadit_seed_orchestrator(self):
+        """Mark Robin / Ask AI as orchestrator and attach the handoff tool.
+
+        Idempotent. Safe to call from migrations and post_init.
+        """
+        for name in ("Robin", "Ask AI"):
+            agents = self.sudo().search([
+                ("name", "=ilike", name),
+                ("daadit_is_orchestrator", "=", False),
+            ])
+            if agents:
+                agents.write({"daadit_is_orchestrator": True})
+        ask = self.env.ref(
+            "daadit_ai_mistral.ir_actions_server_ask_agent",
+            raise_if_not_found=False,
+        )
+        open_chat = self.env.ref(
+            "daadit_ai_mistral.ir_actions_server_open_agent_chat",
+            raise_if_not_found=False,
+        )
+        if not ask or not open_chat or "ai.topic" not in self.env:
+            return
+        for topic in self.env["ai.topic"].sudo().search(
+            [("tool_ids", "in", ask.ids)]
+        ):
+            if open_chat.id not in topic.tool_ids.ids:
+                topic.write({"tool_ids": [(4, open_chat.id)]})
+
+    def _daadit_orchestrator_mode(self):
+        """True when this agent must only ask / hand off, never execute."""
+        self.ensure_one()
+        return bool(getattr(self, "daadit_is_orchestrator", False))
+
+    def _daadit_routing_fallback_hint(self):
+        """Recovery instruction after a failed route / handoff.
+
+        Orchestrators must not fall back to domain tools — they ask
+        another specialist or open a chat. Hybrid concierges keep the
+        historical "use your own tools" degradation path.
+        """
+        self.ensure_one()
+        if self._daadit_orchestrator_mode():
+            return (
+                "Ask another specialist via ir_actions_server_ask_agent, "
+                "or open a chat with the specialist via "
+                "ir_actions_server_open_agent_chat so the user can "
+                "continue there. Do NOT search, write or execute domain "
+                "tools yourself."
+            )
+        return "Answer with your own tools instead."
+
+    def _daadit_resolve_named_agent(self, agent_name):
+        """Resolve ``agent_name`` to an ``ai.agent`` or return an error dict.
+
+        Shared by Ask Agent and Open Agent Chat so both tools accept the
+        same aliases and the same unambiguous-name rules.
+        """
+        self.ensure_one()
+        if not agent_name or not isinstance(agent_name, str):
+            return None, {"error": (
+                "Missing 'agent_name'. Re-call with parameters "
+                "agent_name (exact specialist name) and the other "
+                "required fields."
+            )}
+        Agent = self.env["ai.agent"]
+        needle = agent_name.strip()
+        safe = needle.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        target = Agent.search([("name", "=ilike", safe)], limit=1)
+        if not target:
+            matches = Agent.search([("name", "ilike", safe)], limit=2)
+            if len(matches) > 1:
+                return None, {"error": (
+                    "Agent name '%s' is ambiguous (%s). Re-call with the "
+                    "exact agent name." % (
+                        needle, ", ".join(sorted(matches.mapped("name")))
+                    )
+                )}
+            target = matches[:1]
+        if not target:
+            available = Agent.search([]).mapped("name")
+            return None, {"error": (
+                "No agent named '%s'. Available agents: %s. Re-call with "
+                "one of these exact names. %s" % (
+                    needle, ", ".join(sorted(available)),
+                    self._daadit_routing_fallback_hint(),
+                )
+            )}
+        if target.id == self.id:
+            return None, {"error": (
+                "Refusing to route to myself. %s"
+                % self._daadit_routing_fallback_hint()
+            )}
+        return target, None
+
     def _ai_tool_ask_agent(self, agent_name=None, question=None, **_extra):
         """Delegate ``question`` to the agent named ``agent_name`` and
         return its final answer.
@@ -1767,8 +1883,9 @@ class AIAgent(models.Model):
         success, or ``{'error': '<reason>'}``. Error messages tell the
         concierge how to recover: a *recoverable* input error (missing
         param under an alias) instructs a re-call with the right names;
-        any other error instructs a fallback to the concierge's own
-        tools, so a hybrid concierge degrades gracefully.
+        other errors instruct an orchestrator-safe recovery (ask
+        another specialist / open a chat) or, for hybrid concierges,
+        a fallback to their own tools.
         """
         self.ensure_one()
         from ..services.llm_api_patch import _slug_tool_name
@@ -1805,47 +1922,21 @@ class AIAgent(models.Model):
         if depth >= 1:
             return {"error": (
                 "Routing depth limit reached: a routed agent cannot "
-                "route further. Answer with your own tools instead."
+                "route further. %s" % self._daadit_routing_fallback_hint()
             )}
 
         # --- Per-turn width budget ------------------------------------
         calls = getattr(tool_dispatch.router_state, "calls", 0)
         if calls >= self._DAADIT_ROUTER_MAX_CALLS_PER_TURN:
             return {"error": (
-                "Routing budget for this turn is used up. Answer with "
-                "your own tools instead."
+                "Routing budget for this turn is used up. %s"
+                % self._daadit_routing_fallback_hint()
             )}
         tool_dispatch.router_state.calls = calls + 1
 
-        Agent = self.env["ai.agent"]
-        # Escape LIKE wildcards so a name containing '%'/'_' can't match
-        # an unintended agent. ``search`` already excludes archived
-        # agents (active_test defaults True).
-        needle = agent_name.strip()
-        safe = needle.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
-        target = Agent.search([("name", "=ilike", safe)], limit=1)
-        if not target:
-            matches = Agent.search([("name", "ilike", safe)], limit=2)
-            if len(matches) > 1:
-                return {"error": (
-                    "Agent name '%s' is ambiguous (%s). Re-call with the "
-                    "exact agent name." % (
-                        needle, ", ".join(sorted(matches.mapped("name")))
-                    )
-                )}
-            target = matches[:1]
-        if not target:
-            available = Agent.search([]).mapped("name")
-            return {"error": (
-                "No agent named '%s'. Available agents: %s. Re-call with "
-                "one of these exact names, or answer with your own tools."
-                % (needle, ", ".join(sorted(available)))
-            )}
-        if target.id == self.id:
-            return {"error": (
-                "Refusing to route to myself. Answer with your own "
-                "tools instead."
-            )}
+        target, err = self._daadit_resolve_named_agent(agent_name)
+        if err:
+            return err
         # v19.0.6.5.4: route to non-Mistral agents too. The sub-run runs
         # on whichever provider the TARGET uses, so a Mistral concierge
         # can delegate to a Claude specialist (Sem, Vince, Maud, …)
@@ -1873,8 +1964,10 @@ class AIAgent(models.Model):
         if sub_provider is None:
             return {"error": (
                 "Agent '%s' runs on model '%s', for which no provider "
-                "path is available; cannot route. Answer with your own "
-                "tools instead." % (target.name, target.llm_model or "?")
+                "path is available; cannot route. %s" % (
+                    target.name, target.llm_model or "?",
+                    self._daadit_routing_fallback_hint(),
+                )
             )}
 
         # Delegating a question that was just refused on policy grounds
@@ -1891,6 +1984,16 @@ class AIAgent(models.Model):
                 "receiver may not read %s either",
                 self.name, self.id, target.name, target.id, names,
             )
+            if self._daadit_orchestrator_mode():
+                return {"error": (
+                    "Agent '%s' is not permitted to read %s either, so "
+                    "delegating this question cannot produce that data. "
+                    "Do not invent figures. Tell the user it is NOT "
+                    "ESTABLISHED and name the missing source, or open a "
+                    "chat with a colleague who does have that access via "
+                    "ir_actions_server_open_agent_chat."
+                    % (target.name, names)
+                )}
             return {"error": (
                 "Agent '%s' is not permitted to read %s either, so "
                 "delegating this question cannot produce that data. Do "
@@ -1901,10 +2004,11 @@ class AIAgent(models.Model):
             )}
 
         # Build the sub-run tool list from the TARGET's topics. Strip
-        # the router tool (no chains) AND all write-side tools: routing
-        # fetches an ANSWER, never a mutation on the caller's behalf, so
-        # the draft-only policy holds across the router boundary even
-        # when routing to a write-capable agent (e.g. Helpdesk SLA).
+        # orchestrator tools (no chains / no handoffs) AND all
+        # write-side tools: routing fetches an ANSWER, never a mutation
+        # on the caller's behalf, so the draft-only policy holds across
+        # the router boundary even when routing to a write-capable
+        # agent (e.g. Helpdesk SLA).
         tool_names = []
         try:
             for action in target.sudo().topic_ids.tool_ids:
@@ -1912,7 +2016,7 @@ class AIAgent(models.Model):
                     slug = _slug_tool_name(action.name)
                     if (
                         slug
-                        and slug != tool_dispatch.ROUTER_TOOL_SLUG
+                        and slug not in tool_dispatch.ORCHESTRATOR_TOOL_SLUGS
                         and slug not in tool_dispatch.WRITE_SIDE_TOOL_SLUGS
                         and slug not in tool_names
                     ):
@@ -1941,8 +2045,8 @@ class AIAgent(models.Model):
             llm_api_patch.patch_llm_api_service()
         except ImportError as exc:
             return {"error": (
-                "LLM service unavailable (%s). Answer with your own "
-                "tools instead." % exc
+                "LLM service unavailable (%s). %s"
+                % (exc, self._daadit_routing_fallback_hint())
             )}
 
         prev_record = getattr(tool_dispatch.current_agent, "record", None)
@@ -1990,8 +2094,10 @@ class AIAgent(models.Model):
                 target.name, target.id, type(exc).__name__, exc,
             )
             return {"error": (
-                "Routed agent '%s' failed (%s). Answer with your own "
-                "tools instead." % (target.name, type(exc).__name__)
+                "Routed agent '%s' failed (%s). %s" % (
+                    target.name, type(exc).__name__,
+                    self._daadit_routing_fallback_hint(),
+                )
             )}
         finally:
             tool_dispatch.current_agent.record = prev_record
@@ -2009,14 +2115,14 @@ class AIAgent(models.Model):
 
         # The sub-run burned its whole iteration budget, or ended with a
         # (possibly translated) fallback sentinel, without producing a
-        # real answer. Report failure so the hybrid concierge falls back
-        # instead of relaying garbage. sub_failed is the language-
-        # independent signal set inside the sentinel path; exhausted
-        # covers MAX_ITER; the string check is a last-resort belt.
+        # real answer. Report failure so the concierge recovers instead
+        # of relaying garbage. sub_failed is the language-independent
+        # signal set inside the sentinel path; exhausted covers
+        # MAX_ITER; the string check is a last-resort belt.
         if exhausted or sub_failed:
             _logger.info(
                 "daadit_ai_mistral.router: sub-run on %s(%s) failed "
-                "(exhausted=%s sub_failed=%s) — signalling hybrid fallback",
+                "(exhausted=%s sub_failed=%s) — signalling recovery",
                 target.name, target.id, exhausted, sub_failed,
             )
             # A policy denial has a nameable cause, and a delegating
@@ -2032,19 +2138,221 @@ class AIAgent(models.Model):
                     "fill the gap." % (target.name, denied_model)
                 )}
             return {"error": (
-                "Agent '%s' could not complete the question. Answer with "
-                "your own tools instead, and report anything you could "
-                "not establish as NOT ESTABLISHED — never invent data."
-                % target.name
+                "Agent '%s' could not complete the question. %s Report "
+                "anything you could not establish as NOT ESTABLISHED — "
+                "never invent data." % (
+                    target.name, self._daadit_routing_fallback_hint(),
+                )
             )}
         if not answer or answer.lstrip().startswith((
             "_(Mistral wanted to call", "_(Empty response",
         )):
             return {"error": (
-                "Agent '%s' returned no usable answer. Answer with your "
-                "own tools instead." % target.name
+                "Agent '%s' returned no usable answer. %s"
+                % (target.name, self._daadit_routing_fallback_hint())
             )}
         return {"ok": True, "agent": target.name, "answer": answer}
+
+    # ------------------------------------------------------------------ #
+    # Handoff tool (v19.0.6.22.0) — "AI: Open Agent Chat"                #
+    #                                                                    #
+    # Opens (or reuses) a discuss channel of type ai_chat with the       #
+    # named specialist and nudges the user's UI to that chat. Robin      #
+    # never executes domain work himself; when the user wants to keep    #
+    # talking with a specialist, this is the path.                       #
+    # ------------------------------------------------------------------ #
+
+    _DAADIT_OPEN_CHAT_ALIASES = {
+        "agent": "agent_name", "name": "agent_name",
+        "target": "agent_name", "target_agent": "agent_name",
+        "agent_id": "agent_name", "specialist": "agent_name",
+        "message": "opening_message", "question": "opening_message",
+        "prompt": "opening_message", "text": "opening_message",
+        "vraag": "opening_message", "context": "opening_message",
+    }
+
+    def _ai_tool_open_agent_chat(
+        self, agent_name=None, opening_message=None, **_extra
+    ):
+        """Open a new user↔specialist chat and notify the UI.
+
+        Returns ``{'ok': True, 'agent': <name>, 'channel_id': <id>, ...}``
+        on success, or ``{'error': '<reason>'}``.
+        """
+        self.ensure_one()
+
+        if not agent_name or not opening_message:
+            for k, v in (_extra or {}).items():
+                tgt = self._DAADIT_OPEN_CHAT_ALIASES.get(k)
+                if tgt == "agent_name" and not agent_name and isinstance(v, str):
+                    agent_name = v
+                elif (
+                    tgt == "opening_message"
+                    and not opening_message
+                    and isinstance(v, str)
+                ):
+                    opening_message = v
+
+        depth = getattr(tool_dispatch.router_state, "depth", 0)
+        if depth >= 1:
+            return {"error": (
+                "Handoff is only available from the orchestrator chat, "
+                "not from inside a routed sub-run."
+            )}
+
+        target, err = self._daadit_resolve_named_agent(agent_name)
+        if err:
+            return err
+
+        # Prefer stock open_agent_chat — it owns channel creation and
+        # the client action that pops the chat window. We still locate
+        # the channel afterwards so the bus payload has a concrete id,
+        # and so we can post an optional opening message.
+        action = None
+        try:
+            action = target.open_agent_chat()
+        except Exception as exc:  # noqa: BLE001
+            _logger.info(
+                "daadit_ai_mistral.handoff: open_agent_chat on %s(%s) "
+                "raised %s — falling back to channel lookup/create",
+                target.name, target.id, type(exc).__name__,
+            )
+            action = None
+
+        channel = self._daadit_find_or_create_agent_chat(target)
+        if not channel:
+            return {"error": (
+                "Could not open a chat with '%s'. %s"
+                % (target.name, self._daadit_routing_fallback_hint())
+            )}
+
+        posted = False
+        seed = (opening_message or "").strip() if opening_message else ""
+        if seed:
+            try:
+                from markupsafe import escape as _esc
+                channel.message_post(
+                    body=Markup("<p>%s</p>") % _esc(seed),
+                    message_type="comment",
+                    author_id=self.env.user.partner_id.id,
+                    subtype_xmlid="mail.mt_comment",
+                )
+                posted = True
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "daadit_ai_mistral.handoff: could not post opening "
+                    "message on channel %s", channel.id,
+                )
+
+        payload = {
+            "channel_id": channel.id,
+            "agent_id": target.id,
+            "agent_name": target.name,
+        }
+        if isinstance(action, dict):
+            # Only forward JSON-safe action keys the client can doAction.
+            safe_action = {
+                k: action[k]
+                for k in (
+                    "type", "tag", "name", "res_model", "res_id",
+                    "views", "view_mode", "target", "context",
+                    "params", "path",
+                )
+                if k in action
+            }
+            if safe_action.get("type"):
+                payload["action"] = safe_action
+
+        try:
+            partner = self.env.user.partner_id
+            if partner:
+                self.env["bus.bus"]._sendone(
+                    partner, "daadit_open_agent_chat", payload,
+                )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.handoff: bus notify failed for "
+                "channel %s", channel.id,
+            )
+
+        _logger.info(
+            "daadit_ai_mistral.handoff: %s(%s) opened chat with %s(%s) "
+            "as channel %s for user %s (posted=%s)",
+            self.name, self.id, target.name, target.id, channel.id,
+            self.env.uid, posted,
+        )
+        return {
+            "ok": True,
+            "opened": True,
+            "agent": target.name,
+            "channel_id": channel.id,
+            "opening_message_posted": posted,
+            "instruction": (
+                "A chat with %s is now open for the user. Tell them "
+                "briefly (one short sentence) that they can continue "
+                "there. Do not restate the whole conversation, and do "
+                "not call more tools for this request." % target.name
+            ),
+        }
+
+    def _daadit_find_or_create_agent_chat(self, target):
+        """Return the user's newest ``ai_chat`` with ``target``, creating
+        one when stock ``open_agent_chat`` did not leave one behind.
+
+        Best-effort: channel schemas differ slightly across Odoo builds,
+        so create failures are logged and return an empty recordset.
+        """
+        self.ensure_one()
+        Channel = self.env["discuss.channel"]
+        partner = self.env.user.partner_id
+        domain = [
+            ("channel_type", "=", "ai_chat"),
+            ("ai_agent_id", "=", target.id),
+        ]
+        if partner:
+            domain.append(
+                ("channel_member_ids.partner_id", "in", [partner.id])
+            )
+        try:
+            channel = Channel.search(
+                domain, order="write_date desc, id desc", limit=1,
+            )
+        except Exception:  # noqa: BLE001
+            channel = Channel.browse()
+        if channel:
+            return channel
+
+        vals = {
+            "name": target.name,
+            "channel_type": "ai_chat",
+            "ai_agent_id": target.id,
+        }
+        try:
+            channel = Channel.create(vals)
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.handoff: could not create ai_chat "
+                "for agent %s(%s)", target.name, target.id,
+            )
+            return Channel.browse()
+
+        # Ensure the calling user is a member so the UI can open it.
+        try:
+            if partner and hasattr(channel, "add_members"):
+                channel.add_members(partner_ids=partner.ids)
+            elif partner and "channel_member_ids" in channel._fields:
+                channel.write({
+                    "channel_member_ids": [(0, 0, {
+                        "partner_id": partner.id,
+                    })],
+                })
+        except Exception:  # noqa: BLE001
+            _logger.info(
+                "daadit_ai_mistral.handoff: could not add user %s to "
+                "channel %s (may already be a member)",
+                self.env.uid, channel.id,
+            )
+        return channel
 
     def _daadit_no_activity_hint(self, model_name):
         """Message for a model that cannot carry an activity.

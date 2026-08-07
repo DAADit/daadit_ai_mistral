@@ -90,6 +90,21 @@ def pre_init_hook(env):
     _reset_mistral_values(env)
 
 
+def post_init_hook(env):
+    """After install: flag Robin as orchestrator when he already exists.
+
+    Fresh installs of this module on a DB that already has the agent
+    fleet (common on Odoo.sh) would otherwise leave Robin hybrid until
+    the next upgrade migration. Idempotent — no-op when Robin is absent.
+    """
+    try:
+        env["ai.agent"]._daadit_seed_orchestrator()
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.post_init_hook: orchestrator seed failed"
+        )
+
+
 def uninstall_hook(env):
     """Called when the module is being uninstalled. Reset every Mistral
     ``llm_model`` / ``embedding_model`` so the DB doesn't carry an

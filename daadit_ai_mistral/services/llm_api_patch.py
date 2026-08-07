@@ -918,6 +918,61 @@ def _is_smalltalk(conversation):
     return bool(woorden) and woorden[0] in _SMALLTALK_OPENERS
 
 
+# Injected on top of an orchestrator's own system prompt. Knowledge may
+# still carry a longer persona; this hard rule is what the loop enforces
+# in code (tool strip). Keep it short — every token is paid on every turn.
+_ORCHESTRATOR_PROMPT = (
+    "Je bent de orchestrator. Je voert zelf GEEN zoekopdrachten, "
+    "schrijfacties of andere domein-tools uit. Je hebt precies twee "
+    "middelen: (1) ir_actions_server_ask_agent — vraag een specialist en "
+    "geef hun antwoord door in deze chat; (2) "
+    "ir_actions_server_open_agent_chat — open een nieuwe chat met een "
+    "specialist zodat de gebruiker daar verder kan praten. Smalltalk "
+    "beantwoord je zelf kort. Voor alles inhoudelijks routeer of open "
+    "je een chat. Verzin nooit gegevens."
+)
+
+
+def _inject_orchestrator_prompt(agent, conversation):
+    """Prepend the orchestrator hard rule when the agent is flagged."""
+    if agent is None or not getattr(agent, "daadit_is_orchestrator", False):
+        return conversation
+    probe = "Je bent de orchestrator"
+    already = any(
+        isinstance(m, dict)
+        and m.get("role") == "system"
+        and probe in (m.get("content") or "")
+        for m in (conversation or [])
+    )
+    if already:
+        return conversation
+    out = list(conversation or [])
+    out.insert(0, {"role": "system", "content": _ORCHESTRATOR_PROMPT})
+    return out
+
+
+def _filter_orchestrator_tools(agent, tools):
+    """Keep only Ask Agent + Open Agent Chat for orchestrator agents."""
+    if agent is None or not getattr(agent, "daadit_is_orchestrator", False):
+        return tools
+    allowed = tool_dispatch.ORCHESTRATOR_TOOL_SLUGS
+    kept = []
+    for t in tools or []:
+        if not isinstance(t, dict):
+            continue
+        name = (t.get("function") or {}).get("name") or ""
+        if name in allowed:
+            kept.append(t)
+    if len(kept) != len(tools or []):
+        _logger.info(
+            "daadit_ai_mistral.llm_api_patch: orchestrator %s(%s) — "
+            "stripped tools to %s",
+            getattr(agent, "name", "?"), getattr(agent, "id", "?"),
+            [((t.get("function") or {}).get("name")) for t in kept],
+        )
+    return kept
+
+
 def _step_text(tc):
     """Vaste, PII-vrije NL-regel voor een op handen zijnde tool-aanroep.
 
@@ -1963,7 +2018,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             # list explicitly (v19.0.4.2.1) — otherwise a sub-run with an
             # empty explicit tool list silently regains the router tool
             # and every write-side tool via this path.
-            _in_subrun = _router_depth > 0  # noqa: F821  (closure over _router_depth)
+            _in_subrun = getattr(
+                tool_dispatch.router_state, "depth", 0,
+            ) > 0
             names = []
             for action in agent.sudo().topic_ids.tool_ids:
                 if action.model_id and action.model_id.model == "ai.agent":
@@ -1971,7 +2028,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                     if not slug or slug in names:
                         continue
                     if _in_subrun and (
-                        slug == tool_dispatch.ROUTER_TOOL_SLUG
+                        slug in tool_dispatch.ORCHESTRATOR_TOOL_SLUGS
                         or slug in tool_dispatch.WRITE_SIDE_TOOL_SLUGS
                     ):
                         continue
@@ -2052,6 +2109,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     conversation = _inject_language_mirror(conversation)
     conversation = _inject_runtime_context(conversation)
+    conversation = _inject_orchestrator_prompt(agent, conversation)
 
     # ---- Request-structure telemetry (v19.0.4.1.5) -------------------
     # One INFO row per chat turn with SHAPE only (roles, counts,
@@ -2133,6 +2191,19 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         # count QUESTIONS (distinct turn_uuid / depth-0 rows) instead
         # of API calls.
         tool_dispatch.router_state.turn_uuid = uuid.uuid4().hex
+
+    # ---- Orchestrator hard gate (v19.0.6.22.0) ----------------------
+    # Robin (and any agent with daadit_is_orchestrator) must never keep
+    # search/write/open-menu tools at depth 0, even if a topic still
+    # links them. Keep only Ask Agent + Open Agent Chat.
+    if (
+        agent is not None
+        and _router_depth == 0
+        and getattr(agent, "daadit_is_orchestrator", False)
+        and normalized_tools
+    ):
+        normalized_tools = _filter_orchestrator_tools(agent, normalized_tools)
+
     # Fase 0 governance guardrail: cap hallucinated tool-name attempts.
     # After 2 "Unknown tool: ..." results in the same turn we bail out
     # instead of letting the model keep guessing and burn the cap.
@@ -2158,6 +2229,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # normal combining path. Tunable kill-switch via System Parameter
     # ``daadit_ai_mistral.router_passthrough`` (default on).
     router_passthrough = None
+    # v19.0.6.22.0: same short-circuit when the orchestrator opens a
+    # specialist chat — relay a one-line confirmation instead of another
+    # full generation.
+    open_chat_passthrough = None
     try:
         _passthrough_enabled = str(
             _icp.get_param("daadit_ai_mistral.router_passthrough", "1")
@@ -2433,9 +2508,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
             # A routed answer is the slowest step of all, so close it
             # off explicitly rather than leaving the last line hanging.
+            _tc_name = (tc.get("function") or {}).get("name")
             if (
-                (tc.get("function") or {}).get("name")
-                == tool_dispatch.ROUTER_TOOL_SLUG
+                _tc_name == tool_dispatch.ROUTER_TOOL_SLUG
                 and isinstance(result, dict)
             ):
                 _wie = _safe_name(result.get("agent"))
@@ -2445,6 +2520,22 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                         ("%s heeft geantwoord, ik verwerk het" % _wie)
                         if _wie
                         else "De collega heeft geantwoord, ik verwerk het",
+                        depth=_router_depth, kind="route",
+                    )
+                elif result.get("error"):
+                    _notify_step(agent, "Dat lukte niet, ik probeer het anders",
+                                 depth=_router_depth, kind="route")
+            elif (
+                _tc_name == tool_dispatch.OPEN_CHAT_TOOL_SLUG
+                and isinstance(result, dict)
+            ):
+                _wie = _safe_name(result.get("agent"))
+                if result.get("ok"):
+                    _notify_step(
+                        agent,
+                        ("Ik open een chat met %s" % _wie)
+                        if _wie
+                        else "Ik open een chat met een collega",
                         depth=_router_depth, kind="route",
                     )
                 elif result.get("error"):
@@ -2542,6 +2633,21 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                     router_passthrough = result
                     break
 
+            # v19.0.6.22.0: open-chat handoff pass-through.
+            if (
+                open_chat_passthrough is None
+                and _router_depth == 0
+                and _passthrough_enabled
+                and len(tool_calls) == 1
+                and (tc.get("function") or {}).get("name")
+                == tool_dispatch.OPEN_CHAT_TOOL_SLUG
+                and isinstance(result, dict)
+                and result.get("ok")
+                and result.get("opened")
+            ):
+                open_chat_passthrough = result
+                break
+
             try:
                 content = json.dumps(result, default=str)
             except Exception:  # noqa: BLE001
@@ -2553,7 +2659,12 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 "content": content,
             })
 
-        if access_denial or unknown_tool_break or router_passthrough:
+        if (
+            access_denial
+            or unknown_tool_break
+            or router_passthrough
+            or open_chat_passthrough
+        ):
             break
 
         iteration += 1
@@ -2773,6 +2884,43 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             _logger.exception(
                 "daadit_ai_mistral.llm_api_patch: usage row creation "
                 "failed during pass-through; continuing"
+            )
+        return adapted
+
+    # v19.0.6.22.0: open-chat handoff — one short confirmation.
+    if open_chat_passthrough:
+        _oc_agent = open_chat_passthrough.get("agent") or "de specialist"
+        adapted = [
+            "Ik heb een chat met %s voor je geopend — daar kun je "
+            "verder praten." % _oc_agent
+        ]
+        _logger.info(
+            "daadit_ai_mistral.llm_api_patch: open-chat pass-through "
+            "(specialist=%s channel=%s) — final generation skipped",
+            _oc_agent, open_chat_passthrough.get("channel_id"),
+        )
+        try:
+            ch = api_self.env.context.get("discuss_channel")
+            channel_id = ch.id if ch and hasattr(ch, "id") else (
+                ch if isinstance(ch, int) else False
+            )
+            api_self.env["daadit_ai_mistral.usage"].sudo().record_usage(
+                kind="chat", model=model,
+                agent_id=agent.id if agent else False,
+                channel_id=channel_id,
+                prompt_tokens=usage.get("prompt_tokens") or 0,
+                completion_tokens=usage.get("completion_tokens") or 0,
+                iterations=iteration + 1,
+                has_tools=bool(normalized_tools),
+                depth=_router_depth,
+                turn_uuid=getattr(
+                    tool_dispatch.router_state, "turn_uuid", None,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.llm_api_patch: usage row creation "
+                "failed during open-chat pass-through; continuing"
             )
         return adapted
 
