@@ -64,10 +64,14 @@
                         domain="[('risk_level', '=', 'mandated_write')]"/>
                 <filter string="Archived" name="inactive"
                         domain="[('active', '=', False)]"/>
-                <group expand="0" string="Group By">
-                    <filter string="Category" name="group_category"
+                <!-- Odoo 19 view-validator: <group> inside <search> accepts
+                     neither `expand` nor `string`; use a plain <group> wrapper
+                     around the group-by filters (same pattern as
+                     mistral_usage_views.xml). -->
+                <group>
+                    <filter name="group_category" string="Category"
                             context="{'group_by': 'category'}"/>
-                    <filter string="Risk level" name="group_risk"
+                    <filter name="group_risk" string="Risk level"
                             context="{'group_by': 'risk_level'}"/>
                 </group>
             </search>
