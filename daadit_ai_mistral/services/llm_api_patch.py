@@ -1809,7 +1809,7 @@ def _strip_runaway_and_leaks(text):
     return text, text != original
 
 
-def _clean_adapted(adapted, where):
+def _clean_adapted(adapted, where, compact=False):
     """Pas :func:`_strip_runaway_and_leaks` toe op wat de gebruiker te
     zien krijgt. Werkt zowel op losse strings als op
     ``{role, content}``-dicts, omdat beide vormen door deze module
@@ -1820,14 +1820,14 @@ def _clean_adapted(adapted, where):
         if isinstance(item, str):
             cleaned, trimmed = _strip_runaway_and_leaks(item)
             cleaned = cleaned or (_EMPTY_AFTER_STRIP if trimmed else cleaned)
-            if cleaned:
+            if compact and cleaned:
                 cleaned, compacted = _compact_answer_text(cleaned)
                 trimmed = trimmed or compacted
         elif isinstance(item, dict) and isinstance(item.get("content"), str):
             cleaned_text, trimmed = _strip_runaway_and_leaks(item["content"])
             if trimmed and not cleaned_text:
                 cleaned_text = _EMPTY_AFTER_STRIP
-            if cleaned_text:
+            if compact and cleaned_text:
                 cleaned_text, compacted = _compact_answer_text(cleaned_text)
                 trimmed = trimmed or compacted
             cleaned = dict(item, content=cleaned_text)
@@ -2063,6 +2063,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     #   ``role: tool`` messages → call again. Stop when the model
     #   returns a final text response OR we hit ``MAX_ITER``.
     _had_threadlocal = bool(getattr(tool_dispatch.current_agent, "record", None))
+    try:
+        _interactive_chat = bool(api_self.env.context.get("discuss_channel"))
+    except Exception:  # noqa: BLE001
+        _interactive_chat = False
 
     # ---- Reconstruct tools from agent topics (v19.0.4.1.5) ----------
     # On the standalone AI chat-panel path the Enterprise controller
@@ -2171,7 +2175,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     conversation = _inject_language_mirror(conversation)
     conversation = _inject_runtime_context(conversation)
     conversation = _inject_orchestrator_prompt(agent, conversation)
-    if not response_format_extra:
+    if _interactive_chat and not response_format_extra:
         conversation = _add_compact_chat_instruction(
             conversation,
             routed=bool(getattr(tool_dispatch.router_state, "depth", 0)),
@@ -2913,6 +2917,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     if router_passthrough:
         _pt_answer = str(router_passthrough.get("answer") or "").strip()
         _pt_answer, _pt_trimmed = _strip_runaway_and_leaks(_pt_answer)
+        if _interactive_chat and _pt_answer:
+            _pt_answer, _pt_compacted = _compact_answer_text(_pt_answer)
+            _pt_trimmed = _pt_trimmed or _pt_compacted
         if _pt_trimmed:
             _logger.warning(
                 "daadit_ai_mistral.llm_api_patch: doorgegeven antwoord van "
@@ -2994,7 +3001,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # De eigen tekst van de agent gaat door dezelfde zeef als een
     # doorgegeven antwoord: intern verkeer en een doorgeslagen staart
     # horen niet in de chat.
-    adapted = _clean_adapted(adapted, "eindantwoord")
+    adapted = _clean_adapted(
+        adapted, "eindantwoord", compact=_interactive_chat,
+    )
     _logger.info(
         "daadit_ai_mistral.llm_api_patch: Mistral chat ok "
         "(model=%s iterations=%d tokens=%s/%s text_chunks=%d "
