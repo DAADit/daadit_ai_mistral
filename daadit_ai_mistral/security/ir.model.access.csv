@@ -7,3 +7,5 @@ access_daadit_ai_agent_read_scope_user,daadit.ai.agent.read.scope user read,mode
 access_daadit_ai_agent_read_scope_system,daadit.ai.agent.read.scope system,model_daadit_ai_agent_read_scope,base.group_system,1,1,1,1
 access_daadit_ai_agent_activity_scope_user,daadit.ai.agent.activity.scope user read,model_daadit_ai_agent_activity_scope,base.group_user,1,0,0,0
 access_daadit_ai_agent_activity_scope_system,daadit.ai.agent.activity.scope system,model_daadit_ai_agent_activity_scope,base.group_system,1,1,1,1
+access_daadit_ai_agent_skill_user,daadit.ai.agent.skill user read,model_daadit_ai_agent_skill,base.group_user,1,0,0,0
+access_daadit_ai_agent_skill_system,daadit.ai.agent.skill system,model_daadit_ai_agent_skill,base.group_system,1,1,1,1

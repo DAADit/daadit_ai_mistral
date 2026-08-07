@@ -91,12 +91,16 @@ def pre_init_hook(env):
 
 
 def post_init_hook(env):
-    """After install: flag Robin as orchestrator when he already exists.
-
-    Fresh installs of this module on a DB that already has the agent
-    fleet (common on Odoo.sh) would otherwise leave Robin hybrid until
-    the next upgrade migration. Idempotent — no-op when Robin is absent.
-    """
+    """Seed optional agent metadata on fresh install."""
+    _logger.info(
+        "daadit_ai_mistral.post_init_hook: seeding initial agent skills"
+    )
+    try:
+        env["ai.agent"]._daadit_seed_skills()
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.post_init_hook: agent skill seed failed"
+        )
     try:
         env["ai.agent"]._daadit_seed_orchestrator()
     except Exception:  # noqa: BLE001
