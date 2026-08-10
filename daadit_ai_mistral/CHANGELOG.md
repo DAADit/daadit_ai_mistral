@@ -7,6 +7,63 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.8.0.0 — 2026-08-04
+
+Consolidatie (OAS 711), portie 4 van 4: de testmap uit de deploy-lijn
+(activiteitscope, antwoord-sanitizer, delegatie, toolargumenten). Deze
+repo had geen enkele test van deze module.
+
+Nieuw: `tests/test_consolidatie_behoud.py` dekt de twee dingen die alleen
+deze lijn had en die bij de overname bewust opnieuw zijn toegepast — het
+schema van een door de operator gemaakte tool en de taalreferentie die te
+korte berichten overslaat. Zonder die tests verdwijnen ze bij de volgende
+overname alsnog.
+
+Hiermee is het verschil met de map in `DAADit/daadit` nul op de bewust
+behouden verbeteringen na, en kan deze stand getagd worden als de release
+waar de deploy-repo een submodule op pint (stap 4 van
+`docs/CONSOLIDATIE_MODULES.md`).
+
+## 19.0.7.7.0 — 2026-08-04
+
+Consolidatie (OAS 711), portie 3 van 4: de modellaag uit de deploy-lijn.
+Nieuw hier: `daadit.ai.agent.activity.scope` — de grens waarbinnen een
+agent een activiteit mag laten ontstaan, met de bijbehorende view, ACL's,
+`data/fallback_params.xml` en een idempotente seeding-migratie. Verder de
+activiteitenlogica op `ai.agent` (`_daadit_denied_for_target`,
+`_daadit_same_activity_topic`, `_daadit_no_activity_hint`, herkenning van
+zelfherstel) en het doorschrijven van het modelregister naar de router.
+
+Vervallen: `models/ai_budget.py` + view. Budgetten lopen via
+`daadit_ai_agent_schedule` en `services/cost_cap.py`; het model hier heeft
+nooit in productie gedraaid en een tweede budgetlaag is precies de
+dubbeling die deze consolidatie opruimt.
+
+Ook vervallen: `_daadit_find_delegate_for_model`. De deploy-lijn lost
+hetzelfde op met `_scope_redirect_result` (zie 19.0.7.5.0).
+
+De migratiemap heet `19.0.7.7.0` en niet `19.0.6.18.0` zoals in de
+deploy-lijn: die versie ligt onder de huidige, dus het script zou bij een
+upgrade vanaf 19.0.7.x nooit draaien. Opnieuw draaien is ongevaarlijk,
+`_daadit_seed_activity_scopes` slaat agents met bestaande regels over.
+
+## 19.0.7.6.0 — 2026-08-04
+
+Consolidatie (OAS 711), portie 2 van 4: `services/tool_dispatch.py` uit de
+deploy-lijn. Wat hier ontbrak: normalisatie van verzonnen toolargumenten
+(`_remap_arg_names`, `_alias_targets`, `_normalize_key`,
+`_missing_required_args`), het platslaan van genestelde domeingroepen
+(`_flatten_domain_groups`) en één voorspelbare resultaatlimiet
+(`_result_cap_chars`): de parameter `daadit_ai_mistral.max_tool_result_chars`
+stond in productie op 6000 terwijl de code 50 000 afdwong, zodat de limiet
+in de foutmelding niet de limiet was die gold.
+
+Behouden uit deze lijn: het echte JSON-schema van een door de operator
+gemaakte serveractie (`_custom_tool_definition`, `annotate_tools(...,
+agent=...)`). De deploy-lijn adverteert zo'n tool alleen op naam, waarna
+het model hem met `{}` aanroept. `llm_api_patch` geeft de agent nu door,
+en resolvet die daarvoor één blok eerder in `_request_llm_mistral`.
+
 ## 19.0.7.5.0 — 2026-08-04
 
 Consolidatie (OAS 711), portie 1 van 4: de servicelaag van de deploy-repo
