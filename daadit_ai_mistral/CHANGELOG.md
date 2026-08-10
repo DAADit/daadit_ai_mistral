@@ -7,6 +7,23 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.8.0.0 — 2026-08-04
+
+Consolidatie (OAS 711), portie 4 van 4: de testmap uit de deploy-lijn
+(activiteitscope, antwoord-sanitizer, delegatie, toolargumenten). Deze
+repo had geen enkele test van deze module.
+
+Nieuw: `tests/test_consolidatie_behoud.py` dekt de twee dingen die alleen
+deze lijn had en die bij de overname bewust opnieuw zijn toegepast — het
+schema van een door de operator gemaakte tool en de taalreferentie die te
+korte berichten overslaat. Zonder die tests verdwijnen ze bij de volgende
+overname alsnog.
+
+Hiermee is het verschil met de map in `DAADit/daadit` nul op de bewust
+behouden verbeteringen na, en kan deze stand getagd worden als de release
+waar de deploy-repo een submodule op pint (stap 4 van
+`docs/CONSOLIDATIE_MODULES.md`).
+
 ## 19.0.7.7.0 — 2026-08-04
 
 Consolidatie (OAS 711), portie 3 van 4: de modellaag uit de deploy-lijn.
