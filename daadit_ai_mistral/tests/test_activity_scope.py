@@ -107,7 +107,7 @@ class TestActivityScope(common.TransactionCase):
         het werk van die dag staat; dat is precies wat de postbus moet
         voorkomen.
         """
-        for name in ("Bo", "Dirk", "Fenna", "Coen"):
+        for name in ("Bo", "Dirk", "Marit", "Coen"):
             lines = SEED_ACTIVITY_SCOPES[name]
             articles = [
                 domain for model, domain in lines
@@ -133,7 +133,7 @@ class TestActivityScope(common.TransactionCase):
             "account.move.line", "account.payment", "account.full.reconcile",
             "account.partial.reconcile", "account.bank.statement.line",
         }
-        for name in ("Bo", "Dirk", "Fenna", "Coen"):
+        for name in ("Bo", "Dirk", "Marit", "Coen"):
             models_for_role = {model for model, _ in SEED_ACTIVITY_SCOPES[name]}
             self.assertFalse(
                 models_for_role & forbidden,

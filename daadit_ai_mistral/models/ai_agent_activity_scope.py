@@ -126,7 +126,7 @@ SEED_ACTIVITY_SCOPES = {
         ("knowledge.article", [["id", "=", 351]]),
         ("account.move", [["move_type", "=", "out_invoice"]]),
     ],
-    "Fenna": [
+    "Marit": [
         ("knowledge.article", [["id", "=", 352]]),
         ("sale.order", []),
     ],

@@ -83,7 +83,7 @@ class AIAgent(models.Model):
             "Argus": ["skill_governance_agent_assurance"],
             "Bo": ["skill_finance_ledger_check"],
             "Dirk": ["skill_finance_overdue_receivables"],
-            "Fenna": ["skill_finance_invoice_candidates"],
+            "Marit": ["skill_finance_invoice_candidates"],
             "Coen": ["skill_finance_margin_report"],
             "Floris": [
                 "skill_finance_margin_report",
