@@ -64,6 +64,51 @@ turn_hooks = None
 # passing off truncated narration as a real answer (v19.0.4.2.1).
 router_state = threading.local()
 
+# Read-only stock tools. Everything else is a custom action, and those
+# exist precisely to write (create a campaign, draft a post, update a
+# blog). Treating unknown tools as writes is the safe default here:
+# over-reporting a write is harmless, missing one is not.
+_READ_TOOL_SUFFIXES = (
+    "_search", "_read_group", "_get_fields", "_get_menu_details",
+    "_open_menu_kanban", "_open_menu_list", "_open_menu_graph",
+    "_open_menu_pivot", "_adjust_search", "_compute_report_measures",
+    "_search_knowledge", "_ask_agent",
+)
+
+
+def _is_write_tool(fn_name):
+    """True when this tool changes data rather than reading it."""
+    name = (fn_name or "").lower()
+    return not any(name.endswith(suffix) for suffix in _READ_TOOL_SUFFIXES)
+
+
+def note_tool_call(fn_name, ok=True):
+    """Tally one dispatched tool call on this thread.
+
+    The scheduled route already publishes a fact line under every report
+    ("Feitelijk vastgelegd door het systeem: N tool-aanroepen, M
+    schrijfacties"), because instructions alone never stopped an agent
+    from narrating work it had not done. The chat route had no such
+    counter, and the same failure showed up there: asked through Robin
+    to put a post in Social Marketing, Mark answered "Post is set as a
+    draft in the Social Marketing app" after two iterations in which he
+    called no tool at all. The database held exactly one social.post,
+    three weeks old.
+
+    Counting at this single point — every dispatch passes here — lets
+    the router state per delegated sub-run what actually happened.
+    """
+    try:
+        router_state.calls_made = getattr(router_state, "calls_made", 0) + 1
+        if ok and _is_write_tool(fn_name):
+            router_state.writes_made = getattr(
+                router_state, "writes_made", 0,
+            ) + 1
+    except Exception:  # noqa: BLE001
+        # A counter must never break a working tool call.
+        pass
+
+
 # Tool slugs that MUTATE database state. Stripped from every routed
 # sub-run's tool list (v19.0.4.2.1): routing exists to fetch an
 # ANSWER, never to let a delegated agent write on the caller's behalf.
@@ -1841,6 +1886,10 @@ def run_tool_call(agent, tool_call):
     fn_name = fn.get("name") or ""
     raw_args = fn.get("arguments") or "{}"
     env = getattr(agent, "env", None)
+    # Count the attempt here, before anything can go wrong: what the
+    # router must be able to say is "this agent reached for a tool N
+    # times", including the times it reached and missed.
+    note_tool_call(fn_name)
 
     try:
         kwargs = _coerce_args(raw_args)

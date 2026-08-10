@@ -2063,6 +2063,11 @@ class AIAgent(models.Model):
         prev_denied = getattr(
             tool_dispatch.router_state, "sub_denied_model", "",
         )
+        # Tool tallies are zeroed for the sub-run and restored after, so
+        # what we report back is this delegate's own work and not the
+        # caller's. See ``tool_dispatch.note_tool_call``.
+        prev_calls_made = getattr(tool_dispatch.router_state, "calls_made", 0)
+        prev_writes_made = getattr(tool_dispatch.router_state, "writes_made", 0)
         # Set state and run inside one try/finally so a raise anywhere —
         # including before request_llm — can never leak depth or the
         # active-agent record onto this worker thread.
@@ -2070,6 +2075,8 @@ class AIAgent(models.Model):
             tool_dispatch.router_state.depth = depth + 1
             tool_dispatch.router_state.exhausted = False
             tool_dispatch.router_state.sub_denied_model = ""
+            tool_dispatch.router_state.calls_made = 0
+            tool_dispatch.router_state.writes_made = 0
             tool_dispatch.current_agent.record = target
             _logger.info(
                 "daadit_ai_mistral.router: agent %s(%s) routing question "
@@ -2096,6 +2103,8 @@ class AIAgent(models.Model):
             denied_model = getattr(
                 tool_dispatch.router_state, "sub_denied_model", "",
             ) or ""
+            sub_calls = getattr(tool_dispatch.router_state, "calls_made", 0)
+            sub_writes = getattr(tool_dispatch.router_state, "writes_made", 0)
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 "daadit_ai_mistral.router: sub-run on %s(%s) raised %s: %s",
@@ -2113,6 +2122,8 @@ class AIAgent(models.Model):
             tool_dispatch.router_state.exhausted = prev_exhausted
             tool_dispatch.router_state.sub_failed = prev_sub_failed
             tool_dispatch.router_state.sub_denied_model = prev_denied
+            tool_dispatch.router_state.calls_made = prev_calls_made
+            tool_dispatch.router_state.writes_made = prev_writes_made
 
         if isinstance(result, (list, tuple)):
             answer = "\n\n".join(
@@ -2159,7 +2170,41 @@ class AIAgent(models.Model):
                 "Agent '%s' returned no usable answer. %s"
                 % (target.name, self._daadit_routing_fallback_hint())
             )}
-        return {"ok": True, "agent": target.name, "answer": answer}
+        # What the delegate actually did, counted by the dispatcher —
+        # not what it says it did. Robin relayed "Post is set as a draft
+        # in the Social Marketing app" from Mark while the database held
+        # no such post and Mark had called no tool; the caller had no way
+        # to tell narration from fact. Now it does, and the instruction
+        # is explicit enough that a concierge cannot pass off a claim of
+        # created work as done.
+        claim = {
+            "ok": True,
+            "agent": target.name,
+            "answer": answer,
+            "tool_calls_made": sub_calls,
+            "write_actions_made": sub_writes,
+        }
+        if sub_writes == 0:
+            claim["fact_check"] = (
+                "%s made %s tool call(s) and NO write actions, so nothing "
+                "was created, changed or scheduled. If the answer above "
+                "claims otherwise, that claim is false: relay it as a "
+                "PROPOSAL, never as completed work, and say plainly that "
+                "it still has to be carried out." % (target.name, sub_calls)
+            )
+        else:
+            claim["fact_check"] = (
+                "%s made %s tool call(s), of which %s wrote to the "
+                "database. Only describe as done what the answer above "
+                "ties to a concrete record." % (
+                    target.name, sub_calls, sub_writes,
+                )
+            )
+        _logger.info(
+            "daadit_ai_mistral.router: sub-run on %s(%s) made %s calls / "
+            "%s writes", target.name, target.id, sub_calls, sub_writes,
+        )
+        return claim
 
     # ------------------------------------------------------------------ #
     # Handoff tool (v19.0.6.22.0) — "AI: Open Agent Chat"                #
