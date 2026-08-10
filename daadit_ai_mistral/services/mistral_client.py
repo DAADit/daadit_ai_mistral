@@ -151,8 +151,22 @@ def _redact_payload(payload):
 # ---------------------------------------------------------------------------
 _RETRY_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_ATTEMPTS = 3
+
+
 _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 20.0
+
+
+class MistralUnavailable(RuntimeError):
+    """Mistral could not answer for a reason that says nothing about the
+    request itself: the connection failed, the server returned 5xx, or
+    the rate limit held after every retry.
+
+    Separate from the generic errors because it is the one class of
+    failure another provider can pick up — see the Claude fallback in
+    ``llm_api_patch``. A 400 or a 401 is *not* this: sending the same
+    broken request to Claude only breaks it twice.
+    """
 
 
 def _retry_wait_seconds(attempt, retry_after=None):
@@ -308,10 +322,19 @@ class MistralClient:
             )
             time.sleep(wait)
         if resp is None:
-            raise RuntimeError(
+            raise MistralUnavailable(
                 f"Mistral request failed after {_MAX_ATTEMPTS} attempts: "
                 f"{last_exc}"
             ) from last_exc
+
+        if resp.status_code == 429:
+            # Rate limit that survived every retry. Not the caller's
+            # fault and not fixable by rephrasing — the same request
+            # will succeed later, or right now on another provider.
+            raise MistralUnavailable(
+                f"Mistral rate limit held after {_MAX_ATTEMPTS} attempts "
+                f"on {path}"
+            )
 
         if 400 <= resp.status_code < 500:
             try:
@@ -353,7 +376,7 @@ class MistralClient:
                 detail=detail,
             ))
         if resp.status_code >= 500:
-            raise RuntimeError(
+            raise MistralUnavailable(
                 f"Mistral API server error {resp.status_code}: {resp.text[:200]}"
             )
 

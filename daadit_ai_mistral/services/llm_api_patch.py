@@ -38,16 +38,28 @@ adapt the wrapper.
 """
 import json
 import logging
+import re
 import time
 import uuid
 
 from .mistral_client import (
     EMBEDDING_MODEL,
     MistralClient,
+    MistralUnavailable,
     is_mistral_embedding_model,
     is_mistral_model,
 )
 from . import tool_dispatch
+
+try:
+    # Optional: daadit_ai_claude is not a hard dependency, so a
+    # deployment without it must still import this module. When it is
+    # installed, its request path doubles as our fallback provider.
+    from odoo.addons.daadit_ai_claude.services import (
+        llm_api_patch as claude_patch,
+    )
+except ImportError:  # pragma: no cover - depends on installed addons
+    claude_patch = None
 
 _logger = logging.getLogger(__name__)
 
@@ -73,6 +85,77 @@ def _delegate_target_name(tool_call):
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+# Fallback provider (taak 709). "claude" (default) or "off".
+_FALLBACK_ICP = "daadit_ai_mistral.fallback_provider"
+_FALLBACK_MODEL_ICP = "daadit_ai_mistral.fallback_model"
+_FALLBACK_MODEL_DEFAULT = "claude-sonnet-4-6"
+
+
+def _fallback_model(env):
+    if env is None:
+        return _FALLBACK_MODEL_DEFAULT
+    try:
+        name = env["ir.config_parameter"].sudo().get_param(
+            _FALLBACK_MODEL_ICP,
+        )
+    except Exception:  # noqa: BLE001
+        return _FALLBACK_MODEL_DEFAULT
+    return (name or "").strip() or _FALLBACK_MODEL_DEFAULT
+
+
+def _fallback_enabled(env):
+    """True when an unavailable Mistral may be answered by Claude."""
+    if claude_patch is None:
+        return False
+    if env is None:
+        return False
+    try:
+        mode = env["ir.config_parameter"].sudo().get_param(
+            _FALLBACK_ICP, "claude",
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return (mode or "").strip().lower() in ("claude", "anthropic", "on", "1")
+
+
+def _request_with_fallback(api_self, args, kwargs):
+    """Run the Mistral turn; hand it to Claude when Mistral is down.
+
+    Only ``MistralUnavailable`` triggers the switch — connection
+    failure, 5xx, or a rate limit that survived every retry. A 4xx is
+    the request being wrong, and re-sending a wrong request to another
+    provider just burns a second bill.
+
+    The model name is replaced, because a Mistral model id means
+    nothing to Anthropic; everything else (messages, tools, the agent
+    on the threadlocal) carries over unchanged, so the colleague keeps
+    the same instructions and the same tools.
+    """
+    try:
+        return _request_llm_mistral(api_self, *args, **kwargs)
+    except MistralUnavailable as exc:
+        env = getattr(api_self, "env", None)
+        if not _fallback_enabled(env):
+            raise
+        model = _fallback_model(env)
+        _logger.warning(
+            "daadit_ai_mistral.llm_api_patch: Mistral niet beschikbaar "
+            "(%s) — deze beurt wordt beantwoord door %s", exc, model,
+        )
+        claude_kwargs = dict(kwargs)
+        claude_kwargs["model"] = model
+        # Positional Mistral model ids are dropped: Claude sniffs
+        # positional strings for a model name and would ignore a
+        # Mistral id anyway, but leaving it in reads as a bug later.
+        claude_args = tuple(
+            a for a in args
+            if not (isinstance(a, str) and is_mistral_model(a))
+        )
+        return claude_patch._request_llm_claude(
+            api_self, *claude_args, **claude_kwargs
+        )
 
 
 def _diag_nonmistral_delegation(api_self, where, kwargs):
@@ -204,8 +287,11 @@ def patch_llm_api_service() -> bool:
             return None
         try:
             icp = env["ir.config_parameter"].sudo()
-            mode = (icp.get_param("daadit_ai_mistral.force_provider") or "").strip().lower()
-            forced = (icp.get_param("daadit_ai_mistral.force_provider_name") or "mistral").strip().lower()
+            mode = (icp.get_param(
+                "daadit_ai_mistral.force_provider") or "").strip().lower()
+            forced = (icp.get_param(
+                "daadit_ai_mistral.force_provider_name")
+                or "mistral").strip().lower()
         except Exception:  # noqa: BLE001
             return None
         if mode in ("off", "", "no", "0", "false"):
@@ -266,8 +352,48 @@ def patch_llm_api_service() -> bool:
         # a time, but gevent / async setups can interleave; the
         # try/finally pattern is the cheap way to make state-bleed
         # impossible.
+        # A top-level turn with an observer attached gets bracketed so
+        # the observer sees both ends even when the turn raises. Sub-runs
+        # (depth > 0) are part of their parent's turn and must not open a
+        # second one.
+        hooks = getattr(tool_dispatch, "turn_hooks", None)
+        depth = 0
         try:
-            return _request_llm_mistral(api_self, *args, **kwargs)
+            depth = getattr(tool_dispatch.router_state, "depth", 0) or 0
+        except Exception:  # noqa: BLE001
+            depth = 0
+        agent = getattr(tool_dispatch.current_agent, "record", None)
+
+        if hooks is not None and not depth:
+            try:
+                hooks.begin(agent)
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "daadit_ai_mistral: turn observer begin raised — "
+                    "continuing without it"
+                )
+            answer = None
+            try:
+                answer = _request_with_fallback(api_self, args, kwargs)
+                return answer
+            finally:
+                try:
+                    hooks.end(agent, answer)
+                except Exception:  # noqa: BLE001
+                    _logger.exception(
+                        "daadit_ai_mistral: turn observer end raised — "
+                        "the answer was already returned"
+                    )
+                # Sluit de denkstappen-lijst af zodat de frontend de
+                # "bezig"-status stopt. Eén keer per top-level beurt.
+                _notify_step(agent, "Klaar", kind="done", done=True)
+                try:
+                    tool_dispatch.current_agent.record = None
+                except Exception:  # noqa: BLE001
+                    pass
+
+        try:
+            return _request_with_fallback(api_self, args, kwargs)
         finally:
             try:
                 tool_dispatch.current_agent.record = None
@@ -303,7 +429,7 @@ def patch_llm_api_service() -> bool:
                 )
             return original_request_llm_internal(api_self, *args, **kwargs)
         try:
-            adapted = _request_llm_mistral(api_self, *args, **kwargs)
+            adapted = _request_with_fallback(api_self, args, kwargs)
         finally:
             try:
                 tool_dispatch.current_agent.record = None
@@ -643,7 +769,7 @@ def _normalize_messages(value):
 
 
 def _extract_from_dict(d, model, messages, tools, tool_choice,
-                        temperature, max_tokens):
+                       temperature, max_tokens):
     """Try to pull the standard parameters out of a dict (could be a
     direct kwargs dict, a positional body, or a nested ``body=`` kwarg).
 
@@ -654,25 +780,31 @@ def _extract_from_dict(d, model, messages, tools, tool_choice,
         return model, messages, tools, tool_choice, temperature, max_tokens
     for k in _MODEL_KEYS:
         if not model and k in d:
-            model = d.get(k); break
+            model = d.get(k)
+            break
     for k in _MESSAGE_KEYS:
         if not messages and k in d:
             cand = d.get(k)
             normalized = _normalize_messages(cand)
             if normalized:
-                messages = normalized; break
+                messages = normalized
+                break
     for k in _TOOLS_KEYS:
         if tools is None and k in d:
-            tools = d.get(k); break
+            tools = d.get(k)
+            break
     for k in _TOOL_CHOICE_KEYS:
         if tool_choice is None and k in d:
-            tool_choice = d.get(k); break
+            tool_choice = d.get(k)
+            break
     for k in _TEMPERATURE_KEYS:
         if temperature is None and k in d:
-            temperature = d.get(k); break
+            temperature = d.get(k)
+            break
     for k in _MAX_TOKENS_KEYS:
         if max_tokens is None and k in d:
-            max_tokens = d.get(k); break
+            max_tokens = d.get(k)
+            break
     return model, messages, tools, tool_choice, temperature, max_tokens
 
 
@@ -728,27 +860,161 @@ def _format_access_denied_message(info):
     return "\n".join(lines)
 
 
-def _last_user_message_text(messages):
-    """Return the last user message as plain text, best effort."""
-    for message in reversed(messages or []):
-        if not isinstance(message, dict) or message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, (list, tuple)):
-            parts = []
-            for part in content:
-                if isinstance(part, str):
-                    parts.append(part)
-                elif isinstance(part, dict):
-                    text = part.get("text") or part.get("content")
-                    if isinstance(text, str):
-                        parts.append(text)
-            value = "\n".join(parts).strip()
-            if value:
-                return value
-    return ""
+def _agent_steps():
+    """De gedeelde denkstappen-laag (labels + bus), of ``None``.
+
+    De labels en het bus-verkeer wonen sinds v19.0.6.17.0 in
+    ``daadit_ai_agent_schedule.services.agent_steps`` zodat Mistral, Loes
+    en Claude precies dezelfde vaste regels sturen. Lui geïmporteerd en
+    best-effort: draait deze provider zonder die module, dan is er
+    simpelweg geen voortgangsregel.
+    """
+    try:
+        from odoo.addons.daadit_ai_agent_schedule.services import agent_steps
+        return agent_steps
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _turn_id():
+    """Het uuid van de lopende top-level beurt, gedeeld met de
+    usage-/run-administratie zodat live-stappen en achteraf-rapport
+    hetzelfde id dragen. Sub-runs erven het via de threadlocal."""
+    try:
+        return getattr(tool_dispatch.router_state, "turn_uuid", None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_SMALLTALK_OPENERS = (
+    "hoi", "hallo", "hai", "hey", "hi", "yo", "dag", "goedemorgen",
+    "goedemiddag", "goedenavond", "goeiemorgen", "hee",
+)
+_SMALLTALK_PHRASES = (
+    "hoe gaat het", "hoe is het", "alles goed", "hoe gaat ie",
+    "bedankt", "dank je", "dankje", "dank u", "thanks", "top",
+    "goed bezig", "fijne dag", "tot morgen", "welterusten",
+)
+
+
+def _is_smalltalk(conversation):
+    """True when the user's last message is a greeting or a pleasantry.
+
+    Used to skip the forced tool call on the first turn. Kept
+    deliberately narrow: short message AND a recognised opener or
+    phrase. A long message that happens to start with "hoi" is a real
+    question with a polite opening, not small talk.
+    """
+    tekst = ""
+    for m in reversed(conversation or []):
+        if isinstance(m, dict) and m.get("role") == "user":
+            tekst = str(m.get("content") or "").strip().lower()
+            break
+    if not tekst or len(tekst) > 60:
+        return False
+    if any(p in tekst for p in _SMALLTALK_PHRASES):
+        return True
+    woorden = [w.strip(".,!?;:") for w in tekst.split()]
+    return bool(woorden) and woorden[0] in _SMALLTALK_OPENERS
+
+
+def _step_text(tc):
+    """Vaste, PII-vrije NL-regel voor een op handen zijnde tool-aanroep.
+
+    Dunne wrapper om de gedeelde labelset zodat elke provider dezelfde
+    tekst stuurt. Valt de gedeelde module weg, dan een neutrale regel.
+    """
+    steps = _agent_steps()
+    if steps is None:
+        return "Ik voer een actie uit"
+    return steps.label_for_tool_call(tc)
+
+
+def _safe_name(raw):
+    """Alleen een naam-achtige token doorlaten (via de gedeelde vangrail)."""
+    steps = _agent_steps()
+    return steps.safe_agent_name(raw) if steps is not None else ""
+
+
+def _notify_step(agent, text, depth=0, kind="think", done=False):
+    """Push one thinking step to the chatting user, immediately.
+
+    Dunne wrapper om de gedeelde ``agent_steps.emit`` (labels + bus wonen
+    sinds v19.0.6.17.0 in ``daadit_ai_agent_schedule``). Best-effort: een
+    fout hier mag nooit een chatbeurt breken.
+    """
+    steps = _agent_steps()
+    if steps is None:
+        return
+    steps.emit(agent, text, turn_id=_turn_id(), depth=depth, kind=kind,
+               done=done)
+
+
+def _colleagues_allowed_for_model(agent, model_name):
+    """Return active agents whose own scope permits ``model_name``.
+
+    Used to turn a scope denial into a routing instruction. An agent
+    qualifies when the model is not on its block list AND either its
+    allow list is empty (= unrestricted) or contains the model.
+
+    Ordered so that a *restricted* agent that explicitly lists the model
+    comes first: an agent configured for exactly this model is a better
+    owner than an unrestricted generalist that merely happens to be
+    allowed everything.
+    """
+    if not agent or not model_name:
+        return []
+    try:
+        Agent = agent.env["ai.agent"].sudo()
+        specific = []
+        generic = []
+        for cand in Agent.search([]):
+            if cand.id == agent.id:
+                continue
+            blocked = set(cand.daadit_blocked_model_ids.mapped("model"))
+            if model_name in blocked:
+                continue
+            allowed = set(cand.daadit_allowed_model_ids.mapped("model"))
+            if model_name in allowed:
+                specific.append(cand)
+            elif not allowed:
+                generic.append(cand)
+        return specific + generic
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.llm_api_patch: could not determine which "
+            "colleagues may query %s", model_name,
+        )
+        return []
+
+
+def _scope_redirect_result(agent, denial, colleagues):
+    """Build the tool result that replaces a scope denial at depth 0.
+
+    Deliberately contains NO polished, user-presentable prose. The old
+    behaviour ended the turn and printed "🔒 Access blocked by your
+    administrator" straight to the user; the concierge's instruction to
+    route instead was unreachable, because the loop had already broken.
+    Now the model gets a machine instruction and nothing worth pasting.
+    """
+    namen = [c.name for c in colleagues[:3] if c.name]
+    eerste = namen[0] if namen else ""
+    return {
+        "ok": False,
+        "error": "OUT_OF_SCOPE",
+        "model": denial.get("model_name") or "?",
+        "route_to": eerste,
+        "route_alternatives": namen[1:],
+        "instruction": (
+            "Dit model valt buiten jouw bereik, maar wel binnen dat van "
+            "een collega. Dit is GEEN eindantwoord en GEEN fout van de "
+            "gebruiker: toon deze melding niet en vraag ook niet om "
+            "rechten. Roep nu ir_actions_server_ask_agent aan met "
+            "agent_name='%s' en question = de volledige oorspronkelijke "
+            "vraag, inclusief alle context. Geef daarna het antwoord van "
+            "die collega door." % (eerste or "de juiste specialist")
+        ),
+    }
 
 
 # A language reference shorter than this carries no reliable language
@@ -794,7 +1060,9 @@ def _translate_to_chat_language(client, model, ref_messages, text):
         and isinstance(m.get("content"), str)
         and m.get("content").strip()
     ]
-    usable = [t for t in user_texts if _letter_count(t) >= MIN_LANG_REF_LETTERS]
+    usable = [
+        t for t in user_texts if _letter_count(t) >= MIN_LANG_REF_LETTERS
+    ]
     if not usable:
         return text
     last_user = "\n\n".join(usable[-3:])[-800:]
@@ -816,7 +1084,7 @@ def _translate_to_chat_language(client, model, ref_messages, text):
             "role": "user",
             "content": (
                 f"Reference text (target language):\n"
-                f"---\n{last_user}\n---\n\n"
+                f"---\n{last_user[:800]}\n---\n\n"
                 f"Translate this:\n{text}"
             ),
         },
@@ -1121,11 +1389,12 @@ def _record_resolution_diagnostics(api_self, request_kwargs, resolved_via):
         pass
 
 
-# Why this exists: prod chats keep ending in a question the agent could
-# have answered itself. Observed 2026-07-27: the blog tool RETURNED the
-# list of two blogs, and the agent relayed "which blog should I use?" to
-# the user instead of picking one. Every such turn costs a full extra
-# round-trip and, worse, makes the colleague feel useless.
+# Waarom dit bestaat: gesprekken eindigen in een vraag die de collega
+# zelf had kunnen beantwoorden. Waargenomen 27-07: de blog-tool gáf de
+# lijst van twee blogs terug, waarna de agent "welke blog zal ik
+# gebruiken?" doorspeelde naar de gebruiker. Zo'n beurt kost een volle
+# extra ronde en laat de collega nutteloos aanvoelen — precies het
+# tegenovergestelde van een medewerker die je werk uit handen neemt.
 _SELF_SERVICE_INSTRUCTION = (
     "CRITICAL — DECIDE, DON'T ASK: You have tools that read this Odoo "
     "database. Never ask the user for anything you can look up, and "
@@ -1263,6 +1532,143 @@ def _inject_runtime_context(conversation):
             out.append(m)
     if not injected:
         out.insert(0, {"role": "system", "content": instruction})
+    return out
+
+
+def _answer_looks_degenerate(text):
+    """True when a routed answer shows the classic runaway-generation
+    pattern and must NOT be relayed verbatim to the user.
+
+    Added in 19.0.6.5.5 after a live incident: a specialist asked to do
+    something outside its scope refused correctly, then kept appending
+    "Einde. ❌✅🛑🚀" variations until it hit its 4000-token cap. Before
+    the pass-through (19.0.6.5.4) the concierge re-generated the answer
+    and silently absorbed that noise; relaying verbatim removed that
+    accidental filter. This restores it as an explicit one — on a hit we
+    fall back to the normal path so the concierge summarises instead.
+
+    Three independent signals, any of which is enough:
+
+    * length — a chat answer beyond ~6000 chars is not a chat answer;
+    * line repetition — fewer than 40% distinct non-empty lines over a
+      reasonable number of lines means the model is looping;
+    * tail repetition — the same short fragment repeated many times in
+      the last stretch, which catches loops that vary just enough to
+      keep lines "distinct".
+    """
+    if not text:
+        return False
+    if len(text) > 6000:
+        return True
+
+    lines = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped:
+            lines.append(stripped)
+    if len(lines) >= 12:
+        distinct = len(set(lines))
+        if distinct * 100 < len(lines) * 40:
+            return True
+
+    tail = text[-1500:]
+    for marker in ("Einde", "EINDE", "---", "Tot ziens", "Final Answer"):
+        if tail.count(marker) >= 6:
+            return True
+    return False
+
+
+# Het ruwe resultaat van een specialist-subrun: een JSON-object met een
+# ``answer``/``ok``-veld én een ``error``-veld. Beide velden moeten er
+# staan — een antwoord dat zélf over JSON gaat ("stuur {"answer": …}")
+# heeft die tweede helft niet en blijft dus heel.
+_LEAK_JSON_RE = re.compile(r"\{\s*\"(?:answer|ok)\"\s*:")
+_LEAK_JSON_CONFIRM_RE = re.compile(r"\"error\"\s*:")
+# De staart van de interne opdrachtlijst, direct gevolgd door de naam
+# van de collega aan wie werd gedelegeerd: ``]]   -   Pim <deelvraag>``.
+_LEAK_DELEGATION_RE = re.compile(r"\]\]\s*-+\s*[A-Z][a-z]+\b")
+# Tekens waar een doorgeslagen generatie in blijft hangen. Een echte
+# tekst gebruikt deze nooit tientallen keren achter elkaar.
+_RUNAWAY_RE = re.compile(r"[>\-*=._~#·]{40,}")
+_EMPTY_AFTER_STRIP = (
+    "Er ging iets mis bij het opstellen van dit antwoord. "
+    "Stel je vraag opnieuw."
+)
+
+
+def _strip_runaway_and_leaks(text):
+    """Snij een doorgeslagen staart en een gelekt tool-resultaat van een
+    antwoord af.
+
+    Twee dingen die de gebruiker nooit mag zien, en die tot 3-8-2026
+    beide in één chatbericht van de concierge stonden:
+
+    * **Het interne verkeer.** Het model zette de deelvraag die het aan
+      een specialist stelde, plus het ruwe JSON-resultaat
+      (``{"answer": …, "error": null}``), letterlijk in zijn eigen
+      antwoordtekst. Dat is geen antwoord maar de binnenkant van het
+      systeem, en het spreekt bovendien de tekst erboven tegen.
+    * **De doorgeslagen staart.** Daarna liep de generatie vast in een
+      lus van ``>``- en ``-``-tekens tot het tokenplafond.
+
+    ``_answer_looks_degenerate`` ving dit al af voor het *doorgegeven*
+    antwoord van een specialist, maar niet voor de eigen tekst van de
+    agent — precies het geval dat live misging. Deze functie snijdt in
+    plaats van te verwerpen: wat vóór de rommel staat is bruikbaar en
+    blijft staan.
+
+    Returns ``(schone_tekst, is_gesnoeid)``.
+    """
+    if not isinstance(text, str) or not text:
+        return text, False
+    original = text.rstrip()
+
+    cut = len(text)
+    json_hit = _LEAK_JSON_RE.search(text)
+    if json_hit and _LEAK_JSON_CONFIRM_RE.search(text, json_hit.end()):
+        cut = json_hit.start()
+    delegation_hit = _LEAK_DELEGATION_RE.search(text)
+    if delegation_hit and delegation_hit.start() < cut:
+        cut = delegation_hit.start()
+    runaway_hit = _RUNAWAY_RE.search(text)
+    if runaway_hit and runaway_hit.start() < cut:
+        cut = runaway_hit.start()
+    text = text[:cut]
+
+    # Losse resten van de afgesneden blokken: de sluithaken van de
+    # interne opdrachtlijst en een reeks scheidingsregels.
+    text = re.sub(r"\s*\]\]\s*-*\s*\Z", "", text)
+    text = re.sub(r"(?:\n\s*(?:-+|>+|=+|Einde bericht\.?)\s*)+\Z", "", text)
+    text = text.rstrip()
+    return text, text != original
+
+
+def _clean_adapted(adapted, where):
+    """Pas :func:`_strip_runaway_and_leaks` toe op wat de gebruiker te
+    zien krijgt. Werkt zowel op losse strings als op
+    ``{role, content}``-dicts, omdat beide vormen door deze module
+    heen lopen. Blijft er na het snijden niets over, dan komt er een
+    korte melding in plaats van een leeg bericht."""
+    out = []
+    for item in adapted or []:
+        if isinstance(item, str):
+            cleaned, trimmed = _strip_runaway_and_leaks(item)
+            cleaned = cleaned or (_EMPTY_AFTER_STRIP if trimmed else cleaned)
+        elif isinstance(item, dict) and isinstance(item.get("content"), str):
+            cleaned_text, trimmed = _strip_runaway_and_leaks(item["content"])
+            if trimmed and not cleaned_text:
+                cleaned_text = _EMPTY_AFTER_STRIP
+            cleaned = dict(item, content=cleaned_text)
+        else:
+            out.append(item)
+            continue
+        if trimmed:
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: antwoord gesnoeid (%s) — "
+                "gelekt tool-resultaat en/of doorgeslagen staart verwijderd",
+                where,
+            )
+        out.append(cleaned)
     return out
 
 
@@ -1454,26 +1860,16 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             kk=str(list(kwargs.keys())),
         ))
 
-    # ---- Tool-execution loop ----------------------------------------
-    # Run a bounded loop:
-    #   call → if tool_calls, run each on the agent and feed back as
-    #   ``role: tool`` messages → call again. Stop when the model
-    #   returns a final text response OR we hit ``MAX_ITER``.
-    _had_threadlocal = bool(getattr(tool_dispatch.current_agent, "record", None))
-    agent = _resolve_agent(api_self, request_kwargs=kwargs)
-
     # ---- Build proper tool definitions ------------------------------
     # If stock sent us a list of tool name strings, use the JSON-schema
     # definitions from ``tool_dispatch.TOOL_SCHEMAS`` for the standard
     # ten AI tools (Search / Read group / Get Fields / Open Menu *).
-    # Operator-made tools (``action_<id>``) are annotated from their own
-    # ``ai_tool_schema``, which is why ``agent`` has to be resolved
-    # first. For anything else (already-shaped dicts, etc.), fall back
-    # to the generic _normalize_tools converter from earlier versions.
+    # For anything else (already-shaped dicts, etc.), fall back to the
+    # generic _normalize_tools converter from earlier versions.
     normalized_tools = None
     if tools:
         if isinstance(tools, (list, tuple)) and all(isinstance(t, str) for t in tools):
-            normalized_tools = tool_dispatch.annotate_tools(tools, agent=agent)
+            normalized_tools = tool_dispatch.annotate_tools(tools)
         else:
             normalized_tools = _normalize_tools(tools)
         if not normalized_tools:
@@ -1484,6 +1880,14 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 type(tools).__name__,
                 _safe_repr(tools, limit=400),
             )
+
+    # ---- Tool-execution loop ----------------------------------------
+    # Run a bounded loop:
+    #   call → if tool_calls, run each on the agent and feed back as
+    #   ``role: tool`` messages → call again. Stop when the model
+    #   returns a final text response OR we hit ``MAX_ITER``.
+    _had_threadlocal = bool(getattr(tool_dispatch.current_agent, "record", None))
+    agent = _resolve_agent(api_self, request_kwargs=kwargs)
 
     # ---- Reconstruct tools from agent topics (v19.0.4.1.5) ----------
     # On the standalone AI chat-panel path the Enterprise controller
@@ -1500,7 +1904,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             # list explicitly (v19.0.4.2.1) — otherwise a sub-run with an
             # empty explicit tool list silently regains the router tool
             # and every write-side tool via this path.
-            _in_subrun = _router_depth > 0
+            _in_subrun = _router_depth > 0  # noqa: F821  (closure over _router_depth)
             names = []
             for action in agent.sudo().topic_ids.tool_ids:
                 if action.model_id and action.model_id.model == "ai.agent":
@@ -1514,9 +1918,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                         continue
                     names.append(slug)
             if names:
-                normalized_tools = tool_dispatch.annotate_tools(
-                    names, agent=agent,
-                )
+                normalized_tools = tool_dispatch.annotate_tools(names)
                 _logger.info(
                     "daadit_ai_mistral.llm_api_patch: caller passed no "
                     "tools — injected %d tool defs from agent %s topics "
@@ -1652,6 +2054,11 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         tool_dispatch.router_state.calls = 0
         tool_dispatch.router_state.exhausted = False
         tool_dispatch.router_state.sub_failed = False
+        # Models this turn was refused on policy grounds. Read by the
+        # router to refuse a hop to a colleague who may not read them
+        # either; reset here so a refusal from a previous turn on this
+        # worker thread never blocks a legitimate delegation.
+        tool_dispatch.router_state.denied_models = set()
         # v19.0.4.4.0: top_level_exhausted is read by
         # ``daadit_ai_agent_schedule`` after ``request_llm`` returns to
         # decide whether a scheduled run should be marked 'done' or
@@ -1673,7 +2080,11 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     deadline_break = False
     response = None
     access_denial = None  # set when a tool call is denied by admin policy
-    # v19.0.7.3.0: concierge pass-through. When the TOP-LEVEL agent
+    # v19.0.6.8.0: how many times this turn we turned a scope denial into
+    # a routing instruction instead of ending the turn. Capped so a model
+    # that keeps reaching for out-of-scope models can't loop.
+    scope_redirects = 0
+    # v19.0.6.5.4: concierge pass-through. When the TOP-LEVEL agent
     # routes a question via the router tool and the specialist returns a
     # real answer, that answer is relayed verbatim (with attribution)
     # instead of feeding it back to the model for one more full
@@ -1715,35 +2126,35 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             "failing open"
         )
 
-    # --- Per-agent / per-tenant budget + fair use (v19.0.7.0.0) ------
-    # The ICP cap above protects the database; a ``daadit.ai.budget``
-    # line protects the margin on ONE agent or ONE customer, counting
-    # spend across every installed provider. Warn in-chat from the
-    # threshold, refuse at 100%. Fail-open, like the cap.
+    # --- Fair use per collega ----------------------------------------
+    # De systeemcap hierboven is een noodrem voor de hele database; deze
+    # gate is de commerciële grens van één AI-collega. Boven de
+    # drempel hoort de klant het te weten, en op 100% mag de collega nog
+    # wel meedenken maar niets meer doen: één goedkope completion in
+    # plaats van een toolketen, en de klant hoort waaróm. Alles dicht
+    # gooien voelt als een storing en levert een supportgesprek op.
     fair_use_notice = ""
     try:
-        blocked, budget_msg, detail = api_self.env[
-            "daadit.ai.budget"].sudo().evaluate(agent=agent)
-        if blocked:
+        from . import cost_cap as _cc
+        _budget = _cc.agent_state(api_self.env, agent)
+        fair_use_notice = _cc.fair_use_notice_en(_budget)
+        if _cc.should_drop_tools(_budget):
             _logger.warning(
-                "daadit_ai_mistral.llm_api_patch: budget exhausted "
-                "(%s) — refusing call for agent=%s",
-                detail, agent.id if agent else None,
+                "daadit_ai_mistral.llm_api_patch: budget bereikt voor "
+                "agent=%s (%.0f%% van %.2f EUR) — tools uitgeschakeld "
+                "voor deze beurt",
+                agent.id if agent else None,
+                (_budget or {}).get("ratio", 0.0) * 100,
+                (_budget or {}).get("cap", 0.0),
             )
-            return [_translate_to_chat_language(
-                client, model, conversation, budget_msg,
-            )]
-        if budget_msg:
-            _logger.info(
-                "daadit_ai_mistral.llm_api_patch: fair-use notice (%s)",
-                detail,
-            )
-            fair_use_notice = budget_msg
+            normalized_tools = None
+            tool_choice = None
     except Exception:  # noqa: BLE001
         _logger.exception(
-            "daadit_ai_mistral.llm_api_patch: budget gate raised; "
+            "daadit_ai_mistral.llm_api_patch: fair-use gate raised; "
             "failing open"
         )
+        fair_use_notice = ""
 
     try:
         _ch = api_self.env.context.get("discuss_channel")
@@ -1828,11 +2239,19 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         # Mistral MUST call one of the provided tools. Later iterations
         # fall back to 'auto' (active_tool_choice stays as-is) so the
         # model can produce the final text answer after seeing results.
+        #
+        # v19.0.6.10.1: behalve bij een begroeting. Forceren betekent dat
+        # het model MOET grijpen naar een tool, ook als er niets op te
+        # zoeken valt. Op "Hi Robin, hoe gaat het" pakte de concierge dan
+        # noodgedwongen de router, kreeg een merk-en-toon-verhandeling
+        # terug van Maud, en gaf dat door als antwoord op een begroeting.
+        # Bij small talk is 'auto' het juiste gedrag: gewoon antwoorden.
         if (
             iteration == 0
             and active_tools
             and not chat_extra
             and active_tool_choice in (None, "auto")
+            and not _is_smalltalk(conversation)
         ):
             active_tool_choice = "any"
             _logger.info(
@@ -1840,6 +2259,21 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 "on first turn (%d tools) to prevent narrate-and-ask",
                 len(active_tools),
             )
+
+        # v19.0.6.10.0: de langste stilte zit NIET bij de tool-aanroepen
+        # maar hiervoor — het wachten op het antwoord van het model zelf.
+        # Bij een vraag zonder tools (een begroeting bijvoorbeeld) is dat
+        # de hele wachttijd, en dan bleef de gebruiker alsnog naar "AI is
+        # thinking" kijken. Meld dus ook deze ronde, vóór de round-trip.
+        # v19.0.6.17.0: ook binnen een doorgerouteerde sub-run (depth > 0)
+        # — de frontend springt die stappen in onder de hoofdstap, zodat
+        # zichtbaar is dat de collega aan het werk is.
+        _notify_step(
+            agent,
+            "Ik kijk ernaar" if iteration == 0
+            else "Ik verwerk wat ik heb opgehaald",
+            depth=_router_depth,
+        )
 
         response = client.chat_completion(
             model=model,
@@ -1866,10 +2300,21 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         })
 
         for tc in tool_calls:
+            # v19.0.6.9.0: tell the user what is happening while it
+            # happens. "AI is thinking..." for forty seconds reads as a
+            # hang; "Ik leg dit voor aan Sem" reads as work.
+            # v19.0.6.17.0: nu op elke diepte, met ``depth`` mee zodat de
+            # frontend sub-run-stappen ingesprongen onder de hoofdstap
+            # toont in plaats van ze te verbergen.
+            _notify_step(agent, _step_text(tc), depth=_router_depth,
+                         kind="tool")
+            # Zonder de gedeelde stappenmodule komt er niets in beeld;
+            # dan blijft de losse kanaalmelding de enige terugkoppeling
+            # tijdens een delegatie.
             if (
-                _router_depth == 0
+                _agent_steps() is None
+                and _router_depth == 0
                 and _status_channel_id
-                and agent is not None
                 and (tc.get("function") or {}).get("name")
                     == tool_dispatch.ROUTER_TOOL_SLUG
             ):
@@ -1879,7 +2324,28 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                         _delegate_target_name(tc)
                     ),
                 )
+
             result = tool_dispatch.run_tool_call(agent, tc)
+
+            # A routed answer is the slowest step of all, so close it
+            # off explicitly rather than leaving the last line hanging.
+            if (
+                (tc.get("function") or {}).get("name")
+                == tool_dispatch.ROUTER_TOOL_SLUG
+                and isinstance(result, dict)
+            ):
+                _wie = _safe_name(result.get("agent"))
+                if result.get("ok"):
+                    _notify_step(
+                        agent,
+                        ("%s heeft geantwoord, ik verwerk het" % _wie)
+                        if _wie
+                        else "De collega heeft geantwoord, ik verwerk het",
+                        depth=_router_depth, kind="route",
+                    )
+                elif result.get("error"):
+                    _notify_step(agent, "Dat lukte niet, ik probeer het anders",
+                                 depth=_router_depth, kind="route")
 
             # v19.0.4.4.0: Fase 0 governance — tally hallucinated tool
             # names. Two "Unknown tool: ..." errors in a single turn
@@ -1898,10 +2364,50 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             # it tends to mis-paraphrase admin-policy denials as
             # "I made a mistake" recoveries (observed on staging).
             if isinstance(result, dict) and result.get("_daadit_access_denied"):
-                access_denial = result
-                break
+                # v19.0.6.8.0: at depth 0, a denial is not the end of the
+                # road — it usually means the work belongs to a colleague.
+                # The concierge's own instruction already said "route
+                # instead of showing the block", but that rule could never
+                # fire: this break ended the turn before he could act, and
+                # the formatted denial went straight to the user. Robin
+                # kept pasting "🔒 Toegang geblokkeerd" for models Sem is
+                # perfectly allowed to read.
+                #
+                # So the redirect happens here, in code, not in a prompt.
+                _denied_model = result.get("model_name")
+                _colleagues = []
+                _can_route = False
+                try:
+                    _can_route = _router_depth == 0 and any(
+                        (t.get("function") or {}).get("name")
+                        == tool_dispatch.ROUTER_TOOL_SLUG
+                        for t in (active_tools or [])
+                    )
+                except Exception:  # noqa: BLE001
+                    _can_route = False
+                if _can_route and scope_redirects < 2:
+                    _colleagues = _colleagues_allowed_for_model(
+                        agent, _denied_model
+                    )
+                if _colleagues:
+                    scope_redirects += 1
+                    _logger.info(
+                        "daadit_ai_mistral.llm_api_patch: scope denial on "
+                        "%s rewritten as a routing instruction to %s "
+                        "(redirect %d of 2)",
+                        _denied_model, _colleagues[0].name, scope_redirects,
+                    )
+                    result = _scope_redirect_result(
+                        agent, result, _colleagues
+                    )
+                    # Fall through: the instruction is appended as a normal
+                    # tool result and the loop continues, so the model can
+                    # actually make the routing call.
+                else:
+                    access_denial = result
+                    break
 
-            # v19.0.7.3.0: concierge pass-through (see init above).
+            # v19.0.6.5.4: concierge pass-through (see init above).
             # Conditions: top-level turn, feature on, the ONLY tool call
             # of this assistant message, it is the router tool, and it
             # returned a real specialist answer.
@@ -1911,19 +2417,31 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 and _passthrough_enabled
                 and len(tool_calls) == 1
                 and (tc.get("function") or {}).get("name")
-                    == tool_dispatch.ROUTER_TOOL_SLUG
+                == tool_dispatch.ROUTER_TOOL_SLUG
                 and isinstance(result, dict)
                 and result.get("ok")
                 and str(result.get("answer") or "").strip()
             ):
-                router_passthrough = result
-                break
+                if _answer_looks_degenerate(result.get("answer")):
+                    # Runaway specialist answer: do NOT relay it. Fall
+                    # through to the normal path so the concierge
+                    # summarises and the user gets something readable.
+                    _logger.warning(
+                        "daadit_ai_mistral.llm_api_patch: pass-through "
+                        "SKIPPED for specialist=%s — answer looks "
+                        "degenerate (%d chars); falling back to "
+                        "concierge summary",
+                        result.get("agent") or "?",
+                        len(str(result.get("answer") or "")),
+                    )
+                else:
+                    router_passthrough = result
+                    break
 
             try:
                 content = json.dumps(result, default=str)
             except Exception:  # noqa: BLE001
                 content = str(result)
-            content = _cap_tool_result(api_self.env, content)
             conversation.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id"),
@@ -1968,18 +2486,36 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         # were a real specialist answer. Only meaningful inside a
         # routed sub-run (depth > 0).
         try:
-            if getattr(tool_dispatch.router_state, "depth", 0) > 0:
+            _bail_depth = getattr(tool_dispatch.router_state, "depth", 0)
+        except Exception:  # noqa: BLE001
+            _bail_depth = 0
+        try:
+            if _bail_depth > 0:
                 tool_dispatch.router_state.exhausted = True
         except Exception:  # noqa: BLE001
             pass
         # v19.0.4.4.0: top-level flag read by the schedule module.
         # Namespaced separately from ``exhausted`` (sub-run only) so
         # each caller can inspect its own state without interference.
-        try:
-            tool_dispatch.router_state.top_level_exhausted = True
-            tool_dispatch.router_state.exhaustion_reason = bail_reason
-        except Exception:  # noqa: BLE001
-            pass
+        #
+        # v19.0.6.5.6: only a DEPTH-0 bail may set it. Before this the
+        # assignment was unconditional, so a sub-run hitting its
+        # (deliberately tighter) budget wrote the TOP-LEVEL flag on the
+        # shared threadlocal. ``daadit_ai_agent_schedule`` reads that
+        # flag after ``request_llm`` returns and marked the whole
+        # scheduled run 'error' — even when the parent finished and
+        # produced a complete report. Three in a row tripped the
+        # circuit breaker, which is what silently disabled Eva's
+        # monthly report (schedule 37) on 29-07-2026 and would hit any
+        # delegating agent. The parent still learns a sub-run failed
+        # via ``sub_failed``, which ``_ai_tool_ask_agent`` saves and
+        # restores around every sub-run.
+        if _bail_depth == 0:
+            try:
+                tool_dispatch.router_state.top_level_exhausted = True
+                tool_dispatch.router_state.exhaustion_reason = bail_reason
+            except Exception:  # noqa: BLE001
+                pass
         if bail_reason == "deadline":
             en_message = (
                 "This run reached its hard time budget before the "
@@ -2033,63 +2569,37 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
 
-    # If the loop short-circuited on admin-policy denial, automatically
-    # route the question once to a capable Mistral agent when possible.
-    # Routed sub-runs must not route again; they fall through to denial.
+    # If the loop short-circuited on admin-policy denial, format the
+    # user-facing message NOW and bypass Mistral's interpretation
+    # entirely. Mistral never sees the denial; the user gets a clear
+    # statement of what's blocked and by whom — translated into the
+    # language of the conversation (overrides env.user.lang).
     if access_denial:
-        model_name = access_denial.get("model_name")
-        routed = False
-        en_message = ""
-        if (
-            agent
-            and model_name
-            and getattr(tool_dispatch.router_state, "depth", 0) == 0
-        ):
-            try:
-                delegate = agent._daadit_find_delegate_for_model(model_name)
-            except Exception:  # noqa: BLE001
-                delegate = False
-            user_question = _last_user_message_text(conversation)
-            if delegate and user_question:
-                if _status_channel_id:
-                    agent._daadit_post_channel_status(
-                        _status_channel_id,
-                        agent._daadit_delegation_status_body(delegate.name),
-                    )
-                try:
-                    routed_result = agent._ai_tool_ask_agent(
-                        agent_name=delegate.name,
-                        question=user_question,
-                    )
-                except Exception:  # noqa: BLE001
-                    routed_result = {"error": "Automatic routing failed."}
-                if (
-                    isinstance(routed_result, dict)
-                    and not routed_result.get("error")
-                    and routed_result.get("answer")
-                ):
-                    en_message = (
-                        f"{str(routed_result['answer']).strip()}\n\n"
-                        f"_Automatically forwarded to {delegate.name}, "
-                        f"who has access to `{model_name}`._"
-                    )
-                    routed = True
-
-        if not routed:
-            en_message = _format_access_denied_message(access_denial)
-            en_message += (
-                "\n\nNo other AI agent has access to this model either — "
-                "please hand this to a human colleague."
-            )
+        en_message = _format_access_denied_message(access_denial)
         translated = _translate_to_chat_language(
             client, model, conversation, en_message,
         )
         adapted = [translated]
         _logger.info(
-            "daadit_ai_mistral.llm_api_patch: chat ended after "
-            "admin-policy denial (routed=%s) — model=%s requested=%s",
-            routed, model, model_name,
+            "daadit_ai_mistral.llm_api_patch: chat short-circuited "
+            "by admin-policy denial — model=%s requested=%s",
+            model, access_denial.get("model_name"),
         )
+        # Inside a routed sub-run, a policy denial is NOT an answer.
+        # Left unflagged, ``_ai_tool_ask_agent`` relays "🔒 Access
+        # blocked by your administrator" as ``{'ok': True, 'answer': …}``
+        # and the delegating manager treats it as a delivered result —
+        # Eva's monthly report (run 463) then invented the figures Bram
+        # and Sanne never produced. Flag it so the router returns an
+        # error that names the blocked model instead.
+        try:
+            if getattr(tool_dispatch.router_state, "depth", 0) > 0:
+                tool_dispatch.router_state.sub_failed = True
+                tool_dispatch.router_state.sub_denied_model = (
+                    access_denial.get("model_name") or ""
+                )
+        except Exception:  # noqa: BLE001
+            pass
         # Token-usage from the truncated call is still worth recording.
         try:
             ch = api_self.env.context.get("discuss_channel")
@@ -2104,10 +2614,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 completion_tokens=usage.get("completion_tokens") or 0,
                 iterations=iteration + 1,
                 has_tools=bool(normalized_tools),
-                error=(
-                    None if routed
-                    else f"Access denied: {access_denial.get('model_name')}"
-                ),
+                error=f"Access denied: {access_denial.get('model_name')}",
                 depth=_router_depth,
                 turn_uuid=getattr(
                     tool_dispatch.router_state, "turn_uuid", None,
@@ -2120,13 +2627,20 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             )
         return adapted
 
-    # v19.0.7.3.0: concierge pass-through — relay the routed specialist's
+    # v19.0.6.5.4: concierge pass-through — relay the routed specialist's
     # answer verbatim and skip the final paraphrasing generation.
     if router_passthrough:
         _pt_answer = str(router_passthrough.get("answer") or "").strip()
+        _pt_answer, _pt_trimmed = _strip_runaway_and_leaks(_pt_answer)
+        if _pt_trimmed:
+            _logger.warning(
+                "daadit_ai_mistral.llm_api_patch: doorgegeven antwoord van "
+                "%s gesnoeid v\u00f3\u00f3r verzending",
+                router_passthrough.get("agent") or "?",
+            )
+            _pt_answer = _pt_answer or _EMPTY_AFTER_STRIP
         _pt_agent = router_passthrough.get("agent") or "?"
         _via = agent.name if agent is not None else "concierge"
-        # Language-neutral attribution footer: no extra LLM call.
         adapted = ["%s\n\n— %s · via %s" % (_pt_answer, _pt_agent, _via)]
         _logger.info(
             "daadit_ai_mistral.llm_api_patch: router pass-through "
@@ -2159,6 +2673,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         return adapted
 
     adapted = _adapt_response_to_text_messages(response)
+    # De eigen tekst van de agent gaat door dezelfde zeef als een
+    # doorgegeven antwoord: intern verkeer en een doorgeslagen staart
+    # horen niet in de chat.
+    adapted = _clean_adapted(adapted, "eindantwoord")
     _logger.info(
         "daadit_ai_mistral.llm_api_patch: Mistral chat ok "
         "(model=%s iterations=%d tokens=%s/%s text_chunks=%d "
@@ -2229,58 +2747,29 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 client, model, conversation, fallback_en,
             )
         ]
-
-    # Fair-use notice rides along with the answer, but never inside a
-    # structured (AI Fields / JSON-schema) response — that has to stay
-    # parseable — and never inside a sub-run, whose text is consumed by
-    # the routing agent rather than shown to the user.
-    if fair_use_notice and adapted and not response_format_extra:
-        if not getattr(tool_dispatch.router_state, "depth", 0):
-            adapted.append(_translate_to_chat_language(
+    # Fair use bovenaan het antwoord, niet als losse melding: een aparte
+    # systeemregel leest als een storing, terwijl dit gewoon bij het
+    # antwoord hoort. Eén regel, in de taal van het gesprek.
+    if fair_use_notice:
+        try:
+            line = _translate_to_chat_language(
                 client, model, conversation, fair_use_notice,
-            ))
+            )
+            text = line.get("content") if isinstance(line, dict) else ""
+            if text and adapted and isinstance(adapted[0], dict):
+                adapted[0]["content"] = "_%s_\n\n%s" % (
+                    text.strip().strip("_"),
+                    adapted[0].get("content") or "",
+                )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.llm_api_patch: kon de fair-use-regel "
+                "niet toevoegen; antwoord gaat ongewijzigd door"
+            )
     return adapted
 
 
 _FIRST_CALL_LOGGED = False
-
-
-_DEFAULT_MAX_TOOL_RESULT_CHARS = 6000
-
-
-def _cap_tool_result(env, content):
-    """Bound the size of one tool result before it enters the context.
-
-    A tool result stays in the conversation for every following
-    round-trip, so an unbounded ``search`` of 80 full records is paid
-    for again on each iteration — the single biggest cost driver in
-    long tool loops. Truncate with an instruction the model can act on
-    (narrow the domain / ask for fewer fields) instead of silently
-    feeding it half a record.
-
-    Tunable via ``daadit_ai_mistral.max_tool_result_chars``; 0 disables.
-    """
-    try:
-        raw = env["ir.config_parameter"].sudo().get_param(
-            "daadit_ai_mistral.max_tool_result_chars",
-            _DEFAULT_MAX_TOOL_RESULT_CHARS,
-        )
-        limit = int(raw)
-    except Exception:  # noqa: BLE001
-        limit = _DEFAULT_MAX_TOOL_RESULT_CHARS
-    if limit <= 0 or not isinstance(content, str) or len(content) <= limit:
-        return content
-    _logger.info(
-        "daadit_ai_mistral.llm_api_patch: tool result truncated "
-        "%d → %d chars", len(content), limit,
-    )
-    return (
-        content[:limit]
-        + "\n\n[TRUNCATED: this result was %d characters; only the "
-          "first %d are shown. Do not guess the rest — narrow the "
-          "domain, request fewer fields, or aggregate with read_group.]"
-          % (len(content), limit)
-    )
 
 
 def _safe_repr(v, limit=600):

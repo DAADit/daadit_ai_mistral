@@ -7,6 +7,34 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.7.5.0 — 2026-08-04
+
+Consolidatie (OAS 711), portie 1 van 4: de servicelaag van de deploy-repo
+is hierheen gehaald. Deze module bestond in twee gedivergeerde lijnen en
+de lijn die in productie draait (`DAADit/daadit`) liep vóór: zichtbare
+denkstappen via de gedeelde OAS-emit-laag, het lekfilter op
+weggelopen scheidingstekens en gelekt intern verkeer, het smalltalk-pad,
+de modelfallback bij een niet-beschikbaar model (`MistralUnavailable`),
+de scope-omleiding naar een collega en het budgetsignaal per agent in
+`cost_cap`. Die stonden hier niet en bereikten productie dus nooit vanuit
+deze repo.
+
+Twee dingen uit deze lijn zijn bewust *niet* overschreven of vervallen:
+
+- de taalreferentie voor `_translate_to_chat_language` (`MIN_LANG_REF_LETTERS`,
+  `_letter_count`) is opnieuw toegepast op de nieuwe basis — een bare "?"
+  als laatste bericht liet een Nederlands gesprek in het Frans antwoorden;
+- `_cap_tool_result` en de automatische routering bij een geblokkeerde
+  lezing (`_last_user_message_text`) zijn vervallen: de deploy-lijn doet
+  hetzelfde met respectievelijk de instelbare limiet in `tool_dispatch`
+  en `_scope_redirect_result`, dat het model laat routeren in plaats van
+  Python.
+
+De live delegatiemelding uit 19.0.7.4.1 blijft bestaan, maar spreekt nu
+alleen nog als de gedeelde stappenmodule ontbreekt: staat die er wel, dan
+toont `_notify_step` dezelfde voortgang en zou het kanaalbericht een
+tweede keer hetzelfde zeggen.
+
 ## 19.0.7.4.1 — 2026-08-03
 
 Live tussenstap-berichten in de chat terwijl de concierge delegeert
