@@ -88,6 +88,8 @@ class TestActivityScope(common.TransactionCase):
         self.assertIn("geen schrijfscope", reason)
 
     def test_a_scope_without_a_domain_allows_every_record_of_that_model(self):
+        if "project.task" not in self.env:
+            self.skipTest("project.task is hier niet beschikbaar")
         pim = self.Agent.create({"name": "Pim (test)"})
         self.Scope.create({
             "agent_id": pim.id, "model_name": "project.task",
