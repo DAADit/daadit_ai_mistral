@@ -120,7 +120,9 @@ class TestOrchestratorMode(common.TransactionCase):
         Channel = self.env["discuss.channel"]
         # Some DBs lack ai_chat; create a plain channel and point the
         # action at it — the helper only needs an id it can browse.
-        channel = Channel.create({"name": "handoff-test"})
+        channel = Channel.create({
+            "name": "handoff-test", "channel_type": "channel",
+        })
         found = self.robin._daadit_channel_from_action({
             "type": "ir.actions.act_window",
             "res_model": "discuss.channel",
@@ -129,7 +131,9 @@ class TestOrchestratorMode(common.TransactionCase):
         self.assertEqual(found, channel)
 
     def test_channel_from_action_reads_context_active_id(self):
-        channel = self.env["discuss.channel"].create({"name": "handoff-ctx"})
+        channel = self.env["discuss.channel"].create({
+            "name": "handoff-ctx", "channel_type": "channel",
+        })
         found = self.robin._daadit_channel_from_action({
             "type": "ir.actions.client",
             "tag": "mail.action_discuss",
@@ -138,7 +142,9 @@ class TestOrchestratorMode(common.TransactionCase):
         self.assertEqual(found, channel)
 
     def test_channel_from_action_reads_discuss_channel_token(self):
-        channel = self.env["discuss.channel"].create({"name": "handoff-tok"})
+        channel = self.env["discuss.channel"].create({
+            "name": "handoff-tok", "channel_type": "channel",
+        })
         found = self.robin._daadit_channel_from_action({
             "type": "ir.actions.client",
             "context": {

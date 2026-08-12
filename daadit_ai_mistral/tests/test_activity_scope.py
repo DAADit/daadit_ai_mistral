@@ -25,6 +25,8 @@ class TestActivityScope(common.TransactionCase):
 
     def setUp(self):
         super().setUp()
+        if "knowledge.article" not in self.env:
+            self.skipTest("knowledge.article is hier niet beschikbaar")
         self.Agent = self.env["ai.agent"]
         self.Scope = self.env["daadit.ai.agent.activity.scope"]
         self.Article = self.env["knowledge.article"]
