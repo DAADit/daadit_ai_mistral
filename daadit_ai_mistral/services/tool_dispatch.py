@@ -860,8 +860,9 @@ TOOL_SCHEMAS = {
             "of a record (e.g. assign an unassigned helpdesk ticket to "
             "the right salesperson). Target model must have a 'user_id' "
             "many2one to res.users; assignee must be an active internal "
-            "user. Returns {'ok': true, ...} on success, {'error': '...'} "
-            "on validation failure, or {'ok': true, 'skipped': true, "
+            "user. Returns {'ok': true, 'written': true, ...} on success, "
+            "{'error': '...'} on validation failure, or "
+            "{'ok': false, 'written': false, 'skipped': true, "
             "'reason': 'already_assigned'} if the user was already set."
         ),
         "parameters": {
@@ -896,10 +897,13 @@ TOOL_SCHEMAS = {
             "activity with the same type, summary and assignee already "
             "exists on the record, no new one is created. Target model "
             "must inherit mail.activity.mixin (most business models do). "
-            "Returns {'ok': true, 'activity_id': N, ...} on success, "
-            "{'ok': true, 'skipped': true, 'reason': 'duplicate', "
-            "'existing_activity_id': N} when an equivalent activity "
-            "already exists, or {'error': '...'} on validation failure."
+            "Returns {'ok': true, 'written': true, 'activity_id': N, ...} "
+            "on success or when a rolling signal (restlijst) refreshed an "
+            "existing activity ({'updated': true}). Skips return "
+            "{'ok': false, 'written': false, 'skipped': true, "
+            "'reason': 'duplicate'|'open_activity_cap', "
+            "'existing_activity_id': N} — never treat skipped as created. "
+            "Validation failures return {'error': '...'}."
         ),
         "parameters": {
             "type": "object",
@@ -968,6 +972,20 @@ TOOL_SCHEMAS = {
                 },
             },
             "required": ["model_name", "record_id"],
+        },
+    },
+    "ir_actions_server_assurance_coverage": {
+        "description": (
+            "READ TOOL — list every daadit.ai.agent.schedule row "
+            "(active and inactive) with verified id, name, active, "
+            "agent_id and agent_name. Use this BEFORE any assurance "
+            "coverage finding. Never invent schedule ids from agent "
+            "ids; every cited schedule must appear in this list."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
         },
     },
 }

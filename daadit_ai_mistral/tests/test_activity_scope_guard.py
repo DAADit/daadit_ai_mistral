@@ -82,9 +82,14 @@ class TestActivityScopeGuard(common.TransactionCase):
         # Exact hetzelfde voorstel nog een keer levert geen tweede
         # activiteit op — anders loopt het artikel vol met duplicaten.
         again = self._plan(watchdog, summary="AUTO-APPLY blok 3")
+        self.assertFalse(again["ok"])
+        self.assertFalse(again.get("written", True))
         self.assertTrue(again["skipped"])
         self.assertEqual(again["reason"], "duplicate_autoapply")
-        self.assertEqual(again["activity_id"], result["activity_id"])
+        self.assertEqual(
+            again["existing_activity_id"], result["activity_id"],
+        )
+        self.assertNotIn("activity_id", again)
 
     def test_a_backlog_of_proposals_is_a_failure_of_the_applier(self):
         watchdog = self.Agent.create({

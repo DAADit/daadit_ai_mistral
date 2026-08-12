@@ -325,8 +325,9 @@ class AIAgent(models.Model):
 
         is_repair = (
             self.daadit_repair_channel
-            and (summary or "").strip().upper().startswith(
-                REPAIR_CHANNEL_PREFIX)
+            and self._daadit_summary_starts_with_token(
+                summary, REPAIR_CHANNEL_PREFIX,
+            )
         )
         if is_repair:
             return self._daadit_repair_channel_activity(
@@ -361,9 +362,12 @@ class AIAgent(models.Model):
         same = Act.search(base + [("summary", "=", summary)], limit=1)
         if same:
             return {
-                "ok": True, "skipped": True,
+                # Honest envelope (taak 779): skip ≠ created.
+                "ok": False,
+                "written": False,
+                "skipped": True,
                 "reason": "duplicate_autoapply",
-                "activity_id": same.id,
+                "existing_activity_id": same.id,
                 "message": _(
                     "Er staat al een openstaand AUTO-APPLY-voorstel met "
                     "exact deze samenvatting (activiteit %s). Er is niets "

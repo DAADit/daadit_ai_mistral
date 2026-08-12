@@ -1176,9 +1176,30 @@ class AIAgent(models.Model):
     _SELF_HEAL_PREFIX = "AUTO-APPLY"
 
     @classmethod
+    def _daadit_summary_starts_with_token(cls, summary, token):
+        """True when ``summary`` starts with ``token`` after junk/emoji.
+
+        Live AUTO-APPLY proposals often arrive as
+        ``⚠️ AUTO-APPLY niet toepasbaar:…``. A bare ``startswith`` misses
+        those and the open-activity cap then silently blocks the
+        self-heal channel (taak 773).
+        """
+        import re as _re
+        text = (summary or "").strip().upper()
+        if not text:
+            return False
+        needle = (token or "").strip().upper()
+        if not needle:
+            return False
+        if text.startswith(needle):
+            return True
+        cleaned = _re.sub(r"^[^0-9A-ZÀ-Ÿ]+", "", text)
+        return cleaned.startswith(needle)
+
+    @classmethod
     def _daadit_is_self_heal(cls, summary):
-        return (summary or "").strip().upper().startswith(
-            cls._SELF_HEAL_PREFIX
+        return cls._daadit_summary_starts_with_token(
+            summary, cls._SELF_HEAL_PREFIX,
         )
 
     @classmethod
@@ -1190,6 +1211,18 @@ class AIAgent(models.Model):
             token for token in cleaned.split()
             if len(token) > 1 and token not in cls._ACTIVITY_STOPWORDS
         }
+
+    @classmethod
+    def _daadit_is_rolling_signal(cls, summary):
+        """Daily rolling lists (restlijst) must refresh, not dedup-skip.
+
+        Jaccard topic-match collapses ``Restlijst assurance 2026-08-02:
+        1 onopgeloste runfout`` with today's list of six runs, so the
+        tool skipped creating/updating and the restlijst went dark for
+        days (taak 774).
+        """
+        tokens = cls._daadit_activity_tokens(summary)
+        return "restlijst" in tokens
 
     @classmethod
     def _daadit_same_activity_topic(cls, summary_a, summary_b):
@@ -1213,6 +1246,38 @@ class AIAgent(models.Model):
         union = tokens_a | tokens_b
         overlap = len(tokens_a & tokens_b) / len(union) if union else 0.0
         return overlap >= 0.5
+
+    def _daadit_refresh_activity(self, activity, summary, note, deadline):
+        """Update an open activity in place (rolling signals / cap path)."""
+        self.ensure_one()
+        vals = {
+            "summary": (summary or "").strip() or activity.summary,
+            "date_deadline": deadline or fields.Date.context_today(self),
+        }
+        if note:
+            vals["note"] = note
+        activity.write(vals)
+        return {
+            "ok": True,
+            "written": True,
+            "updated": True,
+            "reason": "updated_existing",
+            "message": (
+                "Updated the existing open activity instead of creating "
+                "a duplicate. Treat this as a successful write of the "
+                "current signal."
+            ),
+            "activity_id": activity.id,
+            "model_name": activity.res_model,
+            "record_id": activity.res_id,
+            "summary": activity.summary or "",
+            "date_deadline": (
+                activity.date_deadline.strftime("%Y-%m-%d")
+                if activity.date_deadline else ""
+            ),
+            "user_id": activity.user_id.id,
+            "user_name": activity.user_id.name,
+        }
 
     def _daadit_activity_throttle(self, assignee, model_name, record,
                                   summary):
@@ -1318,12 +1383,18 @@ class AIAgent(models.Model):
             limit, assignee.id, digest.id, fallback.login,
         )
         return {
-            "ok": True,
+            # Throttle bundled the item elsewhere — this assignee did
+            # not get a new activity. Keep the envelope honest (779).
+            "ok": False,
+            "written": False,
             "throttled": True,
-            "reason": (
+            "skipped": True,
+            "reason": "daily_throttle",
+            "message": (
                 "Daily agent-activity cap (%d) reached for user %s. "
                 "The item was added to the overflow digest for %s "
-                "instead of creating a new activity." % (
+                "instead of creating a new activity. Report it as "
+                "bundled, not as created." % (
                     limit, assignee.display_name, fallback.display_name,
                 )
             ),
@@ -1461,11 +1532,11 @@ class AIAgent(models.Model):
         Returns
         -------
         dict
-            ``{'ok': True, 'activity_id': <id>, ...}`` on success;
-            ``{'ok': True, 'skipped': True, 'reason': 'duplicate',
-            'existing_activity_id': <id>, ...}`` when an equivalent
-            open activity already exists;
-            ``{'error': '<reason>'}`` on validation failure.
+            ``{'ok': True, 'written': True, 'activity_id': <id>, ...}``
+            on create or refresh; ``{'ok': False, 'written': False,
+            'skipped': True, 'reason': 'duplicate'|'open_activity_cap',
+            'existing_activity_id': <id>, ...}`` when nothing was
+            written; ``{'error': '<reason>'}`` on validation failure.
         """
         self.ensure_one()
         if not model_name or not isinstance(model_name, str):
@@ -1593,6 +1664,13 @@ class AIAgent(models.Model):
                         existing = candidate
                         break
         if existing:
+            # Rolling daily signals (restlijst): refresh the open
+            # activity with today's summary/note/deadline instead of
+            # dropping the new content as a false duplicate (taak 774).
+            if self._daadit_is_rolling_signal(target_summary):
+                return self._daadit_refresh_activity(
+                    existing, target_summary, target_note, deadline,
+                )
             return {
                 # 5-8-2026 (taak 779): een overgeslagen schrijfactie gaf
                 # ok=True terug. Voor het model niet te onderscheiden van
@@ -1642,6 +1720,16 @@ class AIAgent(models.Model):
                 self.name, len(existing_open), assignee.id,
                 model_name, record.id,
             )
+            # Prefer refreshing the newest open activity over dropping
+            # the signal entirely (taak 773: full channel = silent loss).
+            newest = existing_open.sorted("id", reverse=True)[:1]
+            if newest and (
+                self._daadit_is_rolling_signal(target_summary)
+                or target_note
+            ):
+                return self._daadit_refresh_activity(
+                    newest, target_summary, target_note, deadline,
+                )
             return {
                 # 5-8-2026 (taak 779): een overgeslagen schrijfactie gaf
                 # ok=True terug. Voor het model niet te onderscheiden van
@@ -1654,7 +1742,8 @@ class AIAgent(models.Model):
                 "message": (
                     "%s already has %s open to-do(s) on this record: %s. "
                     "No new activity was created. Report the situation "
-                    "instead of adding another reminder." % (
+                    "instead of adding another reminder — the run must "
+                    "surface this as blocked, not as done." % (
                         assignee.name, len(existing_open),
                         "; ".join(
                             a.summary or "(no summary)"
@@ -1721,6 +1810,7 @@ class AIAgent(models.Model):
         )
         return {
             "ok": True,
+            "written": True,
             "model_name": model_name,
             "record_id": record.id,
             "activity_id": activity.id,
@@ -1729,6 +1819,46 @@ class AIAgent(models.Model):
             "date_deadline": deadline.strftime("%Y-%m-%d"),
             "user_id": assignee.id,
             "user_name": assignee.name,
+        }
+
+    def _ai_tool_assurance_coverage(self, **_extra):
+        """Return verified schedule rows for Argus' dekkingscheck (772).
+
+        Argus used to invent schedule links from agent ids
+        (``web#id=<agent_id>&model=daadit.ai.agent.schedule``). This tool
+        looks schedules up — including inactive ones — and returns only
+        rows that exist, with ``id``, ``name``, ``active``, ``agent_id``.
+        """
+        self.ensure_one()
+        if "daadit.ai.agent.schedule" not in self.env:
+            return {
+                "ok": False,
+                "error": (
+                    "Module daadit_ai_agent_schedule is not installed; "
+                    "cannot list schedules."
+                ),
+            }
+        Schedule = self.env["daadit.ai.agent.schedule"].with_context(
+            active_test=False,
+        ).sudo()
+        rows = []
+        for schedule in Schedule.search([], order="id"):
+            rows.append({
+                "id": schedule.id,
+                "name": schedule.name or "",
+                "active": bool(schedule.active),
+                "agent_id": schedule.agent_id.id or False,
+                "agent_name": schedule.agent_id.name or "",
+            })
+        return {
+            "ok": True,
+            "count": len(rows),
+            "schedules": rows,
+            "instruction": (
+                "Every coverage finding MUST use a schedule id from this "
+                "list. Never derive a schedule id from an agent id. "
+                "Include id, name, active and agent_id in the finding."
+            ),
         }
 
     # ------------------------------------------------------------------ #
