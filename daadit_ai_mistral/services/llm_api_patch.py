@@ -1708,17 +1708,17 @@ _EMPTY_AFTER_STRIP = (
     "Stel je vraag opnieuw."
 )
 _COMPACT_CHAT_INSTRUCTION = (
-    "Chatstijl: antwoord kort en direct. Geef eerst het antwoord, daarna "
-    "hoogstens 3 bullets met alleen noodzakelijke details. Geen uitgebreide "
-    "werkwijze, geen herhaling van de vraag, geen afsluitende samenvatting "
-    "tenzij de gebruiker daarom vraagt."
+    "Chatstijl (zoals een snelle collega): eerst het antwoord in 1-2 "
+    "zinnen, daarna hoogstens 3 bullets. Geen werkwijze, geen herhaling "
+    "van de vraag, geen afsluitende samenvatting, geen 'ik ga dit "
+    "uitzoeken'-meta. Progress zie je al in de stappenbalk."
 )
 _COMPACT_ROUTED_INSTRUCTION = (
     "Je antwoord gaat via een collega-agent terug naar de gebruiker. Geef "
-    "alleen het korte bruikbare antwoord: maximaal 5 korte bullets, geen "
+    "alleen het korte bruikbare antwoord: maximaal 4 korte bullets, geen "
     "procesbeschrijving en geen interne tool- of delegatiedetails."
 )
-_MAX_CHAT_ANSWER_CHARS = 1800
+_MAX_CHAT_ANSWER_CHARS = 1400
 
 
 def _add_compact_chat_instruction(conversation, routed=False):

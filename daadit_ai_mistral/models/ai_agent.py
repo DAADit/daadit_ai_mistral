@@ -2176,10 +2176,11 @@ class AIAgent(models.Model):
 
         try:
             from odoo.addons.ai.utils.llm_api_service import LLMApiService
-            from ..services import llm_api_patch
-            # Guarantee the Mistral patch is installed before we use
-            # provider='mistral' — mirrors the schedule module, which
-            # does the same before its headless runs. Idempotent.
+            # Use the module-level llm_api_patch import. A local
+            # ``from ..services import llm_api_patch`` here used to
+            # shadow the name for the whole function and make the
+            # earlier _notify_step call raise UnboundLocalError
+            # (swallowed — so "Ik vraag het even aan …" never showed).
             llm_api_patch.patch_llm_api_service()
         except ImportError as exc:
             return {"error": (
@@ -2456,6 +2457,14 @@ class AIAgent(models.Model):
         # leave on commit. Without this the UI would open the specialist
         # chat only after Robin's confirmation is already posted.
         self._daadit_notify_open_agent_chat(payload)
+        try:
+            llm_api_patch._notify_step(
+                self,
+                "Ik open even de chat met %s." % target.name,
+                kind="route",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         _logger.info(
             "daadit_ai_mistral.handoff: %s(%s) opened chat with %s(%s) "
@@ -2470,10 +2479,9 @@ class AIAgent(models.Model):
             "channel_id": channel.id,
             "opening_message_posted": posted,
             "instruction": (
-                "A chat with %s is now open for the user. Tell them "
-                "briefly (one short sentence) that they can continue "
-                "there. Do not restate the whole conversation, and do "
-                "not call more tools for this request." % target.name
+                "Chat with %s is open. Reply in ONE short sentence "
+                "(e.g. 'Je kunt verder met %s.'). No recap, no more "
+                "tools." % (target.name, target.name)
             ),
         }
 
