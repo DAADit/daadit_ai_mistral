@@ -13,21 +13,22 @@
 # difference is deploy-only work which must be PR'd to the product repo first,
 # or this migration deletes it.
 #
-#   ./adopt_as_submodule.sh --release v19.0.8.0.0
-#   ./adopt_as_submodule.sh --release v19.0.8.0.0 \
+#   ./adopt_as_submodule.sh --release v19.0.9.0.0
+#   ./adopt_as_submodule.sh --release v19.0.9.0.0 \
 #       --current addons/daadit_ai_mistral --mount submodules/daadit_ai_mistral
 #
 # Layout note: this repo's root holds `daadit_ai_mistral/__manifest__.py`, so
-# the submodule is mounted next to the old folder rather than on top of it —
-# Odoo.sh scans the repository recursively for manifests, so
-# `<mount>/daadit_ai_mistral/` is found without touching the addons path.
+# after the copied folder is removed the submodule is mounted on that same
+# path — `<mount>/daadit_ai_mistral/__manifest__.py`, exactly the depth
+# `daadit_ai_claude` already has in the deployment repo. Odoo.sh scans
+# recursively for manifests, so the addons path stays untouched.
 #
 set -euo pipefail
 
 PRODUCT_URL="https://github.com/DAADit/daadit_ai_mistral.git"
 MODULE="daadit_ai_mistral"
 CURRENT="daadit_ai_mistral"
-MOUNT="submodules/daadit_ai_mistral"
+MOUNT="daadit_ai_mistral"
 RELEASE=""
 FORCE=0
 
@@ -55,7 +56,9 @@ case "$branch" in main|master) die "on '$branch' — make a branch first" ;; esa
 [ -z "$(git status --porcelain)" ] || die "working tree is dirty; commit or stash first"
 [ -d "$CURRENT" ] || die "'$CURRENT' does not exist — pass --current"
 [ -f "$CURRENT/__manifest__.py" ] || die "'$CURRENT' holds no __manifest__.py"
-[ ! -e "$MOUNT" ] || die "'$MOUNT' already exists — pass --mount"
+if [ "$MOUNT" != "$CURRENT" ]; then
+    [ ! -e "$MOUNT" ] || die "'$MOUNT' already exists — pass --mount"
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -90,9 +93,9 @@ git add .gitmodules "$MOUNT"
 git commit --quiet -m "daadit_ai_mistral as submodule pinned at $RELEASE
 
 Ends the second, deploy-only line of this module (19.0.6.x), which never
-received product-repo work such as the per-agent AI budgets. Upgrading the
-module is now a pin move, so what runs in production is always traceable to
-a release."
+received product-repo work such as the JSON schema of an operator-made tool.
+Upgrading the module is now a pin move, so what runs in production is always
+traceable to a release."
 
 cat <<EOF
 
@@ -101,8 +104,9 @@ done. '$MOUNT/$MODULE/' now holds the module, pinned at $RELEASE.
 
 Next:
   1. push this branch and open the PR
-  2. after deploy: ir.module.module → daadit_ai_mistral shows the new version,
-     and model 'daadit.ai.budget' exists
+  2. after deploy: ir.module.module → daadit_ai_mistral shows installed_version
+     ${RELEASE#v} (equal to latest_version), and model 'daadit.ai.agent.skill'
+     exists
   3. later release: git -C $MOUNT fetch --tags && \\
      git -C $MOUNT checkout <tag> && git add $MOUNT && git commit
 EOF

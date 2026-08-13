@@ -47,16 +47,20 @@ deployment repo:
 
 ```bash
 # in the deployment repo, on a fresh branch
-./adopt_as_submodule.sh --release v19.0.8.0.0
+./adopt_as_submodule.sh --release v19.0.9.0.0
 ```
 
 It refuses to run while the copied folder differs from the release you pin to
 and writes the difference to `deploy-only.diff` — that difference is
 deploy-only work which must be PR'd here and re-tagged first, otherwise the
-conversion deletes it. The submodule is mounted next to the old folder
-(default `submodules/daadit_ai_mistral`) because this repo's root already
-holds `daadit_ai_mistral/`; Odoo.sh scans recursively for manifests, so no
-addons-path change is needed.
+conversion deletes it. The submodule replaces the old folder on the same path,
+so the module ends up one level down (`daadit_ai_mistral/daadit_ai_mistral/`) —
+the depth `daadit_ai_claude` already has in the deployment repo. Odoo.sh scans
+recursively for manifests, so no addons-path change is needed.
+
+`docs/OVERDRACHT_SUBMODULE.md` is the full handover (in Dutch): the exact
+commands, how to verify Odoo.sh found the module and actually upgraded it, and
+why the version must never end up below what production runs.
 
 ## Relation to sibling modules
 
