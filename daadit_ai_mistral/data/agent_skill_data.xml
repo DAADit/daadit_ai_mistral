@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!-- Finance / boekhoudpilot -->
+    <record id="skill_finance_ledger_check" model="daadit.ai.agent.skill">
+        <field name="name">Grootboekcontrole</field>
+        <field name="code">finance.ledger_check</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.move,account.move.line,account.account</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="description">Signaleert afwijkingen, ontbrekende boekingsinformatie en btw-/grootboekrisico's zonder zelf te boeken.</field>
+    </record>
+
+    <record id="skill_finance_overdue_receivables" model="daadit.ai.agent.skill">
+        <field name="name">Openstaande posten bewaken</field>
+        <field name="code">finance.overdue_receivables</field>
+        <field name="category">finance</field>
+        <field name="risk_level">concept_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.move,res.partner,mail.activity</field>
+        <field name="capability_codes">search_read,read,create</field>
+        <field name="description">Vindt vervallen klantfacturen en zet concept-opvolging of activiteiten klaar; verstuurt geen aanmaningen zonder mens.</field>
+    </record>
+
+    <record id="skill_finance_invoice_candidates" model="daadit.ai.agent.skill">
+        <field name="name">Te factureren werk signaleren</field>
+        <field name="code">finance.invoice_candidates</field>
+        <field name="category">finance</field>
+        <field name="risk_level">concept_only</field>
+        <field name="required_apps">account,sale_management</field>
+        <field name="required_models">sale.order,account.move,account.analytic.line</field>
+        <field name="capability_codes">search_read,read,create</field>
+        <field name="description">Zoekt geleverd maar nog niet gefactureerd werk en maakt een conceptvoorstel; facturen worden niet gepost of verzonden.</field>
+    </record>
+
+    <record id="skill_finance_margin_report" model="daadit.ai.agent.skill">
+        <field name="name">Marge per klant rapporteren</field>
+        <field name="code">finance.margin_report</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.move,sale.order,account.analytic.account</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="description">Leest omzet/kosten en vat marge per klant of dienst kort samen.</field>
+    </record>
+
+    <record id="skill_finance_month_report" model="daadit.ai.agent.skill">
+        <field name="name">Maandrapportage maken</field>
+        <field name="code">finance.month_report</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.move,account.move.line,account.account</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="description">Maakt een korte managementrapportage met opvallende bewegingen, risico's en vragen voor de mens.</field>
+    </record>
+
+    <record id="skill_finance_vat_prep" model="daadit.ai.agent.skill">
+        <field name="name">Btw-aangifte voorbereiden</field>
+        <field name="code">finance.vat_prep</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.move,account.move.line,account.tax</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="description">Bereidt controles en aandachtspunten voor; de aangifte wordt nooit door een agent ingediend.</field>
+    </record>
+
+    <!-- Existing non-finance patterns -->
+    <record id="skill_service_ticket_triage" model="daadit.ai.agent.skill">
+        <field name="name">Tickets triageren</field>
+        <field name="code">service.ticket_triage</field>
+        <field name="category">service</field>
+        <field name="risk_level">concept_only</field>
+        <field name="required_apps">helpdesk</field>
+        <field name="required_models">helpdesk.ticket,mail.activity</field>
+        <field name="capability_codes">search_read,read,create</field>
+        <field name="description">Bewaakt tickets, stelt conceptacties voor en plant opvolging binnen de toegestane activity-scope.</field>
+    </record>
+
+    <record id="skill_project_backlog" model="daadit.ai.agent.skill">
+        <field name="name">Projectbacklog bijhouden</field>
+        <field name="code">project.backlog</field>
+        <field name="category">operations</field>
+        <field name="risk_level">concept_only</field>
+        <field name="required_apps">project</field>
+        <field name="required_models">project.task,project.project,mail.activity</field>
+        <field name="capability_codes">search_read,read,create,write</field>
+        <field name="description">Ordent projecttaken, zet opvolging klaar en werkt binnen expliciete project-/activity-scopes.</field>
+    </record>
+
+    <record id="skill_website_visibility" model="daadit.ai.agent.skill">
+        <field name="name">Website-vindbaarheid bewaken</field>
+        <field name="code">website.visibility</field>
+        <field name="category">marketing</field>
+        <field name="risk_level">concept_only</field>
+        <field name="required_apps">website</field>
+        <field name="required_models">website.page,knowledge.article</field>
+        <field name="capability_codes">search_read,read,create</field>
+        <field name="description">Controleert pagina's en zet conceptverbeteringen klaar; publicatie blijft afhankelijk van de agent- en publish-scope.</field>
+    </record>
+
+    <record id="skill_governance_agent_assurance" model="daadit.ai.agent.skill">
+        <field name="name">Agent-assurance uitvoeren</field>
+        <field name="code">governance.agent_assurance</field>
+        <field name="category">governance</field>
+        <field name="risk_level">internal</field>
+        <field name="required_models">daadit.ai.agent.schedule.run,knowledge.article,ai.agent</field>
+        <field name="capability_codes">search_read,read,create,write</field>
+        <field name="description">Bewaakt runfouten, claims, promptdrift en herstelacties voor interne agents.</field>
+    </record>
+</odoo>

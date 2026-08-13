@@ -90,6 +90,25 @@ def pre_init_hook(env):
     _reset_mistral_values(env)
 
 
+def post_init_hook(env):
+    """Seed optional agent metadata on fresh install."""
+    _logger.info(
+        "daadit_ai_mistral.post_init_hook: seeding initial agent skills"
+    )
+    try:
+        env["ai.agent"]._daadit_seed_skills()
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.post_init_hook: agent skill seed failed"
+        )
+    try:
+        env["ai.agent"]._daadit_seed_orchestrator()
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.post_init_hook: orchestrator seed failed"
+        )
+
+
 def uninstall_hook(env):
     """Called when the module is being uninstalled. Reset every Mistral
     ``llm_model`` / ``embedding_model`` so the DB doesn't carry an

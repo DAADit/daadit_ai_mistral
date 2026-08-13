@@ -54,6 +54,8 @@ class TestDelegationPrecheck(common.TransactionCase):
     def test_receiver_who_may_read_it_is_a_valid_hop(self):
         """De delegatie mag niet geblokkeerd worden als de ontvanger het
         wél mag — dat is precies waar delegeren voor bestaat."""
+        if not self.move_line:
+            self.skipTest("account.move.line is hier niet beschikbaar")
         td.router_state.denied_models = {"account.move.line"}
         self.assertEqual(
             self.eva._daadit_denied_for_target(self.floris), set(),

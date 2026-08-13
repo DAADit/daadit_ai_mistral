@@ -40,6 +40,11 @@
 
                 </group>
 
+                <separator string="Orchestrator"/>
+                <group>
+                    <field name="daadit_is_orchestrator"/>
+                </group>
+
                 <separator string="Allowed models"
                            invisible="llm_model not in ('mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest', 'ministral-8b-latest', 'ministral-3b-latest')"/>
 

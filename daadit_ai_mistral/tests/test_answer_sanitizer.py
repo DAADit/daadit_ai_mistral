@@ -90,3 +90,14 @@ class TestAnswerSanitizer(common.TransactionCase):
     def test_nothing_left_yields_a_notice_not_an_empty_message(self):
         out = _clean_adapted(['{"answer": "x", "error": null}'], "test")
         self.assertEqual(out, [_EMPTY_AFTER_STRIP])
+
+    def test_compact_mode_shortens_long_chat_answer(self):
+        text = ("Regel met details.\n" * 220).strip()
+        out = _clean_adapted([text], "test", compact=True)
+        self.assertLess(len(out[0]), len(text))
+        self.assertIn("Verder ingekort voor de chat", out[0])
+
+    def test_non_compact_mode_keeps_long_run_answer(self):
+        text = ("Regel met details.\n" * 220).strip()
+        out = _clean_adapted([text], "test", compact=False)
+        self.assertEqual(out, [text])

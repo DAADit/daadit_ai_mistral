@@ -73,10 +73,10 @@
         </record>
 
         <!-- Router tool (v19.0.4.2.0): delegate a question to another
-             agent. Attach ONLY to concierge-level agents (Ask AI) via
-             a dedicated topic — never to specialists (the depth guard
-             plus tool-strip in the sub-run enforce this anyway, but
-             don't tempt fate). -->
+             agent. Attach ONLY to concierge-level agents (Ask AI /
+             Robin) via a dedicated topic — never to specialists (the
+             depth guard plus tool-strip in the sub-run enforce this
+             anyway, but don't tempt fate). -->
         <record id="ir_actions_server_ask_agent" model="ir.actions.server">
             <field name="name">AI: Ask Agent</field>
             <field name="use_in_ai" eval="True"/>
@@ -86,6 +86,33 @@
     agent_name=agent_name,
     question=question,
 )</field>
+        </record>
+
+        <!-- Handoff tool (v19.0.6.22.0): open a new user↔specialist
+             chat so the user can continue with that agent. Attach ONLY
+             to orchestrator agents (Robin) alongside Ask Agent. -->
+        <record id="ir_actions_server_open_agent_chat" model="ir.actions.server">
+            <field name="name">AI: Open Agent Chat</field>
+            <field name="use_in_ai" eval="True"/>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="code">ai['result'] = record._ai_tool_open_agent_chat(
+    agent_name=agent_name,
+    opening_message=opening_message,
+)</field>
+        </record>
+
+        <!-- Assurance coverage (taak 772): Argus must look schedules up
+             instead of deriving schedule ids from agent ids. Attach to
+             the Argus / assurance topic. -->
+        <record id="ir_actions_server_assurance_coverage" model="ir.actions.server">
+            <field name="name">AI: Assurance Coverage</field>
+            <field name="use_in_ai" eval="True"/>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="ai_tool_description">Lijst alle assurance-/agent-schedules met geverifieerde id, name, active, agent_id. Roep dit ALTIJD aan vóór een dekkingsbevinding. Verzin nooit een schedule-id uit een agent-id.</field>
+            <field name="ai_tool_schema">{"type": "object", "properties": {}, "required": []}</field>
+            <field name="code">ai['result'] = record._ai_tool_assurance_coverage()</field>
         </record>
 
     </data>

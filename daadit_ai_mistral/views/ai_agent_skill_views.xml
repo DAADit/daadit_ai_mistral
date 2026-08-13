@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_daadit_ai_agent_skill_list" model="ir.ui.view">
+        <field name="name">daadit.ai.agent.skill.list</field>
+        <field name="model">daadit.ai.agent.skill</field>
+        <field name="arch" type="xml">
+            <list>
+                <field name="sequence" widget="handle"/>
+                <field name="name"/>
+                <field name="category"/>
+                <field name="risk_level"/>
+                <field name="required_apps"/>
+                <field name="required_models"/>
+                <field name="capability_codes"/>
+                <field name="active"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_daadit_ai_agent_skill_form" model="ir.ui.view">
+        <field name="name">daadit.ai.agent.skill.form</field>
+        <field name="model">daadit.ai.agent.skill</field>
+        <field name="arch" type="xml">
+            <form>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="code"/>
+                            <field name="category"/>
+                            <field name="risk_level"/>
+                            <field name="sequence"/>
+                            <field name="active"/>
+                        </group>
+                        <group string="Provisioning hints">
+                            <field name="required_apps"/>
+                            <field name="required_models"/>
+                            <field name="capability_codes"/>
+                        </group>
+                    </group>
+                    <group>
+                        <field name="description" nolabel="1"
+                               placeholder="What this skill does, in customer-facing language."/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_daadit_ai_agent_skill_search" model="ir.ui.view">
+        <field name="name">daadit.ai.agent.skill.search</field>
+        <field name="model">daadit.ai.agent.skill</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="code"/>
+                <field name="required_apps"/>
+                <field name="required_models"/>
+                <filter string="Finance" name="category_finance"
+                        domain="[('category', '=', 'finance')]"/>
+                <filter string="Concept-only" name="risk_concept"
+                        domain="[('risk_level', '=', 'concept_only')]"/>
+                <filter string="Mandated write" name="risk_mandated"
+                        domain="[('risk_level', '=', 'mandated_write')]"/>
+                <filter string="Archived" name="inactive"
+                        domain="[('active', '=', False)]"/>
+                <!-- Odoo 19 view-validator: <group> inside <search> accepts
+                     neither `expand` nor `string`; use a plain <group> wrapper
+                     around the group-by filters (same pattern as
+                     mistral_usage_views.xml). -->
+                <group>
+                    <filter name="group_category" string="Category"
+                            context="{'group_by': 'category'}"/>
+                    <filter name="group_risk" string="Risk level"
+                            context="{'group_by': 'risk_level'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_daadit_ai_agent_skill" model="ir.actions.act_window">
+        <field name="name">Agent Skills</field>
+        <field name="res_model">daadit.ai.agent.skill</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'search_default_group_category': 1}</field>
+    </record>
+
+    <menuitem id="menu_daadit_ai_agent_skill"
+              name="Agent Skills"
+              parent="ai_app.ai_config_menu"
+              action="action_daadit_ai_agent_skill"
+              sequence="62"
+              groups="base.group_system"/>
+
+    <record id="ai_agent_view_form_inherit_daadit_skills" model="ir.ui.view">
+        <field name="name">ai.agent.view.form.inherit.daadit.skills</field>
+        <field name="model">ai.agent</field>
+        <field name="inherit_id" ref="ai_app.ai_agent_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='topic_ids']" position="after">
+                <field name="daadit_skill_ids"
+                       widget="many2many_tags"
+                       placeholder="Select the business-facing skills this agent can perform."/>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="ai_agent_view_search_inherit_daadit_skills" model="ir.ui.view">
+        <field name="name">ai.agent.view.search.inherit.daadit.skills</field>
+        <field name="model">ai.agent</field>
+        <field name="inherit_id" ref="ai_app.ai_agent_view_search"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='topic_ids']" position="after">
+                <field name="daadit_skill_ids"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

@@ -28,6 +28,7 @@ This module:
   ten stock AI tools, replacing the empty ``{}`` schema used in
   v3.6.6–v3.6.8. With these, Mistral knows what args each tool takes.
 """
+from odoo.fields import Domain as _Domain
 import ast
 import json
 import logging
@@ -63,6 +64,51 @@ turn_hooks = None
 # passing off truncated narration as a real answer (v19.0.4.2.1).
 router_state = threading.local()
 
+# Read-only stock tools. Everything else is a custom action, and those
+# exist precisely to write (create a campaign, draft a post, update a
+# blog). Treating unknown tools as writes is the safe default here:
+# over-reporting a write is harmless, missing one is not.
+_READ_TOOL_SUFFIXES = (
+    "_search", "_read_group", "_get_fields", "_get_menu_details",
+    "_open_menu_kanban", "_open_menu_list", "_open_menu_graph",
+    "_open_menu_pivot", "_adjust_search", "_compute_report_measures",
+    "_search_knowledge", "_ask_agent",
+)
+
+
+def _is_write_tool(fn_name):
+    """True when this tool changes data rather than reading it."""
+    name = (fn_name or "").lower()
+    return not any(name.endswith(suffix) for suffix in _READ_TOOL_SUFFIXES)
+
+
+def note_tool_call(fn_name, ok=True):
+    """Tally one dispatched tool call on this thread.
+
+    The scheduled route already publishes a fact line under every report
+    ("Feitelijk vastgelegd door het systeem: N tool-aanroepen, M
+    schrijfacties"), because instructions alone never stopped an agent
+    from narrating work it had not done. The chat route had no such
+    counter, and the same failure showed up there: asked through Robin
+    to put a post in Social Marketing, Mark answered "Post is set as a
+    draft in the Social Marketing app" after two iterations in which he
+    called no tool at all. The database held exactly one social.post,
+    three weeks old.
+
+    Counting at this single point — every dispatch passes here — lets
+    the router state per delegated sub-run what actually happened.
+    """
+    try:
+        router_state.calls_made = getattr(router_state, "calls_made", 0) + 1
+        if ok and _is_write_tool(fn_name):
+            router_state.writes_made = getattr(
+                router_state, "writes_made", 0,
+            ) + 1
+    except Exception:  # noqa: BLE001
+        # A counter must never break a working tool call.
+        pass
+
+
 # Tool slugs that MUTATE database state. Stripped from every routed
 # sub-run's tool list (v19.0.4.2.1): routing exists to fetch an
 # ANSWER, never to let a delegated agent write on the caller's behalf.
@@ -77,6 +123,18 @@ WRITE_SIDE_TOOL_SLUGS = frozenset({
 # The router tool itself — never exposed inside a routed sub-run
 # (depth guard is defence-in-depth; this is the primary strip).
 ROUTER_TOOL_SLUG = "ir_actions_server_ask_agent"
+
+# Open a fresh chat with a specialist so the *user* can continue there.
+# Orchestrator-only (same strip rules as the router tool in sub-runs).
+OPEN_CHAT_TOOL_SLUG = "ir_actions_server_open_agent_chat"
+
+# Tools an orchestrator (Robin) may keep when ``daadit_is_orchestrator``
+# is set. Everything else is stripped in the top-level loop so the
+# concierge cannot "helpfully" search or write itself.
+ORCHESTRATOR_TOOL_SLUGS = frozenset({
+    ROUTER_TOOL_SLUG,
+    OPEN_CHAT_TOOL_SLUG,
+})
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +545,10 @@ TOOL_SCHEMAS = {
             "properties": {
                 "model_name": {
                     "type": "string",
-                    "description": "Technical model name, e.g. 'res.partner', 'account.move', 'sale.order'.",
+                    "description": (
+                        "Technical model name, e.g. 'res.partner', "
+                        "'account.move', 'sale.order'."
+                    ),
                 },
                 "domain": _domain_schema(),
                 "fields": _string_array(
@@ -518,10 +579,10 @@ TOOL_SCHEMAS = {
             "type": "object",
             "properties": {
                 "model_name": {"type": "string",
-                    "description": "Technical model name. Common ones: "
-                    "'account.move' (invoices/bills), 'sale.order', "
-                    "'purchase.order', 'product.template', 'res.partner', "
-                    "'stock.picking', 'crm.lead', 'project.task'."},
+                               "description": "Technical model name. Common ones: "
+                               "'account.move' (invoices/bills), 'sale.order', "
+                               "'purchase.order', 'product.template', 'res.partner', "
+                               "'stock.picking', 'crm.lead', 'project.task'."},
                 "domain": _domain_schema(),
                 "groupby": _string_array(
                     "JSON array of field names to group by. "
@@ -544,8 +605,8 @@ TOOL_SCHEMAS = {
                 "offset": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 80},
                 "order": {"type": "string",
-                    "description": "Sort spec on aggregates, e.g. "
-                    "'amount_total desc' to find biggest values first."},
+                          "description": "Sort spec on aggregates, e.g. "
+                          "'amount_total desc' to find biggest values first."},
             },
             "required": ["model_name", "groupby", "aggregates"],
         },
@@ -566,7 +627,10 @@ TOOL_SCHEMAS = {
         },
     },
     "ir_actions_server_get_menu_details": {
-        "description": "Return menu metadata (model, default views, etc.) for one or more menu IDs.",
+        "description": (
+            "Return menu metadata (model, default views, etc.) "
+            "for one or more menu IDs."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -587,7 +651,9 @@ TOOL_SCHEMAS = {
                 "menu_id": {"type": "integer"},
                 "model_name": {"type": "string"},
                 "selected_filters": _string_array("Names of search filters to apply.", default=[]),
-                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
+                "selected_groupbys": _string_array(
+                    "Names of group-by fields to apply.", default=[],
+                ),
                 "search": {"type": "string", "description": "Free-text search.", "default": ""},
                 "custom_domain": _domain_schema(),
             },
@@ -602,7 +668,9 @@ TOOL_SCHEMAS = {
                 "menu_id": {"type": "integer"},
                 "model_name": {"type": "string"},
                 "selected_filters": _string_array("Names of search filters to apply.", default=[]),
-                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
+                "selected_groupbys": _string_array(
+                    "Names of group-by fields to apply.", default=[],
+                ),
                 "search": {"type": "string", "description": "Free-text search.", "default": ""},
                 "custom_domain": _domain_schema(),
             },
@@ -617,8 +685,13 @@ TOOL_SCHEMAS = {
                 "menu_id": {"type": "integer"},
                 "model_name": {"type": "string"},
                 "selected_filters": _string_array("Names of search filters to apply.", default=[]),
-                "selected_groupbys": _string_array("Names of group-by fields to apply.", default=[]),
-                "measure": {"type": "string", "description": "Measure to plot, e.g. 'amount_total:sum'."},
+                "selected_groupbys": _string_array(
+                    "Names of group-by fields to apply.", default=[],
+                ),
+                "measure": {
+                    "type": "string",
+                    "description": "Measure to plot, e.g. 'amount_total:sum'.",
+                },
                 "mode": {"type": "string", "enum": ["bar", "line", "pie"], "default": "bar"},
                 "order": {"type": "string", "default": ""},
                 "search": {"type": "string", "default": ""},
@@ -630,7 +703,10 @@ TOOL_SCHEMAS = {
         },
     },
     "ir_actions_server_open_menu_pivot": {
-        "description": "Open a menu's pivot view (cross-tab) with row/column groupings and measures.",
+        "description": (
+            "Open a menu's pivot view (cross-tab) with "
+            "row/column groupings and measures."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -639,7 +715,10 @@ TOOL_SCHEMAS = {
                 "selected_filters": _string_array("Filters to apply.", default=[]),
                 "row_groupbys": _string_array("Row group-by fields.", default=[]),
                 "col_groupbys": _string_array("Column group-by fields.", default=[]),
-                "measures": _string_array("Measures to compute, e.g. ['amount_total:sum'].", default=[]),
+                "measures": _string_array(
+                    "Measures to compute, e.g. ['amount_total:sum'].",
+                    default=[],
+                ),
                 "search": {"type": "string", "default": ""},
                 "custom_domain": _domain_schema(),
             },
@@ -666,13 +745,23 @@ TOOL_SCHEMAS = {
                 "stacked": {"type": "boolean", "default": False},
                 "cumulated": {"type": "boolean", "default": False},
                 "custom_domain": _domain_schema(),
-                "switch_view_type": {"type": "string", "description": "Switch to 'list', 'kanban', 'graph', 'pivot', etc.", "default": ""},
+                "switch_view_type": {
+                    "type": "string",
+                    "description": (
+                        "Switch to 'list', 'kanban', 'graph', "
+                        "'pivot', etc."
+                    ),
+                    "default": "",
+                },
             },
             "required": ["model_name"],
         },
     },
     "ir_actions_server_compute_report_measures": {
-        "description": "Get the list of available measures for a report action (used before plotting).",
+        "description": (
+            "Get the list of available measures for a report "
+            "action (used before plotting)."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -686,18 +775,20 @@ TOOL_SCHEMAS = {
     "ir_actions_server_ask_agent": {
         "description": (
             "ROUTER TOOL — delegate a question to a specialist AI agent "
-            "by name and return its answer. Use this FIRST for any "
-            "domain question that matches a specialist (e.g. 'Sales "
-            "Agent' for pipeline/leads/quotes, 'Project Agent' for "
-            "projects/tasks/hours, 'Product Agent' for products/owners, "
-            "'Marketing Agent' for lead sources/campaigns, 'Helpdesk "
-            "SLA Agent' for tickets/SLA). Formulate the question "
-            "self-contained (the specialist does not see this "
-            "conversation). If the result contains 'error', answer the "
-            "question yourself with your other tools instead and briefly "
-            "mention that the specialist could not be reached; do not "
-            "show the raw error text, and do not retry the same failing "
-            "route this turn. Route at most a few times per turn."
+            "by name and return its answer in THIS chat. Use this for "
+            "quick domain questions that match a specialist (e.g. "
+            "'Bram' / sales for pipeline/leads/quotes, 'Pim' / project "
+            "for projects/tasks/hours, 'Nova' / product, marketing "
+            "agents for campaigns, helpdesk agents for tickets/SLA). "
+            "Formulate the question self-contained (the specialist "
+            "does not see this conversation). If the result contains "
+            "'error', try another specialist OR open a chat with that "
+            "specialist via ir_actions_server_open_agent_chat so the "
+            "user can continue there; do not show the raw error text, "
+            "and do not retry the same failing route this turn. Route "
+            "at most a few times per turn. Prefer ask_agent for one-"
+            "shot answers; prefer open_agent_chat when the user wants "
+            "to keep talking with that specialist."
         ),
         "parameters": {
             "type": "object",
@@ -706,9 +797,8 @@ TOOL_SCHEMAS = {
                     "type": "string",
                     "description": (
                         "Exact display name of the target agent, e.g. "
-                        "'Sales Agent', 'Project Agent', 'Product "
-                        "Agent', 'Marketing Agent', 'Helpdesk SLA "
-                        "Agent'."
+                        "'Bram', 'Pim', 'Sem', 'Nova', 'Sales Agent', "
+                        "'Project Agent'."
                     ),
                 },
                 "question": {
@@ -725,6 +815,43 @@ TOOL_SCHEMAS = {
             "required": ["agent_name", "question"],
         },
     },
+    # --- DAADit handoff tool (v19.0.6.22.0) ----------------------------
+    "ir_actions_server_open_agent_chat": {
+        "description": (
+            "HANDOFF TOOL — open a NEW chat between the user and a "
+            "specialist AI agent so the user can continue the "
+            "conversation there. Use this when (a) the user asks to "
+            "talk to / switch to a named colleague, (b) the topic needs "
+            "a longer back-and-forth with that specialist, or (c) "
+            "ask_agent failed and the user should take over with the "
+            "specialist. Optional opening_message is posted as the "
+            "user's first message in that new chat (self-contained "
+            "context). After success, briefly tell the user the chat "
+            "is open — do not restate the whole conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent_name": {
+                    "type": "string",
+                    "description": (
+                        "Exact display name of the specialist to open "
+                        "a chat with, e.g. 'Bram', 'Sem', 'Pim'."
+                    ),
+                },
+                "opening_message": {
+                    "type": "string",
+                    "description": (
+                        "Optional first message to post in the new "
+                        "chat (user's language). Include the context "
+                        "the specialist needs to continue. Omit when "
+                        "the user only asked to be connected."
+                    ),
+                },
+            },
+            "required": ["agent_name"],
+        },
+    },
     # --- DAADit write-side tools (v19.0.4.0.0) --------------------------
     "ir_actions_server_assign_user": {
         "description": (
@@ -733,8 +860,9 @@ TOOL_SCHEMAS = {
             "of a record (e.g. assign an unassigned helpdesk ticket to "
             "the right salesperson). Target model must have a 'user_id' "
             "many2one to res.users; assignee must be an active internal "
-            "user. Returns {'ok': true, ...} on success, {'error': '...'} "
-            "on validation failure, or {'ok': true, 'skipped': true, "
+            "user. Returns {'ok': true, 'written': true, ...} on success, "
+            "{'error': '...'} on validation failure, or "
+            "{'ok': false, 'written': false, 'skipped': true, "
             "'reason': 'already_assigned'} if the user was already set."
         ),
         "parameters": {
@@ -769,10 +897,13 @@ TOOL_SCHEMAS = {
             "activity with the same type, summary and assignee already "
             "exists on the record, no new one is created. Target model "
             "must inherit mail.activity.mixin (most business models do). "
-            "Returns {'ok': true, 'activity_id': N, ...} on success, "
-            "{'ok': true, 'skipped': true, 'reason': 'duplicate', "
-            "'existing_activity_id': N} when an equivalent activity "
-            "already exists, or {'error': '...'} on validation failure."
+            "Returns {'ok': true, 'written': true, 'activity_id': N, ...} "
+            "on success or when a rolling signal (restlijst) refreshed an "
+            "existing activity ({'updated': true}). Skips return "
+            "{'ok': false, 'written': false, 'skipped': true, "
+            "'reason': 'duplicate'|'open_activity_cap', "
+            "'existing_activity_id': N} — never treat skipped as created. "
+            "Validation failures return {'error': '...'}."
         ),
         "parameters": {
             "type": "object",
@@ -841,6 +972,20 @@ TOOL_SCHEMAS = {
                 },
             },
             "required": ["model_name", "record_id"],
+        },
+    },
+    "ir_actions_server_assurance_coverage": {
+        "description": (
+            "READ TOOL — list every daadit.ai.agent.schedule row "
+            "(active and inactive) with verified id, name, active, "
+            "agent_id and agent_name. Use this BEFORE any assurance "
+            "coverage finding. Never invent schedule ids from agent "
+            "ids; every cited schedule must appear in this list."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
         },
     },
 }
@@ -1235,11 +1380,11 @@ def _eval_relative_date(expr):
         return None
     norm = (
         s.replace("fields.Datetime.now()", "datetime.now()")
-         .replace("fields.Datetime.today()", "datetime.now()")
-         .replace("fields.Date.today()", "date.today()")
-         .replace("fields.Date.context_today()", "date.today()")
-         .replace("datetime.datetime.now()", "datetime.now()")
-         .replace("datetime.date.today()", "date.today()")
+        .replace("fields.Datetime.today()", "datetime.now()")
+        .replace("fields.Date.today()", "date.today()")
+        .replace("fields.Date.context_today()", "date.today()")
+        .replace("datetime.datetime.now()", "datetime.now()")
+        .replace("datetime.date.today()", "date.today()")
     )
     low = norm.lower()
     if low in ("now", "now()"):
@@ -1404,7 +1549,6 @@ def _normalize_json_string_param(v):
 # must stay warning-free). odoo.fields.Domain is the 19-native
 # equivalent; ``list(Domain)`` yields the classic domain list, which
 # json.dumps serialises fine.
-from odoo.fields import Domain as _Domain
 
 _TRUE_LEAF = (1, "=", 1)
 
@@ -1415,6 +1559,7 @@ def _domain_and(domains):
 
 def _domain_or(domains):
     return list(_Domain.OR(domains))
+
 
 _DOMAIN_TOOLS = ("ir_actions_server_search", "ir_actions_server_read_group")
 
@@ -1759,6 +1904,10 @@ def run_tool_call(agent, tool_call):
     fn_name = fn.get("name") or ""
     raw_args = fn.get("arguments") or "{}"
     env = getattr(agent, "env", None)
+    # Count the attempt here, before anything can go wrong: what the
+    # router must be able to say is "this agent reached for a tool N
+    # times", including the times it reached and missed.
+    note_tool_call(fn_name)
 
     try:
         kwargs = _coerce_args(raw_args)

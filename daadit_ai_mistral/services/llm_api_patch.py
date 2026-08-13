@@ -918,6 +918,61 @@ def _is_smalltalk(conversation):
     return bool(woorden) and woorden[0] in _SMALLTALK_OPENERS
 
 
+# Injected on top of an orchestrator's own system prompt. Knowledge may
+# still carry a longer persona; this hard rule is what the loop enforces
+# in code (tool strip). Keep it short — every token is paid on every turn.
+_ORCHESTRATOR_PROMPT = (
+    "Je bent de orchestrator. Je voert zelf GEEN zoekopdrachten, "
+    "schrijfacties of andere domein-tools uit. Je hebt precies twee "
+    "middelen: (1) ir_actions_server_ask_agent — vraag een specialist en "
+    "geef hun antwoord door in deze chat; (2) "
+    "ir_actions_server_open_agent_chat — open een nieuwe chat met een "
+    "specialist zodat de gebruiker daar verder kan praten. Smalltalk "
+    "beantwoord je zelf kort. Voor alles inhoudelijks routeer of open "
+    "je een chat. Verzin nooit gegevens."
+)
+
+
+def _inject_orchestrator_prompt(agent, conversation):
+    """Prepend the orchestrator hard rule when the agent is flagged."""
+    if agent is None or not getattr(agent, "daadit_is_orchestrator", False):
+        return conversation
+    probe = "Je bent de orchestrator"
+    already = any(
+        isinstance(m, dict)
+        and m.get("role") == "system"
+        and probe in (m.get("content") or "")
+        for m in (conversation or [])
+    )
+    if already:
+        return conversation
+    out = list(conversation or [])
+    out.insert(0, {"role": "system", "content": _ORCHESTRATOR_PROMPT})
+    return out
+
+
+def _filter_orchestrator_tools(agent, tools):
+    """Keep only Ask Agent + Open Agent Chat for orchestrator agents."""
+    if agent is None or not getattr(agent, "daadit_is_orchestrator", False):
+        return tools
+    allowed = tool_dispatch.ORCHESTRATOR_TOOL_SLUGS
+    kept = []
+    for t in tools or []:
+        if not isinstance(t, dict):
+            continue
+        name = (t.get("function") or {}).get("name") or ""
+        if name in allowed:
+            kept.append(t)
+    if len(kept) != len(tools or []):
+        _logger.info(
+            "daadit_ai_mistral.llm_api_patch: orchestrator %s(%s) — "
+            "stripped tools to %s",
+            getattr(agent, "name", "?"), getattr(agent, "id", "?"),
+            [((t.get("function") or {}).get("name")) for t in kept],
+        )
+    return kept
+
+
 def _step_text(tc):
     """Vaste, PII-vrije NL-regel voor een op handen zijnde tool-aanroep.
 
@@ -948,6 +1003,62 @@ def _notify_step(agent, text, depth=0, kind="think", done=False):
         return
     steps.emit(agent, text, turn_id=_turn_id(), depth=depth, kind=kind,
                done=done)
+
+
+_READ_TOOL_SLUGS = (
+    "ir_actions_server_search",
+    "ir_actions_server_read_group",
+    "ir_actions_server_search_knowledge",
+)
+
+
+def _looks_empty(result):
+    """True when a read tool came back without a single record."""
+    if result is None:
+        return True
+    if isinstance(result, list):
+        return not result
+    if isinstance(result, dict):
+        if result.get("error"):
+            return False  # a failure is not the same as "nothing found"
+        for sleutel in ("records", "results", "groups", "rows", "items"):
+            if sleutel in result:
+                return not result.get(sleutel)
+        if "count" in result:
+            try:
+                return int(result.get("count") or 0) == 0
+            except Exception:  # noqa: BLE001
+                return False
+    return False
+
+
+def _empty_search_hint(tc, colleagues):
+    """Replace an empty read result with an instruction to ask a colleague.
+
+    An empty result is ambiguous: it can mean "does not exist" or "not
+    visible from where I am looking". The concierge consistently read it
+    as the first and asked the user for an exact name — even when the
+    user had just said which colleague to ask. Naming the colleagues who
+    *can* see the model removes that ambiguity.
+    """
+    namen = [c.name for c in colleagues[:3] if c.name]
+    eerste = namen[0] if namen else ""
+    return {
+        "ok": True,
+        "records": [],
+        "leeg": True,
+        "colleagues_with_access": namen,
+        "instruction": (
+            "Geen resultaat gevonden. Dit betekent NIET automatisch dat het "
+            "niet bestaat: jouw blik op de gegevens is beperkter dan die van "
+            "een specialist. Vraag NIET om een exacte naam of een nummer "
+            "voordat je een collega hebt geraadpleegd. Roep eerst "
+            "ir_actions_server_ask_agent aan met agent_name='%s' en de "
+            "volledige oorspronkelijke vraag. Levert die collega ook niets "
+            "op, dan pas meld je dat het er niet is, en dan noem je erbij wie "
+            "je hebt geraadpleegd." % (eerste or "de betrokken specialist")
+        ),
+    }
 
 
 def _colleagues_allowed_for_model(agent, model_name):
@@ -1164,19 +1275,21 @@ def _resolve_agent(api_self, request_kwargs=None):
             # ``ch`` may be a recordset or an id; normalize.
             if isinstance(ch, int):
                 ch = api_self.env["discuss.channel"].sudo().browse(ch)
-            if hasattr(ch, "sudo") and hasattr(ch, "ai_agent_id"):
-                agent_id = ch.sudo().ai_agent_id.id
-                if agent_id:
-                    # Re-browse on the non-sudo env so subsequent
-                    # _ai_tool_* calls run as the actual user.
-                    ag = api_self.env["ai.agent"].browse(agent_id)
-                    _logger.info(
-                        "daadit_ai_mistral.llm_api_patch: agent resolved "
-                        "via env.context['discuss_channel'].ai_agent_id "
-                        "(threadlocal was empty) → ai.agent(%s) as user %s",
-                        agent_id, api_self.env.uid,
-                    )
-                    return ag
+            if hasattr(ch, "sudo"):
+                ch_sudo = ch.sudo()
+                if "ai_agent_id" in getattr(ch_sudo, "_fields", {}):
+                    agent_id = ch_sudo.ai_agent_id.id
+                    if agent_id:
+                        # Re-browse on the non-sudo env so subsequent
+                        # _ai_tool_* calls run as the actual user.
+                        ag = api_self.env["ai.agent"].browse(agent_id)
+                        _logger.info(
+                            "daadit_ai_mistral.llm_api_patch: agent resolved "
+                            "via env.context['discuss_channel'].ai_agent_id "
+                            "(threadlocal was empty) → ai.agent(%s) as user %s",
+                            agent_id, api_self.env.uid,
+                        )
+                        return ag
     except Exception:  # noqa: BLE001
         _logger.exception(
             "daadit_ai_mistral.llm_api_patch: agent fallback lookup raised"
@@ -1594,6 +1707,61 @@ _EMPTY_AFTER_STRIP = (
     "Er ging iets mis bij het opstellen van dit antwoord. "
     "Stel je vraag opnieuw."
 )
+_COMPACT_CHAT_INSTRUCTION = (
+    "Chatstijl (zoals een snelle collega): eerst het antwoord in 1-2 "
+    "zinnen, daarna hoogstens 3 bullets. Geen werkwijze, geen herhaling "
+    "van de vraag, geen afsluitende samenvatting, geen 'ik ga dit "
+    "uitzoeken'-meta. Progress zie je al in de stappenbalk."
+)
+_COMPACT_ROUTED_INSTRUCTION = (
+    "Je antwoord gaat via een collega-agent terug naar de gebruiker. Geef "
+    "alleen het korte bruikbare antwoord: maximaal 4 korte bullets, geen "
+    "procesbeschrijving en geen interne tool- of delegatiedetails."
+)
+_MAX_CHAT_ANSWER_CHARS = 1400
+
+
+def _add_compact_chat_instruction(conversation, routed=False):
+    """Nudge interactive chat toward concise replies.
+
+    The frontend now shows progress steps while tools run; the final
+    assistant message should therefore be the outcome, not a logbook.
+    """
+    if not isinstance(conversation, list):
+        return conversation
+    instruction = (
+        _COMPACT_ROUTED_INSTRUCTION if routed else _COMPACT_CHAT_INSTRUCTION
+    )
+    if any(
+        isinstance(m, dict)
+        and m.get("role") == "system"
+        and instruction in (m.get("content") or "")
+        for m in conversation
+    ):
+        return conversation
+    conversation.insert(0, {"role": "system", "content": instruction})
+    return conversation
+
+
+def _compact_answer_text(text):
+    """Keep runaway but otherwise valid answers chat-sized."""
+    if not isinstance(text, str):
+        return text, False
+    stripped = text.rstrip()
+    if len(stripped) <= _MAX_CHAT_ANSWER_CHARS:
+        return stripped, False
+    cut = stripped.rfind("\n", 0, _MAX_CHAT_ANSWER_CHARS)
+    if cut < int(_MAX_CHAT_ANSWER_CHARS * 0.6):
+        cut = stripped.rfind(". ", 0, _MAX_CHAT_ANSWER_CHARS)
+        if cut >= 0:
+            cut += 1
+    if cut < int(_MAX_CHAT_ANSWER_CHARS * 0.6):
+        cut = _MAX_CHAT_ANSWER_CHARS
+    return (
+        stripped[:cut].rstrip()
+        + "\n\n(Verder ingekort voor de chat; vraag om details als je die wilt.)",
+        True,
+    )
 
 
 def _strip_runaway_and_leaks(text):
@@ -1643,7 +1811,7 @@ def _strip_runaway_and_leaks(text):
     return text, text != original
 
 
-def _clean_adapted(adapted, where):
+def _clean_adapted(adapted, where, compact=False):
     """Pas :func:`_strip_runaway_and_leaks` toe op wat de gebruiker te
     zien krijgt. Werkt zowel op losse strings als op
     ``{role, content}``-dicts, omdat beide vormen door deze module
@@ -1654,10 +1822,16 @@ def _clean_adapted(adapted, where):
         if isinstance(item, str):
             cleaned, trimmed = _strip_runaway_and_leaks(item)
             cleaned = cleaned or (_EMPTY_AFTER_STRIP if trimmed else cleaned)
+            if compact and cleaned:
+                cleaned, compacted = _compact_answer_text(cleaned)
+                trimmed = trimmed or compacted
         elif isinstance(item, dict) and isinstance(item.get("content"), str):
             cleaned_text, trimmed = _strip_runaway_and_leaks(item["content"])
             if trimmed and not cleaned_text:
                 cleaned_text = _EMPTY_AFTER_STRIP
+            if compact and cleaned_text:
+                cleaned_text, compacted = _compact_answer_text(cleaned_text)
+                trimmed = trimmed or compacted
             cleaned = dict(item, content=cleaned_text)
         else:
             out.append(item)
@@ -1891,6 +2065,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     #   ``role: tool`` messages → call again. Stop when the model
     #   returns a final text response OR we hit ``MAX_ITER``.
     _had_threadlocal = bool(getattr(tool_dispatch.current_agent, "record", None))
+    try:
+        _interactive_chat = bool(api_self.env.context.get("discuss_channel"))
+    except Exception:  # noqa: BLE001
+        _interactive_chat = False
 
     # ---- Reconstruct tools from agent topics (v19.0.4.1.5) ----------
     # On the standalone AI chat-panel path the Enterprise controller
@@ -1907,7 +2085,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             # list explicitly (v19.0.4.2.1) — otherwise a sub-run with an
             # empty explicit tool list silently regains the router tool
             # and every write-side tool via this path.
-            _in_subrun = _router_depth > 0  # noqa: F821  (closure over _router_depth)
+            _in_subrun = getattr(
+                tool_dispatch.router_state, "depth", 0,
+            ) > 0
             names = []
             for action in agent.sudo().topic_ids.tool_ids:
                 if action.model_id and action.model_id.model == "ai.agent":
@@ -1915,7 +2095,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                     if not slug or slug in names:
                         continue
                     if _in_subrun and (
-                        slug == tool_dispatch.ROUTER_TOOL_SLUG
+                        slug in tool_dispatch.ORCHESTRATOR_TOOL_SLUGS
                         or slug in tool_dispatch.WRITE_SIDE_TOOL_SLUGS
                     ):
                         continue
@@ -1996,6 +2176,12 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     conversation = _inject_language_mirror(conversation)
     conversation = _inject_runtime_context(conversation)
+    if _interactive_chat and not response_format_extra:
+        conversation = _add_compact_chat_instruction(
+            conversation,
+            routed=bool(getattr(tool_dispatch.router_state, "depth", 0)),
+        )
+    conversation = _inject_orchestrator_prompt(agent, conversation)
 
     # ---- Request-structure telemetry (v19.0.4.1.5) -------------------
     # One INFO row per chat turn with SHAPE only (roles, counts,
@@ -2077,6 +2263,19 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         # count QUESTIONS (distinct turn_uuid / depth-0 rows) instead
         # of API calls.
         tool_dispatch.router_state.turn_uuid = uuid.uuid4().hex
+
+    # ---- Orchestrator hard gate (v19.0.6.22.0) ----------------------
+    # Robin (and any agent with daadit_is_orchestrator) must never keep
+    # search/write/open-menu tools at depth 0, even if a topic still
+    # links them. Keep only Ask Agent + Open Agent Chat.
+    if (
+        agent is not None
+        and _router_depth == 0
+        and getattr(agent, "daadit_is_orchestrator", False)
+        and normalized_tools
+    ):
+        normalized_tools = _filter_orchestrator_tools(agent, normalized_tools)
+
     # Fase 0 governance guardrail: cap hallucinated tool-name attempts.
     # After 2 "Unknown tool: ..." results in the same turn we bail out
     # instead of letting the model keep guessing and burn the cap.
@@ -2089,6 +2288,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # a routing instruction instead of ending the turn. Capped so a model
     # that keeps reaching for out-of-scope models can't loop.
     scope_redirects = 0
+    # v19.0.6.11.0: hooguit een keer per beurt een lege zoekopdracht
+    # omzetten in een routeer-aanwijzing.
+    empty_search_hints = 0
     # v19.0.6.5.4: concierge pass-through. When the TOP-LEVEL agent
     # routes a question via the router tool and the specialist returns a
     # real answer, that answer is relayed verbatim (with attribution)
@@ -2099,6 +2301,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # normal combining path. Tunable kill-switch via System Parameter
     # ``daadit_ai_mistral.router_passthrough`` (default on).
     router_passthrough = None
+    # v19.0.6.22.0: same short-circuit when the orchestrator opens a
+    # specialist chat — relay a one-line confirmation instead of another
+    # full generation.
+    open_chat_passthrough = None
     try:
         _passthrough_enabled = str(
             _icp.get_param("daadit_ai_mistral.router_passthrough", "1")
@@ -2332,11 +2538,51 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
             result = tool_dispatch.run_tool_call(agent, tc)
 
+            # v19.0.6.11.0: een lege zoekopdracht is een routeersignaal,
+            # geen eindpunt. Robin zocht zelf, vond niets, en vroeg de
+            # gebruiker om een exact klantnummer — terwijl die er net bij
+            # had gezegd dat de sales order bij Sanne hoort en de
+            # projectvoortgang bij Pim. Ook dat stond al in zijn prompt.
+            # Hier krijgt hij het op het moment dat het telt.
+            _fn_naam = (tc.get("function") or {}).get("name") or ""
+            if (
+                _router_depth == 0
+                and empty_search_hints < 1
+                and _fn_naam in _READ_TOOL_SLUGS
+                and _looks_empty(result)
+            ):
+                _zoekmodel = ""
+                try:
+                    _a = json.loads(
+                        (tc.get("function") or {}).get("arguments") or "{}"
+                    )
+                    _zoekmodel = str((_a or {}).get("model_name") or "")
+                except Exception:  # noqa: BLE001
+                    _zoekmodel = ""
+                _hulp = _colleagues_allowed_for_model(agent, _zoekmodel)
+                _kan_routeren = False
+                try:
+                    _kan_routeren = any(
+                        (t.get("function") or {}).get("name")
+                        == tool_dispatch.ROUTER_TOOL_SLUG
+                        for t in (active_tools or [])
+                    )
+                except Exception:  # noqa: BLE001
+                    _kan_routeren = False
+                if _kan_routeren and _hulp:
+                    empty_search_hints += 1
+                    _logger.info(
+                        "daadit_ai_mistral.llm_api_patch: lege zoekopdracht "
+                        "op %s omgezet in een routeer-aanwijzing naar %s",
+                        _zoekmodel or "?", _hulp[0].name,
+                    )
+                    result = _empty_search_hint(tc, _hulp)
+
             # A routed answer is the slowest step of all, so close it
             # off explicitly rather than leaving the last line hanging.
+            _tc_name = (tc.get("function") or {}).get("name")
             if (
-                (tc.get("function") or {}).get("name")
-                == tool_dispatch.ROUTER_TOOL_SLUG
+                _tc_name == tool_dispatch.ROUTER_TOOL_SLUG
                 and isinstance(result, dict)
             ):
                 _wie = _safe_name(result.get("agent"))
@@ -2346,6 +2592,22 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                         ("%s heeft geantwoord, ik verwerk het" % _wie)
                         if _wie
                         else "De collega heeft geantwoord, ik verwerk het",
+                        depth=_router_depth, kind="route",
+                    )
+                elif result.get("error"):
+                    _notify_step(agent, "Dat lukte niet, ik probeer het anders",
+                                 depth=_router_depth, kind="route")
+            elif (
+                _tc_name == tool_dispatch.OPEN_CHAT_TOOL_SLUG
+                and isinstance(result, dict)
+            ):
+                _wie = _safe_name(result.get("agent"))
+                if result.get("ok"):
+                    _notify_step(
+                        agent,
+                        ("Ik open een chat met %s" % _wie)
+                        if _wie
+                        else "Ik open een chat met een collega",
                         depth=_router_depth, kind="route",
                     )
                 elif result.get("error"):
@@ -2443,6 +2705,21 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                     router_passthrough = result
                     break
 
+            # v19.0.6.22.0: open-chat handoff pass-through.
+            if (
+                open_chat_passthrough is None
+                and _router_depth == 0
+                and _passthrough_enabled
+                and len(tool_calls) == 1
+                and (tc.get("function") or {}).get("name")
+                == tool_dispatch.OPEN_CHAT_TOOL_SLUG
+                and isinstance(result, dict)
+                and result.get("ok")
+                and result.get("opened")
+            ):
+                open_chat_passthrough = result
+                break
+
             try:
                 content = json.dumps(result, default=str)
             except Exception:  # noqa: BLE001
@@ -2454,7 +2731,12 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 "content": content,
             })
 
-        if access_denial or unknown_tool_break or router_passthrough:
+        if (
+            access_denial
+            or unknown_tool_break
+            or router_passthrough
+            or open_chat_passthrough
+        ):
             break
 
         iteration += 1
@@ -2637,6 +2919,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     if router_passthrough:
         _pt_answer = str(router_passthrough.get("answer") or "").strip()
         _pt_answer, _pt_trimmed = _strip_runaway_and_leaks(_pt_answer)
+        if _interactive_chat and _pt_answer:
+            _pt_answer, _pt_compacted = _compact_answer_text(_pt_answer)
+            _pt_trimmed = _pt_trimmed or _pt_compacted
         if _pt_trimmed:
             _logger.warning(
                 "daadit_ai_mistral.llm_api_patch: doorgegeven antwoord van "
@@ -2677,11 +2962,50 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             )
         return adapted
 
+    # v19.0.6.22.0: open-chat handoff — one short confirmation.
+    if open_chat_passthrough:
+        _oc_agent = open_chat_passthrough.get("agent") or "de specialist"
+        adapted = [
+            "Ik heb een chat met %s voor je geopend — daar kun je "
+            "verder praten." % _oc_agent
+        ]
+        _logger.info(
+            "daadit_ai_mistral.llm_api_patch: open-chat pass-through "
+            "(specialist=%s channel=%s) — final generation skipped",
+            _oc_agent, open_chat_passthrough.get("channel_id"),
+        )
+        try:
+            ch = api_self.env.context.get("discuss_channel")
+            channel_id = ch.id if ch and hasattr(ch, "id") else (
+                ch if isinstance(ch, int) else False
+            )
+            api_self.env["daadit_ai_mistral.usage"].sudo().record_usage(
+                kind="chat", model=model,
+                agent_id=agent.id if agent else False,
+                channel_id=channel_id,
+                prompt_tokens=usage.get("prompt_tokens") or 0,
+                completion_tokens=usage.get("completion_tokens") or 0,
+                iterations=iteration + 1,
+                has_tools=bool(normalized_tools),
+                depth=_router_depth,
+                turn_uuid=getattr(
+                    tool_dispatch.router_state, "turn_uuid", None,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.llm_api_patch: usage row creation "
+                "failed during open-chat pass-through; continuing"
+            )
+        return adapted
+
     adapted = _adapt_response_to_text_messages(response)
     # De eigen tekst van de agent gaat door dezelfde zeef als een
     # doorgegeven antwoord: intern verkeer en een doorgeslagen staart
     # horen niet in de chat.
-    adapted = _clean_adapted(adapted, "eindantwoord")
+    adapted = _clean_adapted(
+        adapted, "eindantwoord", compact=_interactive_chat,
+    )
     _logger.info(
         "daadit_ai_mistral.llm_api_patch: Mistral chat ok "
         "(model=%s iterations=%d tokens=%s/%s text_chunks=%d "

@@ -136,6 +136,27 @@ class AIAgent(models.Model):
     )
 
     # ------------------------------------------------------------------ #
+    # Orchestrator mode (Robin)                                          #
+    #                                                                    #
+    # When set, the chat loop keeps ONLY Ask Agent + Open Agent Chat.    #
+    # The agent may discuss everything with the user, but never executes #
+    # domain tools itself — it asks specialists or opens a chat so the   #
+    # user can continue with them.                                       #
+    # ------------------------------------------------------------------ #
+    daadit_is_orchestrator = fields.Boolean(
+        string="Orchestrator (no own tools)",
+        default=False,
+        help=(
+            "Tick for the concierge (Robin). The agent keeps only "
+            "'AI: Ask Agent' and 'AI: Open Agent Chat': it asks "
+            "specialists and returns their answers, or opens a new "
+            "chat with a specialist so the user can continue there. "
+            "All other tools (search, write, …) are stripped even if "
+            "they are still linked via topics."
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
     # Per-agent model access control                                     #
     #                                                                    #
     # Tools that take a ``model_name`` parameter (Search, Read group,    #
@@ -1089,7 +1110,12 @@ class AIAgent(models.Model):
         previous_user = record.user_id
         if previous_user.id == user.id:
             return {
-                "ok": True,
+                # 5-8-2026 (taak 779): een overgeslagen schrijfactie gaf
+                # ok=True terug. Voor het model niet te onderscheiden van
+                # succes — 75 keer in 7 dagen gerapporteerd als gedaan werk.
+                # De boodschap eronder was steeds correct; de envelop niet.
+                "ok": False,
+                "written": False,
                 "skipped": True,
                 "reason": "already_assigned",
                 "model_name": model_name,
@@ -1150,9 +1176,30 @@ class AIAgent(models.Model):
     _SELF_HEAL_PREFIX = "AUTO-APPLY"
 
     @classmethod
+    def _daadit_summary_starts_with_token(cls, summary, token):
+        """True when ``summary`` starts with ``token`` after junk/emoji.
+
+        Live AUTO-APPLY proposals often arrive as
+        ``⚠️ AUTO-APPLY niet toepasbaar:…``. A bare ``startswith`` misses
+        those and the open-activity cap then silently blocks the
+        self-heal channel (taak 773).
+        """
+        import re as _re
+        text = (summary or "").strip().upper()
+        if not text:
+            return False
+        needle = (token or "").strip().upper()
+        if not needle:
+            return False
+        if text.startswith(needle):
+            return True
+        cleaned = _re.sub(r"^[^0-9A-ZÀ-Ÿ]+", "", text)
+        return cleaned.startswith(needle)
+
+    @classmethod
     def _daadit_is_self_heal(cls, summary):
-        return (summary or "").strip().upper().startswith(
-            cls._SELF_HEAL_PREFIX
+        return cls._daadit_summary_starts_with_token(
+            summary, cls._SELF_HEAL_PREFIX,
         )
 
     @classmethod
@@ -1164,6 +1211,18 @@ class AIAgent(models.Model):
             token for token in cleaned.split()
             if len(token) > 1 and token not in cls._ACTIVITY_STOPWORDS
         }
+
+    @classmethod
+    def _daadit_is_rolling_signal(cls, summary):
+        """Daily rolling lists (restlijst) must refresh, not dedup-skip.
+
+        Jaccard topic-match collapses ``Restlijst assurance 2026-08-02:
+        1 onopgeloste runfout`` with today's list of six runs, so the
+        tool skipped creating/updating and the restlijst went dark for
+        days (taak 774).
+        """
+        tokens = cls._daadit_activity_tokens(summary)
+        return "restlijst" in tokens
 
     @classmethod
     def _daadit_same_activity_topic(cls, summary_a, summary_b):
@@ -1187,6 +1246,38 @@ class AIAgent(models.Model):
         union = tokens_a | tokens_b
         overlap = len(tokens_a & tokens_b) / len(union) if union else 0.0
         return overlap >= 0.5
+
+    def _daadit_refresh_activity(self, activity, summary, note, deadline):
+        """Update an open activity in place (rolling signals / cap path)."""
+        self.ensure_one()
+        vals = {
+            "summary": (summary or "").strip() or activity.summary,
+            "date_deadline": deadline or fields.Date.context_today(self),
+        }
+        if note:
+            vals["note"] = note
+        activity.write(vals)
+        return {
+            "ok": True,
+            "written": True,
+            "updated": True,
+            "reason": "updated_existing",
+            "message": (
+                "Updated the existing open activity instead of creating "
+                "a duplicate. Treat this as a successful write of the "
+                "current signal."
+            ),
+            "activity_id": activity.id,
+            "model_name": activity.res_model,
+            "record_id": activity.res_id,
+            "summary": activity.summary or "",
+            "date_deadline": (
+                activity.date_deadline.strftime("%Y-%m-%d")
+                if activity.date_deadline else ""
+            ),
+            "user_id": activity.user_id.id,
+            "user_name": activity.user_id.name,
+        }
 
     def _daadit_activity_throttle(self, assignee, model_name, record,
                                   summary):
@@ -1292,12 +1383,18 @@ class AIAgent(models.Model):
             limit, assignee.id, digest.id, fallback.login,
         )
         return {
-            "ok": True,
+            # Throttle bundled the item elsewhere — this assignee did
+            # not get a new activity. Keep the envelope honest (779).
+            "ok": False,
+            "written": False,
             "throttled": True,
-            "reason": (
+            "skipped": True,
+            "reason": "daily_throttle",
+            "message": (
                 "Daily agent-activity cap (%d) reached for user %s. "
                 "The item was added to the overflow digest for %s "
-                "instead of creating a new activity." % (
+                "instead of creating a new activity. Report it as "
+                "bundled, not as created." % (
                     limit, assignee.display_name, fallback.display_name,
                 )
             ),
@@ -1435,11 +1532,11 @@ class AIAgent(models.Model):
         Returns
         -------
         dict
-            ``{'ok': True, 'activity_id': <id>, ...}`` on success;
-            ``{'ok': True, 'skipped': True, 'reason': 'duplicate',
-            'existing_activity_id': <id>, ...}`` when an equivalent
-            open activity already exists;
-            ``{'error': '<reason>'}`` on validation failure.
+            ``{'ok': True, 'written': True, 'activity_id': <id>, ...}``
+            on create or refresh; ``{'ok': False, 'written': False,
+            'skipped': True, 'reason': 'duplicate'|'open_activity_cap',
+            'existing_activity_id': <id>, ...}`` when nothing was
+            written; ``{'error': '<reason>'}`` on validation failure.
         """
         self.ensure_one()
         if not model_name or not isinstance(model_name, str):
@@ -1567,8 +1664,20 @@ class AIAgent(models.Model):
                         existing = candidate
                         break
         if existing:
+            # Rolling daily signals (restlijst): refresh the open
+            # activity with today's summary/note/deadline instead of
+            # dropping the new content as a false duplicate (taak 774).
+            if self._daadit_is_rolling_signal(target_summary):
+                return self._daadit_refresh_activity(
+                    existing, target_summary, target_note, deadline,
+                )
             return {
-                "ok": True,
+                # 5-8-2026 (taak 779): een overgeslagen schrijfactie gaf
+                # ok=True terug. Voor het model niet te onderscheiden van
+                # succes — 75 keer in 7 dagen gerapporteerd als gedaan werk.
+                # De boodschap eronder was steeds correct; de envelop niet.
+                "ok": False,
+                "written": False,
                 "skipped": True,
                 "reason": "duplicate",
                 "message": (
@@ -1580,7 +1689,8 @@ class AIAgent(models.Model):
                 ),
                 "model_name": model_name,
                 "record_id": record.id,
-                "activity_id": existing.id,
+                # Bewust GEEN activity_id: dat is het id van een
+                # activiteit die deze agent niet heeft aangemaakt.
                 "existing_activity_id": existing.id,
                 "existing_summary": existing.summary or "",
                 "activity_type_id": act_type.id,
@@ -1610,14 +1720,30 @@ class AIAgent(models.Model):
                 self.name, len(existing_open), assignee.id,
                 model_name, record.id,
             )
+            # Prefer refreshing the newest open activity over dropping
+            # the signal entirely (taak 773: full channel = silent loss).
+            newest = existing_open.sorted("id", reverse=True)[:1]
+            if newest and (
+                self._daadit_is_rolling_signal(target_summary)
+                or target_note
+            ):
+                return self._daadit_refresh_activity(
+                    newest, target_summary, target_note, deadline,
+                )
             return {
-                "ok": True,
+                # 5-8-2026 (taak 779): een overgeslagen schrijfactie gaf
+                # ok=True terug. Voor het model niet te onderscheiden van
+                # succes — 75 keer in 7 dagen gerapporteerd als gedaan werk.
+                # De boodschap eronder was steeds correct; de envelop niet.
+                "ok": False,
+                "written": False,
                 "skipped": True,
                 "reason": "open_activity_cap",
                 "message": (
                     "%s already has %s open to-do(s) on this record: %s. "
                     "No new activity was created. Report the situation "
-                    "instead of adding another reminder." % (
+                    "instead of adding another reminder — the run must "
+                    "surface this as blocked, not as done." % (
                         assignee.name, len(existing_open),
                         "; ".join(
                             a.summary or "(no summary)"
@@ -1684,6 +1810,7 @@ class AIAgent(models.Model):
         )
         return {
             "ok": True,
+            "written": True,
             "model_name": model_name,
             "record_id": record.id,
             "activity_id": activity.id,
@@ -1692,6 +1819,46 @@ class AIAgent(models.Model):
             "date_deadline": deadline.strftime("%Y-%m-%d"),
             "user_id": assignee.id,
             "user_name": assignee.name,
+        }
+
+    def _ai_tool_assurance_coverage(self, **_extra):
+        """Return verified schedule rows for Argus' dekkingscheck (772).
+
+        Argus used to invent schedule links from agent ids
+        (``web#id=<agent_id>&model=daadit.ai.agent.schedule``). This tool
+        looks schedules up — including inactive ones — and returns only
+        rows that exist, with ``id``, ``name``, ``active``, ``agent_id``.
+        """
+        self.ensure_one()
+        if "daadit.ai.agent.schedule" not in self.env:
+            return {
+                "ok": False,
+                "error": (
+                    "Module daadit_ai_agent_schedule is not installed; "
+                    "cannot list schedules."
+                ),
+            }
+        Schedule = self.env["daadit.ai.agent.schedule"].with_context(
+            active_test=False,
+        ).sudo()
+        rows = []
+        for schedule in Schedule.search([], order="id"):
+            rows.append({
+                "id": schedule.id,
+                "name": schedule.name or "",
+                "active": bool(schedule.active),
+                "agent_id": schedule.agent_id.id or False,
+                "agent_name": schedule.agent_id.name or "",
+            })
+        return {
+            "ok": True,
+            "count": len(rows),
+            "schedules": rows,
+            "instruction": (
+                "Every coverage finding MUST use a schedule id from this "
+                "list. Never derive a schedule id from an agent id. "
+                "Include id, name, active and agent_id in the finding."
+            ),
         }
 
     # ------------------------------------------------------------------ #
@@ -1743,6 +1910,101 @@ class AIAgent(models.Model):
         "message": "question", "text": "question", "vraag": "question",
     }
 
+    @api.model
+    def _daadit_seed_orchestrator(self):
+        """Mark Robin / Ask AI as orchestrator and attach the handoff tool.
+
+        Idempotent. Safe to call from migrations and post_init.
+        """
+        for name in ("Robin", "Ask AI"):
+            agents = self.sudo().search([
+                ("name", "=ilike", name),
+                ("daadit_is_orchestrator", "=", False),
+            ])
+            if agents:
+                agents.write({"daadit_is_orchestrator": True})
+        ask = self.env.ref(
+            "daadit_ai_mistral.ir_actions_server_ask_agent",
+            raise_if_not_found=False,
+        )
+        open_chat = self.env.ref(
+            "daadit_ai_mistral.ir_actions_server_open_agent_chat",
+            raise_if_not_found=False,
+        )
+        if not ask or not open_chat or "ai.topic" not in self.env:
+            return
+        for topic in self.env["ai.topic"].sudo().search(
+            [("tool_ids", "in", ask.ids)]
+        ):
+            if open_chat.id not in topic.tool_ids.ids:
+                topic.write({"tool_ids": [(4, open_chat.id)]})
+
+    def _daadit_orchestrator_mode(self):
+        """True when this agent must only ask / hand off, never execute."""
+        self.ensure_one()
+        return bool(getattr(self, "daadit_is_orchestrator", False))
+
+    def _daadit_routing_fallback_hint(self):
+        """Recovery instruction after a failed route / handoff.
+
+        Orchestrators must not fall back to domain tools — they ask
+        another specialist or open a chat. Hybrid concierges keep the
+        historical "use your own tools" degradation path.
+        """
+        self.ensure_one()
+        if self._daadit_orchestrator_mode():
+            return (
+                "Ask another specialist via ir_actions_server_ask_agent, "
+                "or open a chat with the specialist via "
+                "ir_actions_server_open_agent_chat so the user can "
+                "continue there. Do NOT search, write or execute domain "
+                "tools yourself."
+            )
+        return "Answer with your own tools instead."
+
+    def _daadit_resolve_named_agent(self, agent_name):
+        """Resolve ``agent_name`` to an ``ai.agent`` or return an error dict.
+
+        Shared by Ask Agent and Open Agent Chat so both tools accept the
+        same aliases and the same unambiguous-name rules.
+        """
+        self.ensure_one()
+        if not agent_name or not isinstance(agent_name, str):
+            return None, {"error": (
+                "Missing 'agent_name'. Re-call with parameters "
+                "agent_name (exact specialist name) and the other "
+                "required fields."
+            )}
+        Agent = self.env["ai.agent"]
+        needle = agent_name.strip()
+        safe = needle.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        target = Agent.search([("name", "=ilike", safe)], limit=1)
+        if not target:
+            matches = Agent.search([("name", "ilike", safe)], limit=2)
+            if len(matches) > 1:
+                return None, {"error": (
+                    "Agent name '%s' is ambiguous (%s). Re-call with the "
+                    "exact agent name." % (
+                        needle, ", ".join(sorted(matches.mapped("name")))
+                    )
+                )}
+            target = matches[:1]
+        if not target:
+            available = Agent.search([]).mapped("name")
+            return None, {"error": (
+                "No agent named '%s'. Available agents: %s. Re-call with "
+                "one of these exact names. %s" % (
+                    needle, ", ".join(sorted(available)),
+                    self._daadit_routing_fallback_hint(),
+                )
+            )}
+        if target.id == self.id:
+            return None, {"error": (
+                "Refusing to route to myself. %s"
+                % self._daadit_routing_fallback_hint()
+            )}
+        return target, None
+
     def _ai_tool_ask_agent(self, agent_name=None, question=None, **_extra):
         """Delegate ``question`` to the agent named ``agent_name`` and
         return its final answer.
@@ -1751,8 +2013,9 @@ class AIAgent(models.Model):
         success, or ``{'error': '<reason>'}``. Error messages tell the
         concierge how to recover: a *recoverable* input error (missing
         param under an alias) instructs a re-call with the right names;
-        any other error instructs a fallback to the concierge's own
-        tools, so a hybrid concierge degrades gracefully.
+        other errors instruct an orchestrator-safe recovery (ask
+        another specialist / open a chat) or, for hybrid concierges,
+        a fallback to their own tools.
         """
         self.ensure_one()
         from ..services.llm_api_patch import _slug_tool_name
@@ -1789,47 +2052,21 @@ class AIAgent(models.Model):
         if depth >= 1:
             return {"error": (
                 "Routing depth limit reached: a routed agent cannot "
-                "route further. Answer with your own tools instead."
+                "route further. %s" % self._daadit_routing_fallback_hint()
             )}
 
         # --- Per-turn width budget ------------------------------------
         calls = getattr(tool_dispatch.router_state, "calls", 0)
         if calls >= self._DAADIT_ROUTER_MAX_CALLS_PER_TURN:
             return {"error": (
-                "Routing budget for this turn is used up. Answer with "
-                "your own tools instead."
+                "Routing budget for this turn is used up. %s"
+                % self._daadit_routing_fallback_hint()
             )}
         tool_dispatch.router_state.calls = calls + 1
 
-        Agent = self.env["ai.agent"]
-        # Escape LIKE wildcards so a name containing '%'/'_' can't match
-        # an unintended agent. ``search`` already excludes archived
-        # agents (active_test defaults True).
-        needle = agent_name.strip()
-        safe = needle.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
-        target = Agent.search([("name", "=ilike", safe)], limit=1)
-        if not target:
-            matches = Agent.search([("name", "ilike", safe)], limit=2)
-            if len(matches) > 1:
-                return {"error": (
-                    "Agent name '%s' is ambiguous (%s). Re-call with the "
-                    "exact agent name." % (
-                        needle, ", ".join(sorted(matches.mapped("name")))
-                    )
-                )}
-            target = matches[:1]
-        if not target:
-            available = Agent.search([]).mapped("name")
-            return {"error": (
-                "No agent named '%s'. Available agents: %s. Re-call with "
-                "one of these exact names, or answer with your own tools."
-                % (needle, ", ".join(sorted(available)))
-            )}
-        if target.id == self.id:
-            return {"error": (
-                "Refusing to route to myself. Answer with your own "
-                "tools instead."
-            )}
+        target, err = self._daadit_resolve_named_agent(agent_name)
+        if err:
+            return err
         # v19.0.6.5.4: route to non-Mistral agents too. The sub-run runs
         # on whichever provider the TARGET uses, so a Mistral concierge
         # can delegate to a Claude specialist (Sem, Vince, Maud, …)
@@ -1857,8 +2094,10 @@ class AIAgent(models.Model):
         if sub_provider is None:
             return {"error": (
                 "Agent '%s' runs on model '%s', for which no provider "
-                "path is available; cannot route. Answer with your own "
-                "tools instead." % (target.name, target.llm_model or "?")
+                "path is available; cannot route. %s" % (
+                    target.name, target.llm_model or "?",
+                    self._daadit_routing_fallback_hint(),
+                )
             )}
 
         # Delegating a question that was just refused on policy grounds
@@ -1875,6 +2114,16 @@ class AIAgent(models.Model):
                 "receiver may not read %s either",
                 self.name, self.id, target.name, target.id, names,
             )
+            if self._daadit_orchestrator_mode():
+                return {"error": (
+                    "Agent '%s' is not permitted to read %s either, so "
+                    "delegating this question cannot produce that data. "
+                    "Do not invent figures. Tell the user it is NOT "
+                    "ESTABLISHED and name the missing source, or open a "
+                    "chat with a colleague who does have that access via "
+                    "ir_actions_server_open_agent_chat."
+                    % (target.name, names)
+                )}
             return {"error": (
                 "Agent '%s' is not permitted to read %s either, so "
                 "delegating this question cannot produce that data. Do "
@@ -1883,12 +2132,21 @@ class AIAgent(models.Model):
                 "what you can establish yourself — never invent figures, "
                 "names or amounts to fill the gap." % (target.name, names)
             )}
+        try:
+            llm_api_patch._notify_step(
+                self,
+                "Oké, ik vraag het even aan %s." % target.name,
+                kind="route",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         # Build the sub-run tool list from the TARGET's topics. Strip
-        # the router tool (no chains) AND all write-side tools: routing
-        # fetches an ANSWER, never a mutation on the caller's behalf, so
-        # the draft-only policy holds across the router boundary even
-        # when routing to a write-capable agent (e.g. Helpdesk SLA).
+        # orchestrator tools (no chains / no handoffs) AND all
+        # write-side tools: routing fetches an ANSWER, never a mutation
+        # on the caller's behalf, so the draft-only policy holds across
+        # the router boundary even when routing to a write-capable
+        # agent (e.g. Helpdesk SLA).
         tool_names = []
         try:
             for action in target.sudo().topic_ids.tool_ids:
@@ -1896,7 +2154,7 @@ class AIAgent(models.Model):
                     slug = _slug_tool_name(action.name)
                     if (
                         slug
-                        and slug != tool_dispatch.ROUTER_TOOL_SLUG
+                        and slug not in tool_dispatch.ORCHESTRATOR_TOOL_SLUGS
                         and slug not in tool_dispatch.WRITE_SIDE_TOOL_SLUGS
                         and slug not in tool_names
                     ):
@@ -1918,15 +2176,16 @@ class AIAgent(models.Model):
 
         try:
             from odoo.addons.ai.utils.llm_api_service import LLMApiService
-            from ..services import llm_api_patch
-            # Guarantee the Mistral patch is installed before we use
-            # provider='mistral' — mirrors the schedule module, which
-            # does the same before its headless runs. Idempotent.
+            # Use the module-level llm_api_patch import. A local
+            # ``from ..services import llm_api_patch`` here used to
+            # shadow the name for the whole function and make the
+            # earlier _notify_step call raise UnboundLocalError
+            # (swallowed — so "Ik vraag het even aan …" never showed).
             llm_api_patch.patch_llm_api_service()
         except ImportError as exc:
             return {"error": (
-                "LLM service unavailable (%s). Answer with your own "
-                "tools instead." % exc
+                "LLM service unavailable (%s). %s"
+                % (exc, self._daadit_routing_fallback_hint())
             )}
 
         prev_record = getattr(tool_dispatch.current_agent, "record", None)
@@ -1935,6 +2194,11 @@ class AIAgent(models.Model):
         prev_denied = getattr(
             tool_dispatch.router_state, "sub_denied_model", "",
         )
+        # Tool tallies are zeroed for the sub-run and restored after, so
+        # what we report back is this delegate's own work and not the
+        # caller's. See ``tool_dispatch.note_tool_call``.
+        prev_calls_made = getattr(tool_dispatch.router_state, "calls_made", 0)
+        prev_writes_made = getattr(tool_dispatch.router_state, "writes_made", 0)
         # Set state and run inside one try/finally so a raise anywhere —
         # including before request_llm — can never leak depth or the
         # active-agent record onto this worker thread.
@@ -1942,6 +2206,8 @@ class AIAgent(models.Model):
             tool_dispatch.router_state.depth = depth + 1
             tool_dispatch.router_state.exhausted = False
             tool_dispatch.router_state.sub_denied_model = ""
+            tool_dispatch.router_state.calls_made = 0
+            tool_dispatch.router_state.writes_made = 0
             tool_dispatch.current_agent.record = target
             _logger.info(
                 "daadit_ai_mistral.router: agent %s(%s) routing question "
@@ -1968,14 +2234,18 @@ class AIAgent(models.Model):
             denied_model = getattr(
                 tool_dispatch.router_state, "sub_denied_model", "",
             ) or ""
+            sub_calls = getattr(tool_dispatch.router_state, "calls_made", 0)
+            sub_writes = getattr(tool_dispatch.router_state, "writes_made", 0)
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 "daadit_ai_mistral.router: sub-run on %s(%s) raised %s: %s",
                 target.name, target.id, type(exc).__name__, exc,
             )
             return {"error": (
-                "Routed agent '%s' failed (%s). Answer with your own "
-                "tools instead." % (target.name, type(exc).__name__)
+                "Routed agent '%s' failed (%s). %s" % (
+                    target.name, type(exc).__name__,
+                    self._daadit_routing_fallback_hint(),
+                )
             )}
         finally:
             tool_dispatch.current_agent.record = prev_record
@@ -1983,6 +2253,8 @@ class AIAgent(models.Model):
             tool_dispatch.router_state.exhausted = prev_exhausted
             tool_dispatch.router_state.sub_failed = prev_sub_failed
             tool_dispatch.router_state.sub_denied_model = prev_denied
+            tool_dispatch.router_state.calls_made = prev_calls_made
+            tool_dispatch.router_state.writes_made = prev_writes_made
 
         if isinstance(result, (list, tuple)):
             answer = "\n\n".join(
@@ -1993,14 +2265,14 @@ class AIAgent(models.Model):
 
         # The sub-run burned its whole iteration budget, or ended with a
         # (possibly translated) fallback sentinel, without producing a
-        # real answer. Report failure so the hybrid concierge falls back
-        # instead of relaying garbage. sub_failed is the language-
-        # independent signal set inside the sentinel path; exhausted
-        # covers MAX_ITER; the string check is a last-resort belt.
+        # real answer. Report failure so the concierge recovers instead
+        # of relaying garbage. sub_failed is the language-independent
+        # signal set inside the sentinel path; exhausted covers
+        # MAX_ITER; the string check is a last-resort belt.
         if exhausted or sub_failed:
             _logger.info(
                 "daadit_ai_mistral.router: sub-run on %s(%s) failed "
-                "(exhausted=%s sub_failed=%s) — signalling hybrid fallback",
+                "(exhausted=%s sub_failed=%s) — signalling recovery",
                 target.name, target.id, exhausted, sub_failed,
             )
             # A policy denial has a nameable cause, and a delegating
@@ -2016,19 +2288,315 @@ class AIAgent(models.Model):
                     "fill the gap." % (target.name, denied_model)
                 )}
             return {"error": (
-                "Agent '%s' could not complete the question. Answer with "
-                "your own tools instead, and report anything you could "
-                "not establish as NOT ESTABLISHED — never invent data."
-                % target.name
+                "Agent '%s' could not complete the question. %s Report "
+                "anything you could not establish as NOT ESTABLISHED — "
+                "never invent data." % (
+                    target.name, self._daadit_routing_fallback_hint(),
+                )
             )}
         if not answer or answer.lstrip().startswith((
             "_(Mistral wanted to call", "_(Empty response",
         )):
             return {"error": (
-                "Agent '%s' returned no usable answer. Answer with your "
-                "own tools instead." % target.name
+                "Agent '%s' returned no usable answer. %s"
+                % (target.name, self._daadit_routing_fallback_hint())
             )}
-        return {"ok": True, "agent": target.name, "answer": answer}
+        # What the delegate actually did, counted by the dispatcher —
+        # not what it says it did. Robin relayed "Post is set as a draft
+        # in the Social Marketing app" from Mark while the database held
+        # no such post and Mark had called no tool; the caller had no way
+        # to tell narration from fact. Now it does, and the instruction
+        # is explicit enough that a concierge cannot pass off a claim of
+        # created work as done.
+        claim = {
+            "ok": True,
+            "agent": target.name,
+            "answer": answer,
+            "tool_calls_made": sub_calls,
+            "write_actions_made": sub_writes,
+        }
+        if sub_writes == 0:
+            claim["fact_check"] = (
+                "%s made %s tool call(s) and NO write actions, so nothing "
+                "was created, changed or scheduled. If the answer above "
+                "claims otherwise, that claim is false: relay it as a "
+                "PROPOSAL, never as completed work, and say plainly that "
+                "it still has to be carried out." % (target.name, sub_calls)
+            )
+        else:
+            claim["fact_check"] = (
+                "%s made %s tool call(s), of which %s wrote to the "
+                "database. Only describe as done what the answer above "
+                "ties to a concrete record." % (
+                    target.name, sub_calls, sub_writes,
+                )
+            )
+        _logger.info(
+            "daadit_ai_mistral.router: sub-run on %s(%s) made %s calls / "
+            "%s writes", target.name, target.id, sub_calls, sub_writes,
+        )
+        return claim
+
+    # ------------------------------------------------------------------ #
+    # Handoff tool (v19.0.6.22.0) — "AI: Open Agent Chat"                #
+    #                                                                    #
+    # Opens (or reuses) a discuss channel of type ai_chat with the       #
+    # named specialist and nudges the user's UI to that chat. Robin      #
+    # never executes domain work himself; when the user wants to keep    #
+    # talking with a specialist, this is the path.                       #
+    # ------------------------------------------------------------------ #
+
+    _DAADIT_OPEN_CHAT_ALIASES = {
+        "agent": "agent_name", "name": "agent_name",
+        "target": "agent_name", "target_agent": "agent_name",
+        "agent_id": "agent_name", "specialist": "agent_name",
+        "message": "opening_message", "question": "opening_message",
+        "prompt": "opening_message", "text": "opening_message",
+        "vraag": "opening_message", "context": "opening_message",
+    }
+
+    def _ai_tool_open_agent_chat(
+        self, agent_name=None, opening_message=None, **_extra
+    ):
+        """Open a new user↔specialist chat and notify the UI.
+
+        Returns ``{'ok': True, 'agent': <name>, 'channel_id': <id>, ...}``
+        on success, or ``{'error': '<reason>'}``.
+        """
+        self.ensure_one()
+
+        if not agent_name or not opening_message:
+            for k, v in (_extra or {}).items():
+                tgt = self._DAADIT_OPEN_CHAT_ALIASES.get(k)
+                if tgt == "agent_name" and not agent_name and isinstance(v, str):
+                    agent_name = v
+                elif (
+                    tgt == "opening_message"
+                    and not opening_message
+                    and isinstance(v, str)
+                ):
+                    opening_message = v
+
+        depth = getattr(tool_dispatch.router_state, "depth", 0)
+        if depth >= 1:
+            return {"error": (
+                "Handoff is only available from the orchestrator chat, "
+                "not from inside a routed sub-run."
+            )}
+
+        target, err = self._daadit_resolve_named_agent(agent_name)
+        if err:
+            return err
+
+        # Prefer stock open_agent_chat — it owns channel creation and
+        # the client action that pops the chat window. We still locate
+        # the channel afterwards so the bus payload has a concrete id,
+        # and so we can post an optional opening message.
+        action = None
+        try:
+            action = target.open_agent_chat()
+        except Exception as exc:  # noqa: BLE001
+            _logger.info(
+                "daadit_ai_mistral.handoff: open_agent_chat on %s(%s) "
+                "raised %s — falling back to channel lookup/create",
+                target.name, target.id, type(exc).__name__,
+            )
+            action = None
+
+        channel = self._daadit_channel_from_action(action)
+        if not channel:
+            channel = self._daadit_find_or_create_agent_chat(target)
+        if not channel:
+            return {"error": (
+                "Could not open a chat with '%s'. %s"
+                % (target.name, self._daadit_routing_fallback_hint())
+            )}
+
+        posted = False
+        seed = (opening_message or "").strip() if opening_message else ""
+        if seed:
+            try:
+                from markupsafe import escape as _esc
+                # Preserve line breaks so a multi-line brief stays
+                # readable in Discuss.
+                html = "<p>%s</p>" % _esc(seed).replace("\n", "<br/>")
+                channel.message_post(
+                    body=Markup(html),
+                    message_type="comment",
+                    author_id=self.env.user.partner_id.id,
+                    subtype_xmlid="mail.mt_comment",
+                )
+                posted = True
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "daadit_ai_mistral.handoff: could not post opening "
+                    "message on channel %s", channel.id,
+                )
+
+        payload = {
+            "channel_id": channel.id,
+            "agent_id": target.id,
+            "agent_name": target.name,
+        }
+        if isinstance(action, dict):
+            # Only forward JSON-safe action keys the client can doAction.
+            safe_action = {
+                k: action[k]
+                for k in (
+                    "type", "tag", "name", "res_model", "res_id",
+                    "views", "view_mode", "target", "context",
+                    "params", "path",
+                )
+                if k in action
+            }
+            if safe_action.get("type"):
+                payload["action"] = safe_action
+
+        # Own cursor + immediate commit, same reason as denkstappen: a
+        # whole chat turn is one transaction, and bus messages only
+        # leave on commit. Without this the UI would open the specialist
+        # chat only after Robin's confirmation is already posted.
+        self._daadit_notify_open_agent_chat(payload)
+        try:
+            llm_api_patch._notify_step(
+                self,
+                "Ik open even de chat met %s." % target.name,
+                kind="route",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        _logger.info(
+            "daadit_ai_mistral.handoff: %s(%s) opened chat with %s(%s) "
+            "as channel %s for user %s (posted=%s)",
+            self.name, self.id, target.name, target.id, channel.id,
+            self.env.uid, posted,
+        )
+        return {
+            "ok": True,
+            "opened": True,
+            "agent": target.name,
+            "channel_id": channel.id,
+            "opening_message_posted": posted,
+            "instruction": (
+                "Chat with %s is open. Reply in ONE short sentence "
+                "(e.g. 'Je kunt verder met %s.'). No recap, no more "
+                "tools." % (target.name, target.name)
+            ),
+        }
+
+    def _daadit_channel_from_action(self, action):
+        """Pull a ``discuss.channel`` id out of a stock client action."""
+        Channel = self.env["discuss.channel"]
+        if not isinstance(action, dict):
+            return Channel.browse()
+        if (
+            action.get("res_model") == "discuss.channel"
+            and action.get("res_id")
+        ):
+            return Channel.browse(action["res_id"]).exists()
+        for bag_name in ("context", "params"):
+            bag = action.get(bag_name) or {}
+            if not isinstance(bag, dict):
+                continue
+            for key in ("active_id", "default_active_id", "channel_id"):
+                val = bag.get(key)
+                if isinstance(val, int):
+                    found = Channel.browse(val).exists()
+                    if found:
+                        return found
+                if isinstance(val, str) and "discuss.channel_" in val:
+                    try:
+                        cid = int(val.rsplit("_", 1)[-1])
+                    except ValueError:
+                        continue
+                    found = Channel.browse(cid).exists()
+                    if found:
+                        return found
+        return Channel.browse()
+
+    def _daadit_notify_open_agent_chat(self, payload):
+        """Push the handoff bus event on a short-lived cursor (best-effort)."""
+        partner = self.env.user.partner_id
+        if not partner:
+            return
+        try:
+            import odoo
+            from odoo import api, SUPERUSER_ID
+            partner_id = partner.id
+            dbname = self.env.cr.dbname
+            with odoo.registry(dbname).cursor() as cr2:
+                env2 = api.Environment(cr2, SUPERUSER_ID, {})
+                env2["bus.bus"]._sendone(
+                    env2["res.partner"].browse(partner_id),
+                    "daadit_open_agent_chat",
+                    payload,
+                )
+                cr2.commit()
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.handoff: bus notify failed for "
+                "channel %s", payload.get("channel_id"),
+            )
+
+    def _daadit_find_or_create_agent_chat(self, target):
+        """Return the user's newest ``ai_chat`` with ``target``, creating
+        one when stock ``open_agent_chat`` did not leave one behind.
+
+        Best-effort: channel schemas differ slightly across Odoo builds,
+        so create failures are logged and return an empty recordset.
+        """
+        self.ensure_one()
+        Channel = self.env["discuss.channel"]
+        partner = self.env.user.partner_id
+        domain = [
+            ("channel_type", "=", "ai_chat"),
+            ("ai_agent_id", "=", target.id),
+        ]
+        if partner:
+            domain.append(
+                ("channel_member_ids.partner_id", "in", [partner.id])
+            )
+        try:
+            channel = Channel.search(
+                domain, order="write_date desc, id desc", limit=1,
+            )
+        except Exception:  # noqa: BLE001
+            channel = Channel.browse()
+        if channel:
+            return channel
+
+        vals = {
+            "name": target.name,
+            "channel_type": "ai_chat",
+            "ai_agent_id": target.id,
+        }
+        try:
+            channel = Channel.create(vals)
+        except Exception:  # noqa: BLE001
+            _logger.exception(
+                "daadit_ai_mistral.handoff: could not create ai_chat "
+                "for agent %s(%s)", target.name, target.id,
+            )
+            return Channel.browse()
+
+        # Ensure the calling user is a member so the UI can open it.
+        try:
+            if partner and hasattr(channel, "add_members"):
+                channel.add_members(partner_ids=partner.ids)
+            elif partner and "channel_member_ids" in channel._fields:
+                channel.write({
+                    "channel_member_ids": [(0, 0, {
+                        "partner_id": partner.id,
+                    })],
+                })
+        except Exception:  # noqa: BLE001
+            _logger.info(
+                "daadit_ai_mistral.handoff: could not add user %s to "
+                "channel %s (may already be a member)",
+                self.env.uid, channel.id,
+            )
+        return channel
 
     def _daadit_no_activity_hint(self, model_name):
         """Message for a model that cannot carry an activity.
