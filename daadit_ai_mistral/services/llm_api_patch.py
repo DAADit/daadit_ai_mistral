@@ -2176,12 +2176,12 @@ def _request_llm_mistral(api_self, *args, **kwargs):
 
     conversation = _inject_language_mirror(conversation)
     conversation = _inject_runtime_context(conversation)
-    conversation = _inject_orchestrator_prompt(agent, conversation)
     if _interactive_chat and not response_format_extra:
         conversation = _add_compact_chat_instruction(
             conversation,
             routed=bool(getattr(tool_dispatch.router_state, "depth", 0)),
         )
+    conversation = _inject_orchestrator_prompt(agent, conversation)
 
     # ---- Request-structure telemetry (v19.0.4.1.5) -------------------
     # One INFO row per chat turn with SHAPE only (roles, counts,
