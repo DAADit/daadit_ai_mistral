@@ -32,7 +32,7 @@ in their respective files. Multiple candidate names are wrapped to survive
 across Odoo versions; verify against the installed Enterprise source on your
 Odoo.sh dev branch before relying on this in production.
 """,
-    "version": "19.0.8.0.0",
+    "version": "19.0.9.0.0",
     "category": "Productivity/Discuss",
     "author": "DAADit",
     "website": "https://daadit.group",
@@ -43,6 +43,11 @@ Odoo.sh dev branch before relying on this in production.
         "base",
         "ai",
         "ai_app",
+        # mail: deze module breidt mail.activity uit. Zonder de
+        # afhankelijkheid hangt het ervan af of mail eerder in de
+        # laadvolgorde staat, en die volgorde verschuift zodra er een
+        # module bijkomt.
+        "mail",
     ],
     "external_dependencies": {
         "python": ["requests"],
@@ -53,10 +58,12 @@ Odoo.sh dev branch before relying on this in production.
         "data/ai_tools.xml",
         "data/cost_cap_params.xml",
         "data/fallback_params.xml",
+        "data/agent_skill_data.xml",
         "data/mistral_models_seed.xml",
         "data/model_sync_cron.xml",
         "views/res_config_settings_views.xml",
         "views/mistral_usage_views.xml",
+        "views/ai_agent_skill_views.xml",
         "views/ai_agent_views.xml",
         "views/mistral_model_views.xml",
         "views/ai_agent_read_scope_views.xml",
@@ -76,6 +83,7 @@ Odoo.sh dev branch before relying on this in production.
         # services/tool_dispatch.py.
     ],
     "pre_init_hook": "pre_init_hook",
+    "post_init_hook": "post_init_hook",
     "uninstall_hook": "uninstall_hook",
     "installable": True,
     "application": False,

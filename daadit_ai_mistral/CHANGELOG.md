@@ -7,6 +7,54 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.9.0.0 — 2026-08-13
+
+De twee lijnen van deze module zijn samengevoegd: alles wat na de vorige
+consolidatieronde (4-8) nog alleen in de deploy-map van `DAADit/daadit`
+stond, staat nu hier. Daarmee is deze repo de enige bron en kan de
+deploy-repo de module als submodule op de tag van deze versie pinnen —
+zie `docs/OVERDRACHT_SUBMODULE.md`.
+
+Overgenomen uit de deploy-lijn (elk als eigen commit, met de oorspronkelijke
+boodschap):
+
+* een lege zoekopdracht is een routeersignaal, niet een antwoord;
+* een overgeslagen schrijfactie meldt geen succes meer, en de schrijfgrens
+  komt uit de scoperecords in plaats van uit Python in een databaseveld;
+* de financiële bezetting onder Floris (Bo, Dirk, Marit, Coen), met de
+  hernoeming van de facturatierol van Fenna naar Marit;
+* Robin als orchestrator: `daadit_is_orchestrator`, de tool
+  `AI: Open Agent Chat` en de handoff-notify over een eigen bus-cursor;
+* `daadit.ai.agent.skill` — de skill-catalogus met view, ACL's en seeding;
+* de fact-check onder een gedelegeerd antwoord: `tool_calls_made`,
+  `write_actions_made` en de regel die zegt dat er niets is aangemaakt;
+* de P0-betrouwbaarheid van activiteiten (Argus-restlijst en zelfherstel);
+* de chat-UX: snellere terugkoppeling, de compacte stijl alleen in een
+  interactieve beurt, en stillere XML-RPC-waarschuwingen;
+* de testhardening voor Odoo.sh (overslaan zonder knowledge/account/project).
+
+Twee dingen uit deze lijn blijven staan en zijn dus bewust een verschil met
+de deploy-map zolang die bestaat: het echte JSON-schema van een door de
+operator gemaakte tool (`_custom_tool_definition`, `annotate_tools(...,
+agent=...)`) en de taalreferentie die te korte berichten overslaat
+(`MIN_LANG_REF_LETTERS`). Beide zijn gedekt door
+`tests/test_consolidatie_behoud.py`.
+
+Versienummer: productie draaide bij het samenvoegen `19.0.6.28.0`
+(`installed_version` = `latest_version`, gemeten op `ir.module.module`), de
+deploy-map stond op `19.0.6.27.0` en deze repo op `19.0.8.0.0`. `19.0.9.0.0`
+ligt boven alle drie; een gelijk of lager nummer zou de upgrade op Odoo.sh
+overslaan en migraties laten liggen.
+
+Migraties: de vijf overgenomen scripts stonden in de deploy-lijn onder
+`19.0.6.19.0` … `19.0.6.27.0`. Die versies liggen onder de huidige, dus bij
+een upgrade vanaf `19.0.8.0.0` zou Odoo ze nooit uitvoeren. Ze staan nu
+samen in `migrations/19.0.9.0.0/`; alle vijf zijn idempotent en
+niet-verruimend, dus opnieuw draaien is ongevaarlijk.
+
+De Odoo-tests konden hier niet draaien (geen Odoo 19 Enterprise op de
+bouwmachine); de eerste echte uitvoering is de Odoo.sh-build.
+
 ## 19.0.8.0.0 — 2026-08-04
 
 Consolidatie (OAS 711), portie 4 van 4: de testmap uit de deploy-lijn
