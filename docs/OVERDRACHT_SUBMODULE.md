@@ -15,6 +15,8 @@ Hieronder de exacte commando's, de controle achteraf en de valkuil.
 - Op die merge-commit staat de release-tag, en die tag hoort gelijk te zijn aan
   het manifest. De workflow `.github/workflows/sync-release.yml` weigert bij
   ongelijkheid.
+- Die workflow draait sinds 19.0.9.0.0 **niet meer automatisch op een tag**;
+  taggen is dus veilig en start geen kopieer-PR's meer.
 
 ```bash
 # in een clone van DAADit/daadit_ai_mistral, op de gemergede main
@@ -26,11 +28,11 @@ git tag -a v19.0.9.0.0 -m "Samenvoeging van de product- en deploy-lijn (OAS 711)
 git push origin v19.0.9.0.0
 ```
 
-> Let op: het pushen van een `v*`-tag start `sync-release.yml`, die met de
-> `DEPLOY_PAT` een **PR** opent op `adriedaadit/daadit` én op
-> `nimbleconsulting/BroStar` waarin de map wordt overschreven met de tag-inhoud.
-> Dat is de oude, kopiërende route. Wil je alleen de submodule-omzetting, sluit
-> die PR's dan of zet de workflow uit voordat je tagt.
+> `sync-release.yml` is de oude, kopiërende route: die overschrijft de map in
+> `adriedaadit/daadit` en `nimbleconsulting/BroStar` met de tag-inhoud. Hij
+> draait alleen nog handmatig (Actions → Run workflow, met de tag), voor targets
+> die de submodule nog niet hebben. Draai hem **niet** op een target dat al is
+> omgezet — dan staat de gekopieerde map er weer naast de submodule.
 
 ## 1. De omzetting in de deploy-repo
 

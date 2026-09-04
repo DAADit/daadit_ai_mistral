@@ -1,15 +1,26 @@
 name: Sync release to deploy repos
 
-# Fires on every release tag (v19.0.4.4.0 etc). For each deploy target it
-# replaces the daadit_ai_mistral/ folder with the tagged content and opens
-# a PR — a human still reviews and merges, so nothing lands on a deploy
-# branch unseen. Requires the DEPLOY_PAT repo secret: a PAT of an account
+# Copies the tagged daadit_ai_mistral/ folder into each deploy target and
+# opens a PR there. Requires the DEPLOY_PAT repo secret: a PAT of an account
 # with push access to every target repo below.
+#
+# Sinds 19.0.9.0.0 draait dit niet meer automatisch op een tag (OAS 711).
+# Kopiëren ís de tweede lijn die deze module bijna een dagfix kostte: de
+# deploy-repo neemt de module op als submodule, gepind op een tag, en een
+# upgrade is dan het verzetten van die pin. Zie
+# docs/OVERDRACHT_SUBMODULE.md.
+#
+# De workflow blijft staan voor targets die nog niet zijn omgezet, maar
+# alleen handmatig: Actions → deze workflow → Run workflow, met de tag.
+# Draai hem niet op een target dat de submodule al gebruikt — dan zet je de
+# gekopieerde map terug en heb je de map én de submodule.
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sync (e.g. v19.0.9.0.0)"
+        required: true
 
 jobs:
   verify:
@@ -17,9 +28,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
       - name: Compare tag with __manifest__.py
+        env:
+          RELEASE: ${{ inputs.tag }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${RELEASE#v}"
           MANIFEST=$(python3 -c "import ast; print(ast.literal_eval(open('daadit_ai_mistral/__manifest__.py').read())['version'])")
           echo "tag=$TAG manifest=$MANIFEST"
           if [ "$TAG" != "$MANIFEST" ]; then
@@ -43,6 +58,7 @@ jobs:
       - name: Checkout product repo at tag
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag }}
           path: product
 
       - name: Clone deploy repo
@@ -54,6 +70,8 @@ jobs:
 
       - name: Sync module folder
         id: sync
+        env:
+          RELEASE: ${{ inputs.tag }}
         run: |
           rsync -a --delete product/daadit_ai_mistral/ target/daadit_ai_mistral/
           cd target
@@ -61,25 +79,26 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Target already at ${GITHUB_REF_NAME} — nothing to sync."
+            echo "Target already at ${RELEASE} — nothing to sync."
           fi
 
       - name: Push branch and open PR
         if: steps.sync.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.DEPLOY_PAT }}
+          RELEASE: ${{ inputs.tag }}
         run: |
           cd target
-          BRANCH="sync/daadit_ai_mistral-${GITHUB_REF_NAME}"
+          BRANCH="sync/daadit_ai_mistral-${RELEASE}"
           git config user.name "daadit-release-sync"
           git config user.email "dev@daadit.group"
           git checkout -b "$BRANCH"
           git add daadit_ai_mistral
-          git commit -m "daadit_ai_mistral: sync release ${GITHUB_REF_NAME} from DAADit/daadit_ai_mistral"
+          git commit -m "daadit_ai_mistral: sync release ${RELEASE} from DAADit/daadit_ai_mistral"
           git push origin "$BRANCH"
           gh pr create \
             --repo "${{ matrix.repo }}" \
             --base "${{ matrix.base }}" \
             --head "$BRANCH" \
-            --title "daadit_ai_mistral ${GITHUB_REF_NAME}" \
-            --body "$(printf 'Automated sync of tagged release %s from DAADit/daadit_ai_mistral.\n\nSee the CHANGELOG.md inside the module for what changed. Merging this PR triggers the Odoo.sh build for this branch; upgrade the module afterwards if auto-update is off.' "${GITHUB_REF_NAME}")"
+            --title "daadit_ai_mistral ${RELEASE}" \
+            --body "$(printf 'Manual sync of tagged release %s from DAADit/daadit_ai_mistral.\n\nSee the CHANGELOG.md inside the module for what changed. Merging this PR triggers the Odoo.sh build for this branch; upgrade the module afterwards if auto-update is off.\n\nNOTE: this is the copying route. Targets that took the module as a git submodule should move the submodule pin instead — see docs/OVERDRACHT_SUBMODULE.md.' "${RELEASE}")"
