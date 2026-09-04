@@ -54,6 +54,40 @@ class DaaditAiAgentSkill(models.Model):
             "(for example search_read, create, write)."
         ),
     )
+    # Taak 844 — wat provisioning uit één skill afleidt, naast de
+    # required_* / capability_codes hierboven.
+    blocked_models = fields.Char(
+        help=(
+            "Comma-separated Odoo models this skill must never touch on "
+            "the customer tenant (merged into the provisioned agent's "
+            "block list)."
+        ),
+    )
+    field_blocklist = fields.Char(
+        help=(
+            "Comma-separated model.field entries this skill forbids "
+            "(merged with the tenant field blocklist at provision time)."
+        ),
+    )
+    activity_scope_models = fields.Char(
+        help=(
+            "Comma-separated models on which this skill may schedule "
+            "mail.activity rows. Empty = no activity scope from this skill."
+        ),
+    )
+    schedule_active_default = fields.Boolean(
+        string="Schedule active after provision",
+        default=False,
+        help=(
+            "If set, hire provisioning may activate the schedule "
+            "immediately. Default off: schedules stay inactive / dry-run "
+            "until connection and customer ack are complete (844/837)."
+        ),
+    )
+    schedule_prompt = fields.Text(
+        translate=True,
+        help="Optional standing prompt fragment for this skill's schedule.",
+    )
 
 
 class AIAgent(models.Model):
@@ -81,7 +115,27 @@ class AIAgent(models.Model):
         """
         mapping = {
             "Argus": ["skill_governance_agent_assurance"],
-            "Bo": ["skill_finance_ledger_check"],
+            # Bo is de boekhouder, geen grootboekcontroleur: hij hoort
+            # de hele boekhoudset te kennen, anders kan hij bij een klant
+            # alleen naar het grootboek kijken en niets van de rest.
+            "Bo": [
+                "skill_finance_ledger_check",
+                "skill_finance_overdue_receivables",
+                "skill_finance_invoice_candidates",
+                "skill_finance_margin_report",
+                "skill_finance_month_report",
+                "skill_finance_vat_prep",
+            ],
+            # Orderverwerking hoort bij sales: Sanne's werk loopt van
+            # lead tot levering. Factureren blijft bij Marit, daarom
+            # geeft ze een order klaar-om-te-factureren alleen door.
+            "Sanne": [
+                "skill_sales_order_intake_check",
+                "skill_sales_order_price_variance",
+                "skill_sales_order_stock_check",
+                "skill_sales_order_delivery_watch",
+                "skill_sales_order_invoice_handover",
+            ],
             "Dirk": ["skill_finance_overdue_receivables"],
             "Marit": ["skill_finance_invoice_candidates"],
             "Coen": ["skill_finance_margin_report"],

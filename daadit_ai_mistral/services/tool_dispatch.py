@@ -30,6 +30,7 @@ This module:
 """
 from odoo.fields import Domain as _Domain
 import ast
+import difflib
 import json
 import logging
 import re
@@ -118,6 +119,12 @@ def note_tool_call(fn_name, ok=True):
 WRITE_SIDE_TOOL_SLUGS = frozenset({
     "ir_actions_server_assign_user",
     "ir_actions_server_schedule_activity",
+    # Projectrapportage: doel, fasen en voortgang horen bij de
+    # projectmanager zelf. Een gedelegeerde sub-run mag ze lezen via
+    # zijn antwoord, niet wegschrijven op zijn naam.
+    "ir_actions_server_project_goal_set",
+    "ir_actions_server_project_phase_upsert",
+    "ir_actions_server_project_report",
 })
 
 # The router tool itself — never exposed inside a routed sub-run
@@ -211,6 +218,15 @@ def _agent_tool_actions(agent):
             "tool_ids for agent=%s", getattr(agent, "id", "?"),
         )
         return None
+
+
+# Zoektools waarvan het domein-argument leeg mag zijn: "geen filter"
+# betekent alle records. Hun stock-implementatie doet ``json.loads`` op
+# de waarde, dus vullen we de JSON-lege lijst in, niet een echte lijst.
+_DEFAULT_EMPTY_DOMAIN_TOOLS = (
+    "ir_actions_server_search",
+    "ir_actions_server_read_group",
+)
 
 
 def _missing_required_args(action, kwargs):
@@ -1204,53 +1220,218 @@ def _result_cap_chars(env):
         return _MAX_TOOL_RESULT_CHARS
 
 
-def _truncate_to_cap(safe, fn_name, cap):
-    """Cut an over-cap result down to size instead of refusing it.
+# Per-veld afkapping vóór per-record afkapping (taak 1076).
+#
+# Run 582 vroeg ``body`` op en viel om op "Tool result too large". De cap
+# hieronder verving dat door records van de staart te laten vallen, maar
+# bij één zwaar veld is dat het verkeerde snijvlak. Twintig tickets met
+# een lange ``description`` worden dan drie tickets, en de agent weet
+# niet welke zeventien hij mist; één knowledge-artikel met een ``body``
+# van 240 000 tekens verdwijnt zelfs volledig (``records: []`` met de
+# tekst "these are real records — use them", wat op nul records een
+# leugen is).
+#
+# Daarom knippen we eerst per tekstveld en pas daarna per record, en
+# staat de afkapping op twee plaatsen: als markering ín de waarde en als
+# regel in ``truncated_fields``. Een agent die alle ids houdt en per veld
+# leest dat er tekst is weggelaten, kan gericht doorvragen. Een agent die
+# stil de helft kwijt is, rapporteert een halve waarheid als geheel — en
+# dat is erger dan een foutmelding.
+_HEAVY_FIELD_MIN_CHARS = 500
+_HEAVY_FIELD_CAP_SHARE = 8
+# Onder deze grens is een fragment niets meer waard; dan liever records
+# van de staart laten vallen en dat zeggen.
+_HEAVY_FIELD_FLOOR_CHARS = 200
+_TRIM_MARKER = (
+    "… [AFGEKAPT: %(kept)s van %(total)s tekens van dit veld staan hier. "
+    "Vraag dit veld opnieuw op voor maximaal 5 records tegelijk om de "
+    "rest te lezen; concludeer niets uit deze halve waarde.]"
+)
+# Meer dan dit aantal regels helpt niemand en kost zelf context.
+_TRIM_REPORT_LIMIT = 50
+# Ruimte die we vrijhouden voor de uitleg zelf: de note en de
+# ``truncated_fields``-regels staan buiten de recordlijst, dus zonder
+# deze marge zou een resultaat dat "binnen de cap" is gesneden alsnog
+# boven de cap uitkomen.
+_NOTE_RESERVE_CHARS = 1200
 
-    A refusal costs an iteration and yields nothing, so the model
-    re-asks — run 519 sent the same 262k-character query five times in a
-    row and then died on the iteration limit. A list is the common
-    shape, and half a list plus an explicit ``truncated`` marker is
-    genuinely useful: the model can answer from the first records, and
-    it knows there are more, so it can narrow down *on purpose* instead
-    of guessing whether the call failed.
 
-    Records are dropped from the tail one at a time rather than
-    estimated, because record sizes differ by orders of magnitude
-    (a ``res.users`` row vs a ``mail.message`` body).
+def _heavy_field_budget(cap):
+    """Hoeveel tekens één tekstwaarde mag kosten voordat hij wordt geknipt.
+
+    Een achtste van de cap: genoeg om een veld inhoudelijk te herkennen,
+    laag genoeg dat één zwaar veld niet het hele resultaat opeet. Bij veel
+    zware velden in hetzelfde resultaat wordt dit getal in
+    :func:`_trim_to_fit` gehalveerd tot het geheel past.
     """
+    return max(_HEAVY_FIELD_MIN_CHARS, cap // _HEAVY_FIELD_CAP_SHARE)
+
+
+def _trim_to_fit(safe, cap):
+    """Knip zware velden zo ver terug als nodig is om binnen de cap te passen.
+
+    Waarom halveren en niet één vast budget: twintig tickets met elk een
+    lange beschrijving passen niet op een achtste van de cap per veld, en
+    één vast budget zou dus alsnog zeventien records laten vallen. Liever
+    twintig korte fragmentjes mét alle ids — daarmee kan de agent gericht
+    doorvragen — dan drie volledige records en zeventien die hij niet
+    kent. Onder :data:`_HEAVY_FIELD_FLOOR_CHARS` stopt het: een fragment
+    van vijftig tekens is geen informatie meer.
+
+    Geeft ``(resultaat, geknipte_velden)`` terug.
+    """
+    budget = _heavy_field_budget(cap)
+    while True:
+        trimmed = []
+        candidate = _trim_heavy_strings(safe, budget, trimmed)
+        if not trimmed or budget <= _HEAVY_FIELD_FLOOR_CHARS:
+            return candidate, trimmed
+        try:
+            size = len(json.dumps(candidate, default=str))
+        except Exception:  # noqa: BLE001
+            return candidate, trimmed
+        if size <= cap:
+            return candidate, trimmed
+        budget = max(_HEAVY_FIELD_FLOOR_CHARS, budget // 2)
+
+
+def _trim_heavy_strings(value, budget, trimmed, label=""):
+    """Knip te lange tekstwaarden af en houd bij welke dat waren.
+
+    ``trimmed`` krijgt één regel per geknipt veld, met het record-id
+    erbij wanneer de dict er een heeft. Zo kan het antwoord benoemen
+    *wat* er mist in plaats van alleen *dat* er iets mist. Geeft een
+    nieuwe structuur terug; muteert de invoer niet.
+    """
+    if isinstance(value, str):
+        if len(value) <= budget:
+            return value
+        trimmed.append({
+            "field": label or "result",
+            "chars": len(value),
+            "kept_chars": budget,
+        })
+        return value[:budget] + _TRIM_MARKER % {
+            "kept": budget, "total": len(value),
+        }
+    if isinstance(value, dict):
+        rid = value.get("id")
+        base = (
+            "#%s." % rid if isinstance(rid, int) and not isinstance(rid, bool)
+            else ("%s." % label if label else "")
+        )
+        return {
+            k: _trim_heavy_strings(v, budget, trimmed, "%s%s" % (base, k))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _trim_heavy_strings(v, budget, trimmed, "%s[%s]" % (label, i))
+            for i, v in enumerate(value)
+        ]
+    return value
+
+
+def _truncation_note(kept, total, trimmed, cap):
+    """De tekst die de agent moet vertellen wat hij níet heeft gezien."""
+    if not kept:
+        return (
+            f"None of the {total} record(s) fit within the {cap}-character "
+            f"cap, even after shortening long text fields. You have NOT "
+            f"seen this data: re-call with an explicit short `fields` list "
+            f"(for example [\"id\", \"name\"]) and read heavy fields "
+            f"(`body`, `description`, `note`) for at most 5 records at a "
+            f"time. Do not answer as if the records were empty."
+        )
+    parts = []
+    if kept < total:
+        parts.append(
+            f"Only the first {kept} of {total} records are included "
+            f"(the {cap}-character cap). These are real records — use "
+            f"them. Do not repeat this call unchanged: to see the rest, "
+            f"narrow the `domain`, pass a shorter `fields` list, or page "
+            f"with `offset`."
+        )
+    else:
+        parts.append(f"All {total} record(s) are included.")
+    if trimmed:
+        parts.append(
+            f"{len(trimmed)} long text field(s) were shortened — see "
+            f"`truncated_fields`. Every value marked [AFGEKAPT] is "
+            f"INCOMPLETE; you have not read it in full. Re-read such a "
+            f"field for at most 5 records at a time before drawing a "
+            f"conclusion from it, and say so if you did not."
+        )
+    return " ".join(parts)
+
+
+def _truncate_to_cap(safe, fn_name, cap):
+    """Breng een te groot resultaat binnen de cap en benoem wat er mist.
+
+    Een weigering kost een iteratie en levert niets op, dus het model
+    vraagt het opnieuw — run 519 stuurde dezelfde query van 262 000
+    tekens vijf keer achter elkaar en liep toen op de iteratielimiet
+    dood. Daarom afkappen in twee stappen:
+
+    1. **Per tekstveld** (taak 1076). Alle records blijven staan, met
+       alle ids; alleen de zware velden krijgen een markering. Dit is het
+       snijvlak dat past bij het geval waarvoor het voorstel een
+       promptinstructie wilde: eerst ids, dan de zware velden per handjevol.
+    2. **Per record**, van de staart, één voor één — recordgroottes
+       lopen ordes van grootte uiteen (een ``res.users``-regel versus een
+       ``mail.message``-body), dus schatten werkt niet.
+
+    In alle gevallen zegt het antwoord expliciet wat níet is meegekomen.
+    """
+    safe, trimmed = _trim_to_fit(safe, cap)
+    report = trimmed[:_TRIM_REPORT_LIMIT]
+    record_cap = max(cap // 2, cap - _NOTE_RESERVE_CHARS)
     if isinstance(safe, list) and safe:
         kept = list(safe)
         while kept and len(json.dumps(
             {"records": kept}, default=str,
-        )) > cap:
+        )) > record_cap:
             kept.pop()
-        return {
+        out = {
             "records": kept,
             "truncated": True,
             "returned_records": len(kept),
             "total_records": len(safe),
-            "note": (
-                f"The full result was over the {cap}-character cap, so "
-                f"only the first {len(kept)} of {len(safe)} records are "
-                f"included. These are real records — use them. Do not "
-                f"repeat this call unchanged: to see the rest, narrow "
-                f"the `domain`, pass a shorter `fields` list, or page "
-                f"with `offset`."
-            ),
+            "note": _truncation_note(len(kept), len(safe), trimmed, cap),
         }
+        if trimmed:
+            out["truncated_fields"] = report
+            out["truncated_field_count"] = len(trimmed)
+        return out
     serialized = json.dumps(safe, default=str)
-    return {
+    if len(serialized) <= record_cap:
+        # Het per-veld knippen was genoeg: de structuur blijft heel, dus
+        # het model kan de rest van het record gewoon gebruiken.
+        out = {
+            "result": safe,
+            "truncated": True,
+            "note": _truncation_note(1, 1, trimmed, cap),
+        }
+        if trimmed:
+            out["truncated_fields"] = report
+            out["truncated_field_count"] = len(trimmed)
+        return out
+    out = {
         "truncated": True,
         "result_chars": len(serialized),
         "cap_chars": cap,
         "partial_result": serialized[:max(0, cap - 400)],
         "note": (
             f"The result was over the {cap}-character cap and is cut off "
-            f"mid-way. Do not repeat this call unchanged: ask for fewer "
-            f"fields or a narrower scope."
+            f"mid-way, so the JSON below is INCOMPLETE. Do not repeat this "
+            f"call unchanged and do not guess the missing part: ask for "
+            f"fewer fields or a narrower scope."
         ),
     }
+    if trimmed:
+        out["truncated_fields"] = report
+        out["truncated_field_count"] = len(trimmed)
+    return out
 
 
 def _enforce_result_size_cap(safe, fn_name, env=None):
@@ -1324,6 +1505,183 @@ _COUNT_AGGREGATE_SPELLINGS = frozenset({
     "count", "id", "*", "count(*)", "count_all", "__count__",
     "id:count", "count:count", "total", "count()",
 })
+
+# Granularities Odoo accepts on date(time) groupby specs. Anything else
+# after ``:`` is left alone so we never invent a granularity.
+_DATE_GROUPBY_GRANULARITIES = frozenset({
+    "day", "week", "month", "quarter", "year",
+    "hour", "minute", "second",
+})
+
+# Known wrong field paths the model keeps emitting. Helpdesk stages
+# use ``fold``, not ``is_close`` (prod 2026-08-13: every search with
+# ``stage_id.is_close`` raised Invalid field and burned a tool turn).
+_FIELD_PATH_ALIASES = {
+    ("helpdesk.ticket", "stage_id.is_close"): "stage_id.fold",
+    ("helpdesk.stage", "is_close"): "fold",
+}
+
+
+def _unwrap_spec_item(item):
+    """Peel JSON / list wrappers the model nests around one spec.
+
+    Prod 2026-08-13: aggregates arrived as ``['["amount_total:sum"]']`` —
+    a list whose only element is itself a JSON-encoded one-element list.
+    The ORM then saw the literal string ``["amount_total:sum"]`` and
+    rejected it. Unwrap until we have a bare string (or a real list of
+    several specs to expand).
+    """
+    seen = 0
+    while seen < 4:
+        seen += 1
+        if isinstance(item, (list, tuple)):
+            if len(item) == 1:
+                item = item[0]
+                continue
+            return [_unwrap_spec_item(x) for x in item]
+        if isinstance(item, str):
+            s = item.strip()
+            if s[:1] in "[{":
+                parsed = None
+                try:
+                    parsed = json.loads(s)
+                except (ValueError, TypeError):
+                    try:
+                        parsed = ast.literal_eval(s)
+                    except (ValueError, TypeError, SyntaxError):
+                        parsed = None
+                if parsed is not None and parsed != s:
+                    item = parsed
+                    continue
+            return s
+        return item
+    return item
+
+
+def _flatten_spec_list(values):
+    """Turn a mixed aggregates/groupby value into a flat list of strings."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return []
+    out = []
+    for raw in values:
+        item = _unwrap_spec_item(raw)
+        if isinstance(item, list):
+            for sub in item:
+                flat = _unwrap_spec_item(sub)
+                if flat is None or flat == "":
+                    continue
+                out.append(flat if isinstance(flat, str) else str(flat))
+        elif item is None or item == "":
+            continue
+        else:
+            out.append(item if isinstance(item, str) else str(item))
+    return out
+
+
+def _normalize_read_group_aggregates(aggs):
+    """Return ``(deduped_list, changed)`` for read_group aggregates."""
+    original = aggs
+    flat = _flatten_spec_list(aggs)
+    fixed = []
+    for a in flat:
+        key = a.strip().lower()
+        if key in _COUNT_AGGREGATE_SPELLINGS:
+            fixed.append("__count")
+        else:
+            fixed.append(a.strip())
+    seen = set()
+    deduped = []
+    for a in fixed:
+        if a not in seen:
+            seen.add(a)
+            deduped.append(a)
+    changed = deduped != (
+        original if isinstance(original, list) else [original]
+    )
+    return deduped, changed
+
+
+def _resolve_groupby_field(env, model_name, path):
+    """Return the field at the end of ``path``, or None."""
+    try:
+        current = env[model_name]
+    except KeyError:
+        return None
+    segments = str(path).split(".")
+    for i, seg in enumerate(segments):
+        field = current._fields.get(seg)
+        if field is None:
+            return None
+        if i < len(segments) - 1:
+            if not field.relational:
+                return None
+            try:
+                current = env[field.comodel_name]
+            except KeyError:
+                return None
+            continue
+        return field
+    return None
+
+
+def _normalize_read_group_groupby(env, model_name, groupby):
+    """Ensure date(time) groupbys carry a granularity (default ``:day``).
+
+    Prod 2026-08-13: ``groupby=['validity_date']`` and
+    ``['invoice_date_due']`` raised ``Granularity not set on a
+    date(time) field``. Append ``:day`` when the model omitted it.
+    """
+    flat = _flatten_spec_list(groupby)
+    if not flat:
+        return flat, False
+    fixed = []
+    changed = False
+    for spec in flat:
+        s = spec.strip()
+        if ":" in s:
+            fname, gran = s.split(":", 1)
+            if gran in _DATE_GROUPBY_GRANULARITIES or not gran:
+                fixed.append(s if gran else fname + ":day")
+                if not gran:
+                    changed = True
+            else:
+                fixed.append(s)
+            continue
+        field = _resolve_groupby_field(env, model_name, s) if env else None
+        if field is not None and field.type in ("date", "datetime"):
+            fixed.append("%s:day" % s)
+            changed = True
+        else:
+            fixed.append(s)
+    return fixed, changed
+
+
+def _rewrite_known_field_aliases(model_name, domain):
+    """Rewrite known wrong field paths in a domain; return (domain, notes)."""
+    notes = []
+    out = []
+    for token in domain:
+        is_leaf = (
+            isinstance(token, (list, tuple))
+            and len(token) == 3
+            and isinstance(token[0], str)
+        )
+        if is_leaf:
+            alias = _FIELD_PATH_ALIASES.get((model_name, token[0]))
+            if alias:
+                out.append([alias, token[1], token[2]])
+                notes.append(
+                    "Field '%s' on %s was rewritten to '%s' (the model "
+                    "used a name that does not exist on this Odoo)."
+                    % (token[0], model_name, alias)
+                )
+                continue
+        out.append(token)
+    return out, notes
 
 
 # ---------------------------------------------------------------------------
@@ -1636,6 +1994,142 @@ def _domain_field_unsearchable(env, model_name, path):
             continue
         return not (field.store or field.search or field.related)
     return False
+
+
+def _field_suggestions(model, bad_name, limit=5):
+    """Bestaande veldnamen op ``model`` die op ``bad_name`` lijken.
+
+    Waarom dit bestaat: een verzonnen veld kostte de agent een beurt aan
+    een foutmelding waar niets in stond wat hij niet al wist. Odoo kent
+    de echte namen wél, dus noemt de tool ze. Eerst de namen die het
+    verzonnen woord bevatten of erin voorkomen (``invoice_id`` →
+    ``timesheet_invoice_id``), daarna de tekstueel dichtstbijzijnde.
+    """
+    names = sorted(model._fields)
+    bad = (bad_name or "").strip().lower()
+    if not bad:
+        return []
+    out = [
+        n for n in names
+        if bad in n.lower()
+        # Alleen namen van enige lengte de andere kant op: anders komt
+        # bij elk ``*_id``-veld "id" als suggestie mee.
+        or (len(n) > 3 and n.lower() in bad)
+    ]
+    for n in difflib.get_close_matches(bad, names, n=limit, cutoff=0.6):
+        if n not in out:
+            out.append(n)
+    return out[:limit]
+
+
+def _resolve_domain_field_path(env, model_name, path):
+    """Zoek het onbestaande segment van een dotted domeinpad op.
+
+    Levert ``None`` wanneer het hele pad bestaat (of niet te beoordelen
+    is), en anders ``(bezittend_model, ontbrekend_segment)``. Een
+    tussensegment dat niet relationeel is laten we staan: dat kan een
+    properties-/json-pad zijn en een valse melding is duurder dan een
+    gemiste.
+    """
+    try:
+        current = env[model_name]
+    except KeyError:
+        return None
+    segments = str(path).split(".")
+    for i, seg in enumerate(segments):
+        field = current._fields.get(seg)
+        if field is None:
+            return current._name, seg
+        if i == len(segments) - 1:
+            return None
+        if not field.relational:
+            return None
+        try:
+            current = env[field.comodel_name]
+        except KeyError:
+            return None
+    return None
+
+
+def _domain_unknown_field_error(env, model_name, domain, fn_name):
+    """Weiger een domein met verzonnen velden mét de echte namen erbij.
+
+    Productie 14-8 (run 832, acties 7553/7554/7559): Marit zocht op
+    ``account.analytic.line.invoice_id``,
+    ``account.analytic.account.is_internal`` en
+    ``project.task.type.is_closed``. De ORM gooide er ``Invalid field``
+    uit en de dispatcher gaf terug dat het domein een JSON-lijst van
+    triples moet zijn — wat het al was. Drie beurten aan een
+    aanwijzing die niet klopte en de bestaande veldnamen niet noemde.
+    """
+    problems = []
+    for token in domain or []:
+        if not (
+            isinstance(token, (list, tuple))
+            and len(token) == 3
+            and isinstance(token[0], str)
+        ):
+            continue
+        found = _resolve_domain_field_path(env, model_name, token[0])
+        if found:
+            problems.append((token[0],) + found)
+    if not problems:
+        return None
+    bits = []
+    for path, owner_model, bad_seg in problems[:4]:
+        try:
+            suggestions = _field_suggestions(env[owner_model], bad_seg)
+        except KeyError:
+            suggestions = []
+        bits.append(
+            "'%s': field '%s' does not exist on %s%s"
+            % (
+                path, bad_seg, owner_model,
+                (" — closest existing field(s): %s"
+                 % ", ".join(suggestions)) if suggestions else "",
+            )
+        )
+    return {
+        "error": (
+            "Tool %s was not run: the domain filters on field(s) that do "
+            "not exist. %s. The domain itself was valid JSON — only the "
+            "field name is wrong. Call ir_actions_server_get_fields on "
+            "the model to see the real names, or retry with one of the "
+            "names above." % (fn_name, "; ".join(bits))
+        ),
+        "model_name": model_name,
+        "unknown_domain_fields": [p[0] for p in problems],
+    }
+
+
+def _invalid_field_hint(env, exc_text):
+    """Aanvullende aanwijzing bij een ORM-``Invalid field``-fout.
+
+    Tweede net onder ``_domain_unknown_field_error``: een verzonnen veld
+    kan ook buiten het domein opduiken (order, aggregaten, een pad dat
+    wij niet konden beoordelen). Ook dan hoort de foutmelding de echte
+    namen te noemen in plaats van alleen dat er iets ongeldig was.
+    """
+    if env is None:
+        return ""
+    match = re.search(
+        r"Invalid field ['\"]?([\w.]+)['\"]?", exc_text or "",
+    )
+    if not match:
+        return ""
+    parts = match.group(1).split(".")
+    bad = parts[-1]
+    owner = ".".join(parts[:-1])
+    if owner not in env:
+        return ""
+    suggestions = _field_suggestions(env[owner], bad)
+    if not suggestions:
+        return ""
+    return (
+        " Field '%s' does not exist on %s; closest existing field(s): %s. "
+        "Use ir_actions_server_get_fields on %s to see the real names."
+        % (bad, owner, ", ".join(suggestions), owner)
+    )
 
 
 def _sanitize_unsearchable_domain(env, model_name, domain):
@@ -1972,6 +2466,20 @@ def run_tool_call(agent, tool_call):
                     env, "INFO", "daadit_ai_mistral.tool_dispatch",
                     f"REMAPPED_ARGS fn={fn_name} renames={renames}",
                 )
+        # Een ontbrekend zoekdomein is geen ontbrekend gegeven: de
+        # dispatcher vult verderop al ``domain="[]"`` in voor deze twee
+        # tools. Die aanvulling stond ná deze controle, dus run 832
+        # (actie 7563) kreeg een weigering voor iets wat de tool zelf
+        # wist: "alle records" is de bedoeling van een zoekopdracht
+        # zonder filter. Aanvullen vóór de controle kost geen beurt.
+        if fn_name in _DEFAULT_EMPTY_DOMAIN_TOOLS and not kwargs.get(
+            "domain"
+        ):
+            kwargs["domain"] = "[]"
+            _logger.info(
+                "daadit_ai_mistral.tool_dispatch: %s zonder domain — "
+                "aangevuld met '[]' in plaats van geweigerd", fn_name,
+            )
         missing = _missing_required_args(action, kwargs)
         if missing:
             _record_in_ir_logging(
@@ -2256,8 +2764,7 @@ def run_tool_call(agent, tool_call):
     # domain") and the whole tool call dies on what should be an
     # unfiltered search. Inject the JSON-encoded empty domain for the
     # tools whose stock implementation json.loads-es these params.
-    if fn_name in ("ir_actions_server_search",
-                   "ir_actions_server_read_group"):
+    if fn_name in _DEFAULT_EMPTY_DOMAIN_TOOLS:
         for _dom_key in ("domain", "having"):
             if _dom_key == "having" and fn_name == "ir_actions_server_search":
                 continue
@@ -2283,6 +2790,51 @@ def run_tool_call(agent, tool_call):
         except (TypeError, ValueError):
             _dom = None
         if isinstance(_dom, list):
+            # (0) Rewrite known wrong field names the model invents
+            # (helpdesk ``is_close`` → ``fold``). Must run before the
+            # unsearchable-field pass, which only handles real fields.
+            try:
+                _dom, _alias_notes = _rewrite_known_field_aliases(
+                    requested_model, _dom,
+                )
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "daadit_ai_mistral.tool_dispatch: field-alias rewrite "
+                    "failed for %s on %s — using original domain",
+                    fn_name, requested_model,
+                )
+                _alias_notes = []
+            # (0b) Verzonnen velden: weiger met de echte namen erbij in
+            # plaats van de ORM-fout die alleen zegt dat er iets
+            # ongeldig was (run 832).
+            try:
+                _unknown = (
+                    _domain_unknown_field_error(
+                        env, requested_model, _dom, fn_name,
+                    ) if env is not None else None
+                )
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "daadit_ai_mistral.tool_dispatch: unknown-field check "
+                    "failed for %s on %s — laten doorlopen",
+                    fn_name, requested_model,
+                )
+                _unknown = None
+            if _unknown:
+                _logger.warning(
+                    "daadit_ai_mistral.tool_dispatch: %s op %s geweigerd — "
+                    "onbestaande domeinvelden %s",
+                    fn_name, requested_model,
+                    _unknown.get("unknown_domain_fields"),
+                )
+                if env is not None:
+                    _record_in_ir_logging(
+                        env, "WARNING", "daadit_ai_mistral.tool_dispatch",
+                        "UNKNOWN_DOMAIN_FIELD fn=%s model=%s fields=%s"
+                        % (fn_name, requested_model,
+                           _unknown.get("unknown_domain_fields")),
+                    )
+                return _unknown
             # (1) Translate/strip conditions the ORM cannot search.
             try:
                 _dom, _domain_notes = _sanitize_unsearchable_domain(
@@ -2294,6 +2846,8 @@ def run_tool_call(agent, tool_call):
                     "failed for %s on %s — using original domain",
                     fn_name, requested_model,
                 )
+                _domain_notes = []
+            _domain_notes = list(_alias_notes) + list(_domain_notes or [])
             # (2) Hard read scope — fail-closed: a scope line whose
             # domain can't be applied blocks the read rather than
             # silently widening it.
@@ -2325,51 +2879,49 @@ def run_tool_call(agent, tool_call):
             kwargs["domain"] = json.dumps(_dom, default=str)
 
     # ------------------------------------------------------------------
-    # read_group aggregate normalisation (v19.0.4.1.2)
+    # read_group aggregate + groupby normalisation (v19.0.6.29.2)
     # ------------------------------------------------------------------
-    # Mistral spells the record-count aggregate as `count` / `id` /
-    # `count(*)` — Odoo's ORM only accepts the literal `__count`, and
-    # a bare field name without `:method` is likewise rejected. Both
-    # failure modes burned tool-loop iterations on prod (logs #88/#89).
-    # Normalise the well-known count spellings; leave everything else
-    # (e.g. `amount_total:sum`) untouched.
+    # Three failure modes from prod 2026-08-13:
+    #   * aggregates=['["amount_total:sum"]']  → JSON-wrapped string
+    #   * groupby=['validity_date']            → date without granularity
+    #   * aggregates=['count']                 → must become __count
+    # Unwrap, rename, and append ``:day`` before stock sees the kwargs.
     if fn_name == "ir_actions_server_read_group":
         aggs = kwargs.get("aggregates")
-        if isinstance(aggs, str):
-            aggs = [aggs]
-        if isinstance(aggs, list):
-            fixed = []
-            changed = False
-            for a in aggs:
-                key = str(a).strip().lower() if a is not None else ""
-                if key in _COUNT_AGGREGATE_SPELLINGS:
-                    fixed.append("__count")
-                    changed = True
-                else:
-                    fixed.append(a)
-            # Dedupe while preserving order (count + id → one __count).
-            seen_aggs = set()
-            deduped = []
-            for a in fixed:
-                if a not in seen_aggs:
-                    seen_aggs.add(a)
-                    deduped.append(a)
-            kwargs["aggregates"] = deduped
-            if changed:
+        if aggs:
+            deduped, changed = _normalize_read_group_aggregates(aggs)
+            kwargs["aggregates"] = deduped or ["__count"]
+            if changed or not deduped:
                 _logger.info(
                     "daadit_ai_mistral.tool_dispatch: normalised "
                     "aggregates %s → %s for %s on %s",
-                    aggs, deduped, fn_name, requested_model or "<unknown>",
+                    aggs, kwargs["aggregates"], fn_name,
+                    requested_model or "<unknown>",
                 )
-        elif not aggs:
-            # No aggregates at all → counting records is the only
-            # sensible default for a grouped query.
+        else:
             kwargs["aggregates"] = ["__count"]
             _logger.info(
                 "daadit_ai_mistral.tool_dispatch: injected default "
                 "aggregates=['__count'] for %s on %s",
                 fn_name, requested_model or "<unknown>",
             )
+        gb = kwargs.get("groupby")
+        if gb and env is not None and requested_model:
+            fixed_gb, gb_changed = _normalize_read_group_groupby(
+                env, requested_model, gb,
+            )
+            kwargs["groupby"] = fixed_gb
+            if gb_changed:
+                _logger.info(
+                    "daadit_ai_mistral.tool_dispatch: normalised "
+                    "groupby %s → %s for %s on %s",
+                    gb, fixed_gb, fn_name, requested_model,
+                )
+        elif gb:
+            # No env/model to inspect — still unwrap JSON wrappers.
+            flat_gb = _flatten_spec_list(gb)
+            if flat_gb != gb:
+                kwargs["groupby"] = flat_gb
 
     # ------------------------------------------------------------------
     # Unexpected-kwarg strip-retry (v19.0.4.1.5)
@@ -2484,6 +3036,20 @@ def run_tool_call(agent, tool_call):
                 f"RAISED fn={fn_name} args={json.dumps(kwargs, default=str)[:1500]} "
                 f"err_type={type(exc).__name__} err={exc}",
             )
+        _field_hint = ""
+        try:
+            _field_hint = _invalid_field_hint(env, str(exc))
+        except Exception:  # noqa: BLE001
+            _field_hint = ""
+        if _field_hint:
+            # Een verzonnen veldnaam is geen argumenttype-probleem; de
+            # standaardaanwijzing ("domain must be a JSON array of
+            # triples") stuurde de agent daar drie beurten lang de
+            # verkeerde kant op (run 832).
+            return {"error": (
+                f"Tool {fn_name} raised {type(exc).__name__}: {exc}."
+                f"{_field_hint}"
+            )}
         return {"error": (
             f"Tool {fn_name} raised {type(exc).__name__}: {exc}. "
             f"Check the argument types — domain must be a JSON array of "

@@ -82,13 +82,29 @@ def daily_spend(env):
     midnight. Cheap: aggregated read on an indexed ``create_date``."""
     start = _today_start_utc(env)
     try:
-        groups = env["daadit_ai_mistral.usage"].sudo().read_group(
-            [("create_date", ">=", start.strftime("%Y-%m-%d %H:%M:%S"))],
-            ["estimated_cost_usd:sum"],
-            [],
-        )
-        if groups:
-            return float(groups[0].get("estimated_cost_usd") or 0.0)
+        if "daadit_ai_mistral.usage" not in env:
+            return 0.0
+        Usage = env["daadit_ai_mistral.usage"].sudo()
+        # Odoo 19: prefer ``_read_group`` (domain, groupby, aggregates).
+        # The classic ``read_group(domain, fields, groupby)`` shape is
+        # still present but has bitten us with empty-groupby aggregates;
+        # fall back to a mapped sum if the modern call fails.
+        try:
+            rows = Usage._read_group(
+                [("create_date", ">=", start)],
+                [],
+                ["estimated_cost_usd:sum"],
+            )
+            if rows:
+                return float(rows[0][0] or 0.0)
+            return 0.0
+        except Exception:  # noqa: BLE001
+            total = 0.0
+            for cost in Usage.search([
+                ("create_date", ">=", start.strftime("%Y-%m-%d %H:%M:%S")),
+            ]).mapped("estimated_cost_usd"):
+                total += float(cost or 0.0)
+            return total
     except Exception:  # noqa: BLE001
         _logger.exception(
             "daadit_ai_mistral.cost_cap: failed to sum daily spend; "

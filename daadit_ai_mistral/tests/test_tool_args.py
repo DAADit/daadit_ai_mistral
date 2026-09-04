@@ -198,3 +198,46 @@ class TestDomainGroupFlattening(common.TransactionCase):
     def test_operator_as_a_leaf_value_is_not_a_group(self):
         domain = [["name", "like", "|"]]
         self.assertEqual(td._coerce_domain_obj(domain), domain)
+
+
+@tagged("post_install", "-at_install", "daadit_ai")
+class TestReadGroupArgRepair(common.TransactionCase):
+    """Prod 2026-08-13: JSON-wrapped aggregates, date groupbys, is_close."""
+
+    def test_json_wrapped_aggregate_is_unwrapped(self):
+        """The exact shape from the Marit cron: list of a JSON list."""
+        deduped, changed = td._normalize_read_group_aggregates(
+            ['["amount_total_signed:sum"]'],
+        )
+        self.assertEqual(deduped, ["amount_total_signed:sum"])
+        self.assertTrue(changed)
+
+    def test_nested_json_and_count_alias(self):
+        deduped, _ = td._normalize_read_group_aggregates(
+            ['["count"]', "id"],
+        )
+        self.assertEqual(deduped, ["__count"])
+
+    def test_date_groupby_gets_day_granularity(self):
+        fixed, changed = td._normalize_read_group_groupby(
+            self.env, "res.partner", ["create_date", "name"],
+        )
+        self.assertEqual(fixed[0], "create_date:day")
+        self.assertEqual(fixed[1], "name")
+        self.assertTrue(changed)
+
+    def test_existing_granularity_is_kept(self):
+        fixed, changed = td._normalize_read_group_groupby(
+            self.env, "res.partner", ["create_date:month"],
+        )
+        self.assertEqual(fixed, ["create_date:month"])
+        self.assertFalse(changed)
+
+    def test_helpdesk_is_close_is_rewritten_to_fold(self):
+        domain, notes = td._rewrite_known_field_aliases(
+            "helpdesk.ticket",
+            [["date_last_stage_update", "<", "2026-07-30"],
+             ["stage_id.is_close", "!=", True]],
+        )
+        self.assertEqual(domain[1][0], "stage_id.fold")
+        self.assertTrue(notes)

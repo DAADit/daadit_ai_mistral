@@ -49,10 +49,12 @@ class DaaditAiMistralModel(models.Model):
     )
     last_synced = fields.Datetime(readonly=True)
 
-    _sql_constraints = [
-        ("technical_name_uniq", "unique(technical_name)",
-         "This Mistral model id already exists in the registry."),
-    ]
+    # v19: models.Constraint replaces the deprecated _sql_constraints
+    # list, which Odoo 19 silently ignores.
+    _technical_name_uniq = models.Constraint(
+        "UNIQUE(technical_name)",
+        "This Mistral model id already exists in the registry.",
+    )
 
     @api.model
     def _selection_entries(self):

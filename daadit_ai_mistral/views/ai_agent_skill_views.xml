@@ -36,7 +36,15 @@
                             <field name="required_apps"/>
                             <field name="required_models"/>
                             <field name="capability_codes"/>
+                            <field name="blocked_models"/>
+                            <field name="field_blocklist"/>
+                            <field name="activity_scope_models"/>
+                            <field name="schedule_active_default"/>
                         </group>
+                    </group>
+                    <group string="Schedule prompt">
+                        <field name="schedule_prompt" nolabel="1"
+                               placeholder="Optional standing prompt for this skill."/>
                     </group>
                     <group>
                         <field name="description" nolabel="1"

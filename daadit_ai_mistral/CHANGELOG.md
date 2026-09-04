@@ -7,6 +7,44 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.10.0.0 — 2026-09-04
+
+Tweede na-oogst van de deploy-lijn (OAS 711, portie 5). Na 19.0.9.0.0
+liep `DAADit/daadit` door tot 19.0.7.3.0; alles daarvan staat nu ook hier,
+zodat de tag waarop de deploy-repo straks pint werkelijk is wat er draait.
+
+Overgenomen uit de deploy-lijn:
+
+* projectrapportage in records (`models/ai_agent_project_report.py`, drie
+  tools in `data/ai_tools.xml`): doel, fasen en voortgang voor de
+  projectmanager; de schrijfgrens blijft in de scoperecords;
+* schrijfscope vóór toewijzing (`_daadit_write_scope`, `_daadit_scope_check`):
+  `AI: Assign User` vraagt dezelfde scoperecords op als het plannen van
+  een activiteit, en een weigering noemt de voorwaarde die faalt;
+* holle samenvattingen (`HOLLOW_SUMMARY_WORDS`) tellen niet als inhoud;
+* argumentherstel voor `read_group`/`search` uit de productielogs
+  (JSON-verpakte aggregaten, dag-granulariteit op datumvelden,
+  `stage_id.is_close` → `stage_id.fold`), met `_coerce_to_schema`;
+* de fact-check telt een schrijfactie pas als de tool ook echt gelopen heeft
+  (`note_tool_call(confirmed=...)`);
+* spraakgesprekken krijgen een korte gesproken stijl (`_voice_spoken_mode`);
+* skills: provisioningvelden op `daadit.ai.agent.skill` (taak 844), de
+  volledige boekhoudset voor Bo en de orderverwerkingsskills voor Sanne;
+* Odoo 19-herstel: `models.Constraint` in de modelregistry en `_read_group`
+  in `cost_cap.daily_spend`;
+* tests: `test_domain_field_names`, `test_project_report`, `test_skill_seed`,
+  `test_vault_scope_and_summary`, `test_write_scope_assign_user` en de
+  uitbreiding van `test_tool_args`.
+
+Migraties van de deploy-lijn zijn hernummerd naar `19.0.10.0.0`
+(registry-dedupe als `pre`, skill-seed en Sanne's persona-overgang als
+`post`); de twee identieke skill-seeds (7.2.0 en 7.3.0) zijn er één.
+
+Bewust behouden uit deze lijn (niet in de deploy-map): het JSON-schema van
+eigen tools (`_custom_tool_definition`), de minimale taalreferentie
+(`MIN_LANG_REF_LETTERS`) en de tussentijdse kanaalmelding bij delegatie
+(`_daadit_post_channel_status`) — gedekt door `tests/test_consolidatie_behoud.py`.
+
 ## 19.0.9.0.0 — 2026-08-13
 
 De twee lijnen van deze module zijn samengevoegd: alles wat na de vorige

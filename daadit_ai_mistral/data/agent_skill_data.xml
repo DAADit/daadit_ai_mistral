@@ -20,6 +20,8 @@
         <field name="required_apps">account</field>
         <field name="required_models">account.move,res.partner,mail.activity</field>
         <field name="capability_codes">search_read,read,create</field>
+        <field name="activity_scope_models">account.move</field>
+        <field name="blocked_models">account.payment</field>
         <field name="description">Vindt vervallen klantfacturen en zet concept-opvolging of activiteiten klaar; verstuurt geen aanmaningen zonder mens.</field>
     </record>
 
@@ -67,6 +69,69 @@
         <field name="description">Bereidt controles en aandachtspunten voor; de aangifte wordt nooit door een agent ingediend.</field>
     </record>
 
+    <!-- Sales / orderverwerking: tussen de handtekening en de factuur -->
+    <record id="skill_sales_order_intake_check" model="daadit.ai.agent.skill">
+        <field name="name">Orderintake controleren</field>
+        <field name="code">sales.order_intake_check</field>
+        <field name="category">sales</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">sale_management</field>
+        <field name="required_models">sale.order,sale.order.line,res.partner</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="blocked_models">account.payment</field>
+        <field name="description">Controleert nieuwe verkooporders op ontbrekende gegevens, blokkades en onduidelijke regels; bevestigt zelf geen order.</field>
+    </record>
+
+    <record id="skill_sales_order_price_variance" model="daadit.ai.agent.skill">
+        <field name="name">Prijs- en kortingafwijking signaleren</field>
+        <field name="code">sales.order_price_variance</field>
+        <field name="category">sales</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">sale_management</field>
+        <field name="required_models">sale.order,sale.order.line,product.product,product.pricelist</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="blocked_models">account.payment</field>
+        <field name="description">Vergelijkt orderregels met de prijslijst en meldt afwijkende prijzen of kortingen; wijzigt zelf geen prijs.</field>
+    </record>
+
+    <record id="skill_sales_order_delivery_watch" model="daadit.ai.agent.skill">
+        <field name="name">Leverdatum en backorder bewaken</field>
+        <field name="code">sales.order_delivery_watch</field>
+        <field name="category">sales</field>
+        <field name="risk_level">concept_only</field>
+        <field name="required_apps">sale_management,stock</field>
+        <field name="required_models">sale.order,stock.picking,stock.move,mail.activity</field>
+        <field name="capability_codes">search_read,read,create</field>
+        <field name="activity_scope_models">sale.order</field>
+        <field name="blocked_models">account.payment</field>
+        <field name="description">Volgt beloofde leverdatums en achterstallige leveringen en zet opvolging klaar; valideert zelf geen levering.</field>
+    </record>
+
+    <record id="skill_sales_order_stock_check" model="daadit.ai.agent.skill">
+        <field name="name">Leverbaarheid controleren</field>
+        <field name="code">sales.order_stock_check</field>
+        <field name="category">sales</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">stock</field>
+        <field name="required_models">sale.order.line,stock.quant,stock.move,product.product</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="blocked_models">account.payment</field>
+        <field name="description">Zegt per orderregel of de voorraad de belofte dekt en wat er tekortkomt; reserveert of verplaatst zelf niets.</field>
+    </record>
+
+    <record id="skill_sales_order_invoice_handover" model="daadit.ai.agent.skill">
+        <field name="name">Klaar om te factureren doorgeven</field>
+        <field name="code">sales.order_invoice_handover</field>
+        <field name="category">sales</field>
+        <field name="risk_level">concept_only</field>
+        <field name="required_apps">sale_management</field>
+        <field name="required_models">sale.order,stock.picking,mail.activity</field>
+        <field name="capability_codes">search_read,read,create</field>
+        <field name="activity_scope_models">sale.order</field>
+        <field name="blocked_models">account.payment</field>
+        <field name="description">Meldt geleverde orders die gefactureerd kunnen worden en zet de overdracht klaar; maakt zelf geen factuur.</field>
+    </record>
+
     <!-- Existing non-finance patterns -->
     <record id="skill_service_ticket_triage" model="daadit.ai.agent.skill">
         <field name="name">Tickets triageren</field>
@@ -76,6 +141,7 @@
         <field name="required_apps">helpdesk</field>
         <field name="required_models">helpdesk.ticket,mail.activity</field>
         <field name="capability_codes">search_read,read,create</field>
+        <field name="activity_scope_models">helpdesk.ticket</field>
         <field name="description">Bewaakt tickets, stelt conceptacties voor en plant opvolging binnen de toegestane activity-scope.</field>
     </record>
 
