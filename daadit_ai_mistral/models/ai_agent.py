@@ -1107,6 +1107,23 @@ class AIAgent(models.Model):
             return {"error": (
                 "Record id %s on '%s' does not exist." % (record_id, model_name)
             )}
+        # SCOPE-GUARD vóór de write (taak 1079). Tot nu toe vroeg alleen
+        # het plannen van een activiteit de schrijfscope op, dus kon deze
+        # tool een gesloten ticket of een gevouwen fase toewijzen zolang
+        # het record binnen de *lees*scope viel. De grens staat in de
+        # scoperecords; hier wordt hij alleen opgevraagd.
+        allowed, scope_reason = self._daadit_write_scope(
+            model_name, record_id)
+        if not allowed:
+            _logger.warning(
+                "SCOPE-GUARD blokkeerde assign_user: agent %s -> %s #%s",
+                self.id, model_name, record_id)
+            return {
+                "ok": False,
+                "written": False,
+                "blocked_by_scope_guard": True,
+                "error": scope_reason,
+            }
         previous_user = record.user_id
         if previous_user.id == user.id:
             return {
