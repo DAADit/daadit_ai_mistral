@@ -115,5 +115,77 @@
             <field name="code">ai['result'] = record._ai_tool_assurance_coverage()</field>
         </record>
 
+        <!-- Projectrapportage (v19.0.7.0.0): doel, fasen, voortgang.
+             De projectmanager legde losse taken vast maar nergens het
+             doel, de fasen ernaartoe of de stand daarvan; elke ronde
+             leverde een nieuw vrij verhaal in de chat op. Deze drie
+             tools schrijven die vorm naar records — beschrijving,
+             project.milestone en project.update — met de cijfers uit de
+             database in plaats van uit het model. De beslissing en de
+             schrijfgrens staan in daadit_ai_mistral/models/
+             ai_agent_project_report.py; deze acties zijn doorgeefluik.
+             Attach ALLEEN aan de projectmanager-topics. -->
+        <record id="ir_actions_server_project_goal_set" model="ir.actions.server">
+            <field name="name">AI: Project Goal Set</field>
+            <field name="use_in_ai" eval="True"/>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="ai_tool_description">Leg het doel van een project kort en bondig vast in de projectbeschrijving (eigen doel-blok; de rest van de beschrijving blijft staan). Noem wat er af is en waaraan je dat ziet, 60-700 tekens. Gebruik dit voordat je een voortgangsrapportage schrijft.</field>
+            <field name="ai_tool_schema">{"type": "object", "properties": {"project_id": {"type": "integer", "description": "Id van het project in Odoo, uit een zoekresultaat."}, "goal": {"type": "string", "description": "Het doel in platte tekst, 60-700 tekens. Geen fasen of planning: die leg je vast met Project Phase Upsert."}}, "required": ["project_id", "goal"]}</field>
+            <field name="code">ai['result'] = record._ai_tool_project_goal_set(
+    project_id=project_id,
+    goal=goal,
+)</field>
+        </record>
+
+        <record id="ir_actions_server_project_phase_upsert" model="ir.actions.server">
+            <field name="name">AI: Project Phase Upsert</field>
+            <field name="use_in_ai" eval="True"/>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="ai_tool_description">Leg EEN fase van een project vast als milestone met einddatum, of werk hem bij (bestaande fase met dezelfde naam wordt bijgewerkt). Roep de tool per fase opnieuw aan. Een fase zonder datum wordt geweigerd.</field>
+            <field name="ai_tool_schema">{"type": "object", "properties": {"project_id": {"type": "integer", "description": "Id van het project in Odoo."}, "name": {"type": "string", "description": "Naam van de fase, bijvoorbeeld 'Inrichting en bouw'."}, "deadline": {"type": "string", "description": "Einddatum van de fase als JJJJ-MM-DD."}, "sequence": {"type": "integer", "description": "Optioneel: volgorde binnen het project."}, "reached": {"type": "boolean", "description": "Optioneel: true zodra de fase is afgerond."}}, "required": ["project_id", "name", "deadline"]}</field>
+            <field name="code">try:
+    _sequence = sequence
+except Exception:
+    _sequence = None
+try:
+    _reached = reached
+except Exception:
+    _reached = None
+
+ai['result'] = record._ai_tool_project_phase_upsert(
+    project_id=project_id,
+    name=name,
+    deadline=deadline,
+    sequence=_sequence,
+    reached=_reached,
+)</field>
+        </record>
+
+        <record id="ir_actions_server_project_report" model="ir.actions.server">
+            <field name="name">AI: Project Report</field>
+            <field name="use_in_ai" eval="True"/>
+            <field name="model_id" ref="ai.model_ai_agent"/>
+            <field name="state">code</field>
+            <field name="ai_tool_description">Schrijf de voortgangsrapportage van een project weg als project.update in de vaste vorm doel - fasen - planning - voortgang. De tool telt fasen, taken en uren zelf in Odoo; jij levert alleen status, risico's en de volgende stap. Ontbreekt het doel of een fase met datum, dan weigert de tool en noemt wat er mist. Noem in je antwoord alleen de getallen die de tool teruggeeft.</field>
+            <field name="ai_tool_schema">{"type": "object", "properties": {"project_id": {"type": "integer", "description": "Id van het project in Odoo."}, "status": {"type": "string", "enum": ["on_track", "at_risk", "off_track", "on_hold", "done"], "description": "Stand van het project."}, "risks": {"type": "string", "description": "Optioneel: risico's of blokkades, concreet en kort."}, "next_step": {"type": "string", "description": "Optioneel: de eerstvolgende stap, met wie hem zet."}}, "required": ["project_id", "status"]}</field>
+            <field name="code">try:
+    _risks = risks
+except Exception:
+    _risks = None
+try:
+    _next_step = next_step
+except Exception:
+    _next_step = None
+
+ai['result'] = record._ai_tool_project_report(
+    project_id=project_id,
+    status=status,
+    risks=_risks,
+    next_step=_next_step,
+)</field>
+        </record>
+
     </data>
 </odoo>

@@ -13,8 +13,8 @@
 # difference is deploy-only work which must be PR'd to the product repo first,
 # or this migration deletes it.
 #
-#   ./adopt_as_submodule.sh --release v19.0.9.0.0
-#   ./adopt_as_submodule.sh --release v19.0.9.0.0 \
+#   ./adopt_as_submodule.sh --release v19.0.10.0.0
+#   ./adopt_as_submodule.sh --release v19.0.10.0.0 \
 #       --current addons/daadit_ai_mistral --mount submodules/daadit_ai_mistral
 #
 # Layout note: this repo's root holds `daadit_ai_mistral/__manifest__.py`, so

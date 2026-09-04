@@ -183,6 +183,26 @@ ai['result'] = record._daadit_schedule_activity_guarded(
 )
 '''
 
+# Woorden die niets over het onderwerp zeggen. Ze staan apart van de
+# stopwoorden in ``ai_agent.py``: die dienen de vergelijking van twee
+# samenvattingen, deze de vraag of een samenvatting überhaupt iets
+# meldt. "Openstaand actiepunt afhandelen" bestaat volledig uit deze
+# woorden en is daarmee net zo leeg als "Opvolgen" — terwijl het met 31
+# tekens elke lengte-eis haalt. De laatste regel zijn kanaallabels: ze
+# zeggen langs welke weg het bericht komt, niet waar het over gaat.
+HOLLOW_SUMMARY_WORDS = frozenset("""
+    actie acties actiepunt actiepunten punt punten item items
+    taak taken todo to do ding dingen werk iets
+    opvolgen opvolging opvolgactie afhandelen afhandeling oppakken
+    doen uitvoeren behandelen verwerken checken nakijken bijwerken
+    openstaand openstaande open resterend resterende
+    vereist verplicht nodig noodzakelijk gewenst
+    urgent dringend spoed spoedig belangrijk aandacht attentie
+    graag svp aub alsjeblieft please asap direct meteen nu vandaag
+    follow followup up pending required needed action attention
+    voorstel toepasbaar geweigerd weigering vangrail
+""".split())
+
 # Een AUTO-APPLY van de assurance-watchdog is geen herinnering maar een
 # opdracht aan de applier. De cap op open to-do's per record hoort er niet
 # op te gelden — zonder deze uitzondering liep artikel 182 vol en werd
@@ -235,8 +255,47 @@ class AIAgent(models.Model):
         model = self.env.get(model_name)
         return model is not None and "activity_ids" in model._fields
 
+    def _daadit_domain_mismatch_reason(self, target, domain):
+        """Welke voorwaarden uit het scoperecord weigeren dit record?
+
+        Zonder dit is de weigering blind: "valt buiten de schrijfscope"
+        vertelt een agent niet dat het ticket gesloten is, dus probeert
+        hij het volgende gesloten ticket net zo goed. Met de voorwaarde
+        erbij kan hij zelf een geldig record kiezen. De tekst komt uit
+        het domein van het scoperecord en niet uit een lijst
+        fasenamen in de prompt — de beslissing blijft dus in de records.
+        """
+        failed = []
+        for leaf in domain:
+            if not isinstance(leaf, (list, tuple)) or len(leaf) != 3:
+                # '&' / '|' / '!' zijn geen voorwaarde om te tonen.
+                continue
+            if not target.filtered_domain([list(leaf)]):
+                failed.append(
+                    "%s %s %s" % (leaf[0], leaf[1], leaf[2]))
+        return failed
+
     def _daadit_activity_scope(self, model_name, record_id):
-        """Mag deze agent een activiteit plannen op dit record?
+        """Mag deze agent een activiteit plannen op dit record?"""
+        return self._daadit_scope_check(
+            model_name, record_id, need_activity=True)
+
+    def _daadit_write_scope(self, model_name, record_id):
+        """Mag deze agent dit record wijzigen? (taak 1079)
+
+        ``AI: Assign User`` schreef ``user_id`` op elk record dat binnen
+        de *lees*scope viel: een gesloten ticket, een gevouwen fase, een
+        model dat deze collega alleen mag lézen. De schrijfgrens per
+        collega stond al in records, maar alleen het plannen van een
+        activiteit vroeg hem op. Dezelfde scoperecords gelden nu voor
+        beide schrijftools; het toewijzen vraagt geen
+        ``mail.activity.mixin``, dus die eis valt hier weg.
+        """
+        return self._daadit_scope_check(
+            model_name, record_id, need_activity=False)
+
+    def _daadit_scope_check(self, model_name, record_id, need_activity=True):
+        """De schrijfgrens zelf.
 
         Geeft ``(allowed, reason)`` terug. ``reason`` is leeg als het mag
         en anders de tekst die de agent te lezen krijgt — die noemt altijd
@@ -253,9 +312,11 @@ class AIAgent(models.Model):
                 "SCOPE-GUARD: voor deze agent is geen schrijfscope "
                 "vastgelegd. Voeg een scoperegel toe voordat hij "
                 "activiteiten mag plannen.")
+        if not need_activity:
+            usable = [s.model_name for s in scopes]
         alternatives = ", ".join(usable) or _("geen enkel model")
 
-        if not self._daadit_activity_capable(model_name):
+        if need_activity and not self._daadit_activity_capable(model_name):
             return False, _(
                 "SCOPE-GUARD: %(model)s kan geen activiteit dragen "
                 "(het model erft mail.activity.mixin niet). Plan je "
@@ -267,8 +328,8 @@ class AIAgent(models.Model):
         line = scopes.filtered(lambda s: s.model_name == model_name)
         if not line:
             return False, _(
-                "SCOPE-GUARD: deze collega mag een activiteit "
-                "uitsluitend plannen op %(alt)s — niet op %(model)s.",
+                "SCOPE-GUARD: deze collega mag uitsluitend schrijven op "
+                "%(alt)s — niet op %(model)s.",
                 alt=alternatives, model=model_name,
             )
 
@@ -282,13 +343,77 @@ class AIAgent(models.Model):
 
         domain = json.loads(line.record_domain or "[]")
         if domain and not target.filtered_domain(domain):
+            failed = self._daadit_domain_mismatch_reason(target, domain)
             return False, _(
                 "SCOPE-GUARD: %(model)s #%(rid)s valt buiten de "
                 "schrijfscope van deze collega — hard geblokkeerd "
-                "(governance, tool-laag).",
+                "(governance, tool-laag). Niet aan voldaan: %(failed)s. "
+                "Wat wél mag: %(where)s. Kies een record uit je laatste "
+                "zoekresultaat dat daaraan voldoet; dezelfde poging "
+                "opnieuw wordt weer geweigerd.",
                 model=model_name, rid=record_id,
+                failed="; ".join(failed) or json.dumps(domain),
+                where=self._daadit_scope_hint(line),
             )
         return True, ""
+
+    @api.model
+    def _daadit_scope_hint(self, line):
+        """Waar deze scoperegel wél naartoe leidt, in leesbare vorm.
+
+        Een weigering die alleen "buiten de scope" zegt laat het model
+        gokken, en gokken kost tool-acties zonder resultaat — precies
+        wat de website.page-weigering hierboven al opleverde. Daarom
+        noemt de tekst het model plus de voorwaarde uit het
+        record-domein: bij de Vault Agent is dat
+        ``root_article_id = 191``, dus de hele Vault-boom.
+        """
+        try:
+            domain = json.loads(line.record_domain or "[]")
+        except (TypeError, ValueError):
+            domain = []
+        parts = []
+        for condition in domain:
+            if isinstance(condition, (list, tuple)) and len(condition) == 3:
+                parts.append("%s %s %s" % tuple(condition))
+        if not parts:
+            return _("elk record van %s") % line.model_name
+        return _("%(model)s waarvoor geldt: %(cond)s") % {
+            "model": line.model_name,
+            "cond": " en ".join(parts),
+        }
+
+    @api.model
+    def _daadit_summary_is_hollow(self, summary):
+        """Meldt deze samenvatting iets, of alleen dát er iets is?
+
+        Waarom geen tekenlengte. Het voorstel van de zelfherstelloop
+        (11-08-2026) wilde minimaal 12 tekens eisen. Dat criterium meet
+        het verkeerde: wat de Vault Agent in productie wegschreef was
+        "Openstaand actiepunt afhandelen" — 31 tekens, drie keer op een
+        klantartikel, en nog steeds zonder onderwerp. Omgekeerd zegt
+        "Actie vereist nu" met zestien tekens niets terwijl
+        "SLA-bijlage mist" met evenveel tekens een melding is.
+
+        Daarom kijkt deze controle naar inhoud: blijft er na het
+        wegstrepen van het reparatiekanaal-voorvoegsel, de stopwoorden
+        en de holle woorden nog een woord over dat het onderwerp
+        benoemt? Een los getal telt niet mee — "182" is geen melding.
+        """
+        text = (summary or "").strip()
+        if not text:
+            return True
+        # "⚠️ AUTO-APPLY niet toepasbaar: opvolgen" mag niet door de
+        # controle glippen op zijn voorvoegsel: het kanaal zegt waar het
+        # bericht vandaan komt, niet wat er aan de hand is.
+        marker = text.upper().find(REPAIR_CHANNEL_PREFIX)
+        if marker != -1:
+            text = text[marker + len(REPAIR_CHANNEL_PREFIX):]
+        meaningful = [
+            token for token in self._daadit_activity_tokens(text)
+            if token not in HOLLOW_SUMMARY_WORDS and not token.isdigit()
+        ]
+        return not meaningful
 
     def _daadit_schedule_activity_guarded(
         self, model_name, record_id, summary=None, note=None,
@@ -304,12 +429,26 @@ class AIAgent(models.Model):
         """
         self.ensure_one()
         allowed, reason = self._daadit_activity_scope(model_name, record_id)
+        reason_code = "scope"
         if allowed and not (summary or "").strip():
             allowed = False
+            reason_code = "summary_leeg"
             reason = _(
                 "SCOPE-GUARD: een activiteit zonder samenvatting is "
                 "nutteloos voor de ontvanger. Roep de tool opnieuw aan "
                 "met een korte, concrete summary.")
+        elif allowed and self._daadit_summary_is_hollow(summary):
+            allowed = False
+            reason_code = "summary_zonder_inhoud"
+            reason = _(
+                "SCOPE-GUARD: de samenvatting %(summary)s benoemt geen "
+                "onderwerp — wie hem in zijn lijst ziet weet nog niets. "
+                "Noem waar het over gaat (het document, het veld, de "
+                "klant of de constatering), niet dat er iets moet "
+                "gebeuren. Roep de tool opnieuw aan; de lengte is niet "
+                "het probleem.",
+                summary=(summary or "").strip(),
+            )
         if not allowed:
             _logger.warning(
                 "SCOPE-GUARD blokkeerde write: agent %s -> %s #%s",
@@ -317,6 +456,7 @@ class AIAgent(models.Model):
             return {
                 "ok": False,
                 "blocked_by_scope_guard": True,
+                "reason": reason_code,
                 "error": reason,
             }
 

@@ -5,6 +5,7 @@ from . import ai_agent_skill
 from . import ai_agent
 from . import ai_agent_read_scope
 from . import ai_agent_activity_scope
+from . import ai_agent_project_report
 from . import mail_activity
 from . import ai_embedding
 from . import mistral_usage

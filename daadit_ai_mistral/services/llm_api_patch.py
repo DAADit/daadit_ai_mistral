@@ -1718,19 +1718,65 @@ _COMPACT_ROUTED_INSTRUCTION = (
     "alleen het korte bruikbare antwoord: maximaal 4 korte bullets, geen "
     "procesbeschrijving en geen interne tool- of delegatiedetails."
 )
+_SPOKEN_CHAT_INSTRUCTION = (
+    "Dit gesprek loopt via spraak: je antwoord wordt hardop "
+    "voorgelezen aan iemand die niet meeleest — vaak handsfree, "
+    "onderweg. Antwoord in maximaal twee korte zinnen gewone "
+    "spreektaal. Geen opsommingen, geen kopjes, geen markdown, geen "
+    "reeksen cijfers of veldnamen, geen herhaling van de vraag, geen "
+    "uitleg over je werkwijze. Noem alleen wat er nu telt; heb je meer "
+    "details, zeg dan in een halve zin dat je die op verzoek geeft. "
+    "Moet je iets weten, stel dan een korte vervolgvraag in plaats van "
+    "alternatieven op te sommen."
+)
+_SPOKEN_ROUTED_INSTRUCTION = (
+    "Je antwoord wordt hardop voorgelezen via een collega-agent. Geef "
+    "alleen de kern: maximaal twee korte zinnen spreektaal, geen "
+    "opsommingen, geen markdown, geen tool- of procesdetails."
+)
 _MAX_CHAT_ANSWER_CHARS = 1400
 
 
-def _add_compact_chat_instruction(conversation, routed=False):
+def _voice_spoken_mode(api_self):
+    """True when this turn is going to be read out loud.
+
+    ``daadit_agent_voice`` stamps the channel while a spoken
+    conversation is open. We look the field up in ``_fields``
+    instead of importing anything, so this keeps working on a database
+    where the voice module is not installed.
+    """
+    try:
+        channel = api_self.env.context.get("discuss_channel")
+        if isinstance(channel, int):
+            channel = api_self.env["discuss.channel"].browse(channel)
+        channel = channel.sudo().exists()
+        if len(channel) != 1:
+            return False
+        if "daadit_voice_spoken_until" not in channel._fields:
+            return False
+        return bool(channel.sudo().daadit_voice_spoken_mode())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _add_compact_chat_instruction(conversation, routed=False, spoken=False):
     """Nudge interactive chat toward concise replies.
 
     The frontend now shows progress steps while tools run; the final
     assistant message should therefore be the outcome, not a logbook.
+    Spoken turns need their own instruction because reading a written
+    answer aloud is unusable in hands-free mode.
     """
     if not isinstance(conversation, list):
         return conversation
     instruction = (
-        _COMPACT_ROUTED_INSTRUCTION if routed else _COMPACT_CHAT_INSTRUCTION
+        _SPOKEN_ROUTED_INSTRUCTION
+        if spoken and routed
+        else _SPOKEN_CHAT_INSTRUCTION
+        if spoken
+        else _COMPACT_ROUTED_INSTRUCTION
+        if routed
+        else _COMPACT_CHAT_INSTRUCTION
     )
     if any(
         isinstance(m, dict)
@@ -1809,6 +1855,102 @@ def _strip_runaway_and_leaks(text):
     text = re.sub(r"(?:\n\s*(?:-+|>+|=+|Einde bericht\.?)\s*)+\Z", "", text)
     text = text.rstrip()
     return text, text != original
+
+
+# Werkwoorden waarmee een agent zegt dat er iets ís gebeurd. Bewust
+# alleen voltooide vormen: "ik ga een post klaarzetten" is een plan,
+# "de post staat klaar" is een claim. Beide talen, want de agents
+# schrijven Nederlands maar vallen onder druk terug op Engels.
+_CLAIM_PATTERNS = (
+    r"\baangemaakt\b", r"\bklaargezet\b", r"\bklaar ?gezet\b",
+    r"\bbijgewerkt\b", r"\bgewijzigd\b", r"\btoegevoegd\b",
+    r"\bingepland\b", r"\bgekoppeld\b", r"\bopgeslagen\b",
+    r"\bverstuurd\b", r"\bgeplaatst\b", r"\bstaat klaar\b",
+    r"\bheb ik .{0,30}(gemaakt|gezet|aangepast)\b",
+    r"\bis (?:nu )?(?:aangemaakt|bijgewerkt|toegevoegd|klaar)\b",
+    r"\bcreated\b", r"\bupdated\b", r"\bscheduled\b", r"\bdrafted\b",
+    r"\bset as (?:a )?draft\b", r"\bhas been (?:created|added|updated)\b",
+    r"\bis (?:now )?(?:ready|live|saved)\b",
+)
+
+
+def _append_unbacked_claim_warning(adapted, normalized_tools, router_depth):
+    """Mark an answer that claims completed work without a single write.
+
+    The router already reports what a delegated agent did, but a direct
+    chat had nothing: asked to update a post and add a visual, Penny
+    replied that both were done while the post was untouched and no
+    image existed. The counter is the same one the router reads, so this
+    is the same fact, shown where the person actually is.
+
+    Deliberately narrow. It fires only when the agent had write tools in
+    hand, made no write, and its own words claim otherwise — a question
+    like "how many tickets are open?" must never pick up a warning.
+    """
+    if router_depth:
+        # Inside a routed sub-run the router adds its own fact line; two
+        # warnings on one answer would be noise.
+        return adapted
+    try:
+        writes = getattr(tool_dispatch.router_state, "writes_made", 0) or 0
+    except Exception:  # noqa: BLE001
+        return adapted
+    if writes:
+        return adapted
+    # No write tools offered means the agent could not have written even
+    # if it wanted to; a claim is then a language slip, not a false
+    # report of database work.
+    names = []
+    for tool in (normalized_tools or []):
+        if isinstance(tool, str):
+            names.append(tool)
+        elif isinstance(tool, dict):
+            fn = tool.get("function") or {}
+            names.append(fn.get("name") or tool.get("name") or "")
+    if not any(tool_dispatch._is_write_tool(n) for n in names if n):
+        return adapted
+
+    def _text_of(item):
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            return item.get("content") or item.get("text") or ""
+        return ""
+
+    joined = " ".join(_text_of(i) for i in (adapted or []))
+    if not joined.strip():
+        return adapted
+    if not any(
+        re.search(pattern, joined, re.IGNORECASE)
+        for pattern in _CLAIM_PATTERNS
+    ):
+        return adapted
+
+    # Deze module importeert bewust niets uit odoo (hij wordt ook buiten
+    # een registry geladen), dus geen _() hier — de tekst is Nederlands,
+    # net als de chat waarin hij verschijnt.
+    warning = (
+        "\n\n---\n⚠️ **Feitelijk vastgelegd door het systeem: 0 "
+        "schrijfacties.** Er is niets aangemaakt, gewijzigd of "
+        "ingepland. Lees het bovenstaande als voorstel, niet als "
+        "uitgevoerd werk."
+    )
+    _logger.warning(
+        "daadit_ai_mistral.llm_api_patch: answer claims completed work "
+        "with 0 write actions — appended fact line",
+    )
+    out = list(adapted or [])
+    for index in range(len(out) - 1, -1, -1):
+        item = out[index]
+        if isinstance(item, str) and item.strip():
+            out[index] = item + warning
+            return out
+        if isinstance(item, dict) and (item.get("content") or "").strip():
+            patched = dict(item)
+            patched["content"] = item["content"] + warning
+            out[index] = patched
+            return out
+    return adapted
 
 
 def _clean_adapted(adapted, where, compact=False):
@@ -2177,9 +2319,23 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     conversation = _inject_language_mirror(conversation)
     conversation = _inject_runtime_context(conversation)
     if _interactive_chat and not response_format_extra:
+        _routed_depth = int(
+            getattr(tool_dispatch.router_state, "depth", 0) or 0
+        )
+        if _routed_depth:
+            _spoken = bool(
+                getattr(tool_dispatch.router_state, "spoken", False)
+            )
+        else:
+            _spoken = _voice_spoken_mode(api_self)
+            try:
+                tool_dispatch.router_state.spoken = _spoken
+            except Exception:  # noqa: BLE001
+                pass
         conversation = _add_compact_chat_instruction(
             conversation,
-            routed=bool(getattr(tool_dispatch.router_state, "depth", 0)),
+            routed=bool(_routed_depth),
+            spoken=_spoken,
         )
     conversation = _inject_orchestrator_prompt(agent, conversation)
 
@@ -2245,6 +2401,11 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         tool_dispatch.router_state.calls = 0
         tool_dispatch.router_state.exhausted = False
         tool_dispatch.router_state.sub_failed = False
+        # Tool tallies for this turn (v19.0.6.24.0). Zeroed here so a
+        # write from a previous turn on this worker thread can never
+        # vouch for a claim made in this one.
+        tool_dispatch.router_state.calls_made = 0
+        tool_dispatch.router_state.writes_made = 0
         # Models this turn was refused on policy grounds. Read by the
         # router to refuse a hop to a colleague who may not read them
         # either; reset here so a refusal from a previous turn on this
@@ -3005,6 +3166,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # horen niet in de chat.
     adapted = _clean_adapted(
         adapted, "eindantwoord", compact=_interactive_chat,
+    )
+    adapted = _append_unbacked_claim_warning(
+        adapted, normalized_tools, _router_depth,
     )
     _logger.info(
         "daadit_ai_mistral.llm_api_patch: Mistral chat ok "

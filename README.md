@@ -47,7 +47,7 @@ deployment repo:
 
 ```bash
 # in the deployment repo, on a fresh branch
-./adopt_as_submodule.sh --release v19.0.9.0.0
+./adopt_as_submodule.sh --release v19.0.10.0.0
 ```
 
 It refuses to run while the copied folder differs from the release you pin to
