@@ -7,6 +7,24 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.10.0.0 — 2026-08-13 — de derde lijn erbij
+
+Er waren geen twee lijnen maar drie: naast deze repo en de map in
+`DAADit/daadit` liep in `adriedaadit/daadit` — de lijn die op productie
+draait — een eigen `daadit_ai_mistral` op 19.0.7.3.0. Die lijn is hier
+leidend gemaakt voor alles wat hij nieuwer had (projectrapportage,
+schrijfscope vóór toewijzing, per-veld afkapping, spraakantwoorden,
+skill-naar-provisioning, Odoo 19-constraints, registry-deduplicatie), en
+het werk dat alleen hier stond is er weer bovenop gezet: het schema van
+een zelfgemaakte tool, de drempel voor een taalreferentie en de
+tussenstand in het gesprek tijdens een delegatie.
+
+Let op bij het lezen van de historie hieronder: de twee lijnen hebben
+dezelfde versienummers hergebruikt voor ander werk (bijvoorbeeld twee
+keer 19.0.7.3.0, twee keer 19.0.7.1.0). De regels van deze repo staan
+boven die van de productielijn; vanaf 19.0.10.0.0 is er één historie.
+
+
 ## 19.0.9.0.0 — 2026-08-13
 
 De twee lijnen van deze module zijn samengevoegd: alles wat na de vorige
@@ -241,6 +259,645 @@ plan (`ir.logging` 11309–11333).
   bare "?" got its access-denial message back in French. It now joins
   the last three user messages that contain at least
   `MIN_LANG_REF_LETTERS` letters and skips the rest.
+
+## 19.0.7.3.0 — 2026-08-17 — orderverwerking hoort bij sales
+
+Tussen de handtekening en de factuur had niemand de order: Sanne liet los
+bij de handtekening, Marit begon pas bij het factureren. Orderverwerking
+valt onder sales, dus Sanne's werk loopt nu tot de levering.
+
+- vijf skills in de categorie `sales`: orderintake controleren, prijs- en
+  kortingafwijking signaleren, leverbaarheid controleren, leverdatum en
+  backorder bewaken, en klaar-om-te-factureren doorgeven aan Marit;
+- meelezend van opzet: lezen en opvolging klaarzetten binnen de
+  activity-scope van `sale.order`, geen `write` en geen `unlink`, dus
+  geen order bevestigen en geen levering valideren;
+- de seed hangt ze aan Sanne (additief, handmatige keuzes blijven staan)
+  en een migratie haalt de oude overdrachtsregel uit haar persona: nazorg
+  blijft van Hilda, factureren van Marit.
+
+## 19.0.7.1.0 — 2026-09-01 — Korte antwoorden in spraakgesprekken
+
+Een geschreven chatantwoord bevatte te veel rapportage om prettig handsfree
+voor te lezen. Tijdens een gemarkeerde spraakbeurt stuurt de provider nu aan
+op maximaal twee korte zinnen, ook wanneer de vraag via een specialist loopt.
+De status van de hoofdbeurt wordt via de bestaande routerstatus doorgegeven
+aan die delegatie.
+
+## 19.0.7.0.2 — 2026-08-17 — doelblok als html, niet als tekst
+
+Hertest legde de tweede helft van dezelfde bug bloot: het doelblok werd
+wel met de juiste marker geschreven, maar bij een project dat al een
+beschrijving had ging het als `str(block) + description` het veld in.
+`description` is `markupsafe.Markup`, dus `str + Markup` loopt via
+`Markup.__radd__` en escapet de linkerkant — de gebruiker zag letterlijke
+html in het projectformulier, het dashboard gaf weer `goal: ''` en een
+tweede doel kwam bovenop het eerste. De beschrijving wordt nu eerst naar
+platte `str` gehaald, en de test controleert op het onge-escapete blok
+(`<div class="o_daadit_goal">`) in plaats van op de losse marker, die ook
+in de geëscapete variant voorkwam.
+
+## 19.0.7.0.1 — 2026-08-17 — het doel bleef onvindbaar
+
+Runtime-test op een echte database liet zien dat het doel nooit
+aankwam: `project.project.description` is een gesanitiseerd html-veld en
+Odoo's sanitizer verwijdert onbekende `data-*` attributen. De marker
+`data-daadit-goal="1"` was na het wegschrijven dus weg, met drie
+gevolgen: het dashboard toonde stil geen doel, een tweede doel kwam
+bovenop het eerste in plaats van eroverheen, en de rapportage zag de
+hele projectbeschrijving als doel — inclusief rolverdeling en cadans.
+
+De marker is nu een class (`o_daadit_goal`), die de sanitizer wel laat
+staan, in de schrijver (`models/ai_agent_project_report.py`) en in de
+uitlezer van het dashboard. `_daadit_project_goal` valt niet langer
+terug op de hele beschrijving: zonder blok is er geen doel, en dan
+weigert **AI: Project Report** zoals bedoeld. Een test legt de
+sanitizer-ronde vast, zodat een volgende marker niet stil sneuvelt.
+
+## 19.0.7.0.0 — 2026-08-17 — projectrapportage in records
+
+De projectmanager kon taken aanmaken en bijwerken, maar het antwoord op
+de enige vraag die een opdrachtgever stelt — wat is het doel, welke
+fasen liggen ervoor, waar staan we — leefde nergens vast. Elke ronde
+leverde een nieuw vrij verhaal in de chat: andere indeling, andere
+getallen, niets terug te vinden in Odoo.
+
+Drie tools zetten die vorm in records (`models/ai_agent_project_report.py`,
+serveracties in `data/ai_tools.xml`):
+
+- **AI: Project Goal Set** — het doel in de projectbeschrijving, in een
+  eigen blok (`class="o_daadit_goal"`). De rest van de beschrijving blijft
+  staan; een beschrijving met rolverdeling en cadans wordt dus niet meer
+  overschreven. Onder 60 tekens weigert de tool: "Odoo uitrollen" is een
+  opdracht, geen doel. Boven 700 tekens ook: dan is het een projectplan.
+- **AI: Project Phase Upsert** — één fase als `project.milestone`, mét
+  einddatum. Zonder datum een weigering, want dan is er geen planning.
+  Dezelfde fasenaam werkt de bestaande fase bij in plaats van een tweede
+  aan te maken, en `allow_milestones` gaat aan zodat iemand de fasen ook
+  terugziet.
+- **AI: Project Report** — de voortgang als `project.update` in de vaste
+  vorm doel → fasen → planning → voortgang. Ontbreekt het doel of een
+  fase met datum, dan weigert de tool en noemt wat er mist. De cijfers
+  (fasen, taken af, uren) worden hier in de database geteld; het model
+  levert alleen status, risico's en volgende stap. Een tweede rapportage
+  op dezelfde dag overschrijft die van vandaag in plaats van de reeks
+  onleesbaar te maken.
+
+De schrijfgrens is dezelfde als voor de andere schrijftools: de
+scoperegel op `project.project` uit `daadit.ai.agent.activity.scope`.
+Zonder scoperegel wordt er niets geschreven — ook geen fase of update,
+want beide gaan via het project. De drie tools staan in
+`WRITE_SIDE_TOOL_SLUGS` en worden dus uit gedelegeerde sub-runs
+gestript: een geroute vraag levert een antwoord op, geen rapportage op
+naam van een ander.
+
+## 19.0.6.29.7 — 2026-08-13 — standard-suites terug
+
+`#98`/`#99` sloten deze suites uit van de Odoo.sh-standaardbuild op een
+verkeerde diagnose. Teruggezet; alleen `test_eval` / masterkey-drill /
+vestiging-package blijven `-standard`.
+
+## 19.0.6.29.6 — 2026-08-13 — dubbele registryrijen opgeruimd
+
+De unieke index uit 19.0.6.29.5 kon niet worden aangelegd:
+
+    odoo.schema: could not create unique index
+        "daadit_ai_mistral_model_technical_name_uniq"
+
+Omdat de constraint jarenlang niet bestond, had de sync 26 model-ids twee
+keer weggeschreven (een gearchiveerde rij plus een actieve met dezelfde
+`technical_name`). Een pre-migratie ruimt die paren op: de actieve rij
+blijft staan, een xml-id verhuist mee in plaats van te verdwijnen. Getest
+tegen een kopie van de productiedata: 71 -> 45 rijen, alle 45 actieve
+modellen behouden, geen verweesde xml-ids.
+
+## 19.0.6.29.5 — 2026-08-13 — modelregistry-uniciteit hersteld
+
+`mistral.model.registry` verklaarde zijn unieke `technical_name` nog via
+de `_sql_constraints`-lijst. Odoo 19 negeert die lijst stilzwijgend, dus
+de constraint bestond niet en dezelfde model-id kon twee keer in de
+registry staan. Nu `models.Constraint`, gelijk aan de rest van de
+codebase.
+
+## 19.0.6.29.2 — 2026-08-13 — read_group/search args die de ORM weigerde
+
+Productielogs van Marit: `aggregates=['["amount_total:sum"]']` (JSON in
+een string), `groupby=['validity_date']` zonder granulariteit, en
+`stage_id.is_close` (bestaat niet — moet `fold`). De tool-laag pelt de
+JSON af, zet `:day` op date(time)-groupbys, en herschrijft `is_close` →
+`fold`. `cost_cap.daily_spend` gebruikt `_read_group` (Odoo 19) met
+mapped-sum als terugval.
+
+## 19.0.6.29.1 — 2026-08-13 — Afkapping die zegt wat er mist, en schrijfscope vóór toewijzing
+
+- **1076**: resultaatcap knipt eerst zware tekstvelden (`[AFGEKAPT]` +
+  `truncated_fields`), pas daarna records.
+- **1079**: `AI: Assign User` vraagt `_daadit_write_scope` vóór de write;
+  weigering noemt de gefaalde voorwaarde én de toegestane bestemming.
+- **1077/1078**: holle samenvattingen geweigerd; vault-scope tests +
+  weigering die zegt waar het wél mag.
+
+## 19.0.6.26.0 — 2026-08-10 — Ook een directe chat markeert een claim zonder dekking
+
+19.0.6.24.0 bracht de feitenregel naar de router, maar een gesprek
+rechtstreeks met een agent bleef ongedekt. Gevraagd om post 4 bij te
+werken en er een visual bij te maken, antwoordde Penny dat allebei
+gedaan was — terwijl de tekst onveranderd was en er geen afbeelding
+bestond.
+
+`_append_unbacked_claim_warning` hangt nu een regel onder het antwoord
+wanneer drie dingen tegelijk gelden: de agent had schrijftools, deed
+geen enkele schrijfactie, en beweert in zijn eigen woorden dat er iets
+is aangemaakt, bijgewerkt, gekoppeld of ingepland. Alleen voltooide
+werkwoorden tellen — "ik ga een post klaarzetten" is een plan, "de post
+staat klaar" is een claim — zodat een gewone vraag ("hoeveel tickets
+staan open?") nooit een waarschuwing oppikt.
+
+De tellers worden aan het begin van elke top-level beurt op nul gezet,
+zodat een schrijfactie uit een vorige beurt op dezelfde worker-thread
+niet kan instaan voor een claim in deze.
+
+## 19.0.6.25.0 — 2026-08-10 — Een tool wordt niet meer geweigerd om een detail dat het model niet kan weten
+
+Waarom er nooit een concept social post verscheen: Mark riep de tool
+wél aan, maar met `campaign_id: "Odoo Partnership 2026"` — de campagne
+bij náám, waar het schema een id verwacht. Stock valideert streng en
+weigert de hele aanroep; de post werd nooit aangemaakt en Mark meldde
+hem alsnog als klaar. Hetzelfde patroon staat drie keer in het
+actielog: `channels: ["LinkedIn", "Website/blog"]` (lijst waar string
+hoort) en `uitvoerder: "Nova"` ("Missing definition for uitvoerder").
+
+`_coerce_to_schema` brengt de waarden nu in lijn met het schema vlak
+voor uitvoering: een numerieke string wordt een getal, een lijst wordt
+een samengevoegde string, een string wordt een lijst, en een
+onbruikbare optionele waarde of een niet-bestaande parameter wordt
+weggelaten. Elke aanpassing komt als notitie terug in het
+tool-resultaat (`daadit_argument_notes`), zodat de volgende aanroep
+meteen goed is. **Verplichte** parameters worden nooit weggelaten of
+gegokt — die moeten luid blijven falen.
+
+Daarnaast telt de feitenregel uit 19.0.6.24.0 een schrijfactie nu pas
+ná uitvoering. Mark's vier "writes" op deze post waren vier weigeringen;
+die mogen niet als gedaan werk in de router terugkomen.
+
+## 19.0.6.24.0 — 2026-08-10 — Een gedelegeerde agent kan geen werk meer claimen dat hij niet deed
+
+Via Robin gevraagd om een post in Social Marketing klaar te zetten,
+antwoordde Mark: "Post is set as a draft in the Social Marketing app,
+ready for your review." Het request-log van die beurt laat zien dat hij
+`ir_actions_server_create_draft_social_post_mark` aangeboden kreeg, twee
+iteraties liep en geen enkele tool aanriep. In de database stond één
+`social.post`, van drie weken eerder. Robin gaf de claim letterlijk door,
+want de router leverde hem alleen een antwoordtekst zonder iets om die
+tegen te toetsen.
+
+De geplande route publiceert sinds 19.0.3.3.0 een feitenregel onder elk
+rapport, om precies deze reden: een instructie is geen controle. De
+chat-route had dat niet.
+
+`tool_dispatch.note_tool_call` telt nu elke uitgevoerde aanroep (en of
+die schreef) op de thread, de router nulstelt die tellers per sub-run en
+zet ze daarna terug, en `_ai_tool_ask_agent` geeft `tool_calls_made`,
+`write_actions_made` en een `fact_check`-regel terug naast het antwoord.
+Bij nul schrijfacties zegt die regel onomwonden dat er niets is
+aangemaakt, gewijzigd of ingepland, met de opdracht het antwoord als
+voorstel door te geven in plaats van als uitgevoerd werk.
+
+Leestools zijn de vaste stock-set; al het andere telt als schrijfactie,
+zodat een nieuwe custom actie meteen gedekt is.
+
+## 19.0.6.23.1 — 2026-08-09 — De facturatierol heet Marit
+
+Op verzoek van de eigenaar heet de facturatierol niet langer Fenna. De
+naam is de sleutel in `SEED_ACTIVITY_SCOPES` en in de skill-mapping, dus
+hij staat op twee plaatsen in de repo; de rol, de scope en het
+postbusartikel (352) blijven ongewijzigd.
+
+Geen migratie nodig: beide seed-paden zoeken de agent op naam en zijn
+additief. De scoperegels en skills hangen aan het agentrecord, niet aan
+de naam, dus een hernoemde agent houdt wat hij had. Een database waarin
+de agent nog Fenna heet, krijgt hem simpelweg niet geseed — daar bestaat
+`Marit` niet en slaat de seed hem over, precies zoals bij elke andere
+onbekende naam.
+
+## 19.0.6.22.1 — 2026-08-07 — Handoff opent de specialist-chat meteen
+
+Na `#56` bleef de bus-notificatie voor `Open Agent Chat` hangen tot de
+hele Robin-beurt committe — de UI opende de specialist-chat pas ná de
+bevestiging. De notify gaat nu over een eigen cursor (zelfde patroon als
+denkstappen). Daarnaast lezen we de channel-id uit de stock
+`open_agent_chat`-action wanneer die die meestuurt.
+
+## 19.0.6.22.0 — 2026-08-07 — Robin als orchestrator: vragen of chat openen
+
+Alles bespreken via Robin, zonder dat Robin zelf domeinwerk uitvoert.
+
+- **`daadit_is_orchestrator`** op `ai.agent` — harde poort in de chat-loop:
+  alleen `AI: Ask Agent` en `AI: Open Agent Chat` blijven over, ook als
+  topics nog search/write-tools linken. Migratie zet dit aan voor
+  agents genaamd Robin / Ask AI.
+- **Nieuwe tool `AI: Open Agent Chat`** — opent (of hergebruikt) een
+  `ai_chat` met de specialist, stuurt `daadit_open_agent_chat` over de
+  bus zodat de UI die chat opent, en plaatst optioneel een
+  openingsbericht. Pass-through: één korte bevestiging in Robins chat.
+- **Ask Agent-recovery** voor orchestrators wijst naar een andere
+  specialist of open-chat, niet meer naar "use your own tools".
+- Orchestrator-prompt wordt geïnjecteerd; denkstappen tonen
+  "Ik open een chat met …". Frontend in `daadit_agent_voice`.
+
+## 19.0.6.21.0 — 2026-08-06 — De financiële bezetting onder Floris staat in de repo
+
+Floris was een CFO zonder afdeling: geen manager, geen medewerkers, en
+dus geen enkele financiële taak die aantoonbaar werd uitgevoerd. Onder
+hem staan nu vier rollen met marktnamen en een smalle scope — boekhouder
+(controle), debiteurenbeheer, facturatie en controller (marge). Elk levert
+op één eigen artikel af.
+
+- **`SEED_ACTIVITY_SCOPES`** krijgt `Bo`, `Dirk`, `Fenna` en `Coen`. Bo
+  mag een bevinding op een boekstuk hangen, Dirk op een verkoopfactuur,
+  Fenna op een order en Coen op een relatie — plus elk zijn eigen
+  postbusartikel. Een boeking, factuur of prijs wijzigen kan geen van
+  hen: dat staat niet in hun activiteit-scope en niet in hun modellijst.
+- **Waarom vier en niet één "financieel medewerker"**: de grens tussen
+  lezen, concept schrijven en boeken is technisch, niet stilistisch. Eén
+  agent die alles doet is achteraf niet te controleren — dezelfde reden
+  waarom de helpdesk-keten in stappen is geknipt.
+- **Migratie `19.0.6.21.0/post-seed_finance_scopes.py`** — hetzelfde
+  idempotente, niet-verruimende seed-pad als 19.0.6.18.0. Een database
+  zonder deze agents merkt er niets van.
+
+## 19.0.6.18.1 — 2026-08-03
+
+`mail` staat nu in `depends`. Deze module breidt `mail.activity` uit,
+maar leunde erop dat `mail` toevallig eerder in de laadvolgorde stond.
+Die volgorde verschuift zodra er een module bijkomt: bij het installeren
+van `daadit_tenant_blueprint` viel het registry-laden om met
+`Model 'mail.activity' does not exist in registry` — een storing die niet
+in deze module leek te zitten. Alleen de afhankelijkheid, geen
+gedragswijziging.
+
+## 19.0.6.17.0 — 2026-08-03
+
+Zichtbare denkstappen in de chat. De ene voortgangsregel ("AI is
+thinking…" / één regel die de vorige overschreef) is nu een groeiende,
+terugleesbare lijst: "Ik zoek de gegevens erbij", "Ik leg dit voor aan
+Sem", "Sem heeft geantwoord, ik verwerk het". Elke stap draagt een
+`turn_id` (welk antwoord), een `seq` (volgorde) en een `depth`
+(0 = deze agent, >0 = een doorgerouteerde collega, die de frontend
+ingesprongen toont). Stappen worden nu ook binnen een sub-run (depth > 0)
+gestuurd, en aan het eind komt een `done`-markering zodat de frontend de
+"bezig"-status stopt.
+
+De labels en het bus-verkeer verhuizen naar één gedeelde plek
+(`daadit_ai_agent_schedule.services.agent_steps`) zodat Mistral, Loes en
+Claude exact dezelfde, PII-vrije regels sturen. Een denkstap wordt altijd
+uit een vaste labelset gebouwd — nooit uit modeltekst, tool-argumenten,
+tool-resultaten of sub-run-JSON.
+
+## 19.0.6.16.1 — 2026-08-03
+
+Intern verkeer stond in de chat. In `mail.message` 27078 schreef Robin
+zijn eigen antwoord ("ik heb dit zelf opgehaald"), plakte daaronder de
+deelvraag die hij aan Pim had gesteld plus het ruwe resultaat van die
+sub-run (`{"answer": …, "error": null}`), en liep daarna vast in een
+lus van scheidingstekens tot het tokenplafond. Alle drie stonden voor
+de gebruiker op het scherm, en het gelekte blok sprak de tekst erboven
+tegen.
+
+`_answer_looks_degenerate` dekte alleen het *doorgegeven* antwoord van
+een specialist en verwerpt dat in zijn geheel; de eigen tekst van de
+agent ging ongezien naar de chat. `_strip_runaway_and_leaks` snijdt nu
+in plaats van te verwerpen, zodat het bruikbare deel blijft staan, en
+loopt over beide paden: de pass-through én het gewone eindantwoord
+(`_clean_adapted`).
+
+Afgesneden wordt: het ruwe sub-runresultaat (een JSON-object met
+`answer`/`ok` *en* een `error`-veld, zodat een antwoord dat zélf over
+JSON gaat heel blijft), de staart van de interne opdrachtlijst met de
+naam van de gedelegeerde collega (`]] - Pim …`), en veertig of meer
+scheidingstekens achter elkaar. Blijft er niets over, dan komt er een
+korte melding in plaats van een leeg bericht. Een markdown-`---` en
+een gewone opsomming blijven ongemoeid.
+
+## 19.0.6.16.0 — 2026-08-03
+
+Een gegroepeerde OR in een domein liet de hele toolaanroep crashen.
+De modellen schrijven de OR consequent als eigen lijst:
+
+    [("active", "=", True), ["|", ("date", ">=", x), ("date", "=", False)]]
+
+Die binnenlijst heeft drie elementen en een string vooraan, dus de ORM
+leest hem als leaf, neemt `"|"` voor de veldnaam en de volgende lijst
+voor de operator, en valt om met
+`AttributeError: 'list' object has no attribute 'lower'`. De aanroep is
+dan weg en het model ziet niet waarom. Run 565 (Eva, maandrapportage)
+verspeelde er 14 van zijn 46 toolaanroepen aan, afwisselend `search` en
+`read_group` op dezelfde twee domeinen.
+
+`_coerce_domain_obj` haalt zulke groepen nu uit hun lijst en zet de
+inhoud terug in de ouder — de platte prefixvorm die de ORM verwacht.
+Geneste groepen worden volledig uitgevlakt; een correct prefixdomein,
+een leaf met een lijstwaarde (`["id", "in", [1, 2]]`) en een leaf met
+een operator als wáárde (`["name", "like", "|"]`) blijven ongemoeid.
+
+## 19.0.6.15.0 — 2026-08-03
+
+Twee doodlopende wegen die elke dag iteraties kostten (taken 743, 746).
+
+**Delegeren naar een collega met dezelfde beperking wordt geweigerd
+vóór de sub-run.** Eva werd in run 558 geweigerd op
+`account.move.line` en vroeg het in de volgende aanroep aan Bram — die
+mag het ook niet. Vier runs, vier modellen, hetzelfde patroon; runs 499
+en 500 strandden erna op de iteratielimiet. De dispatcher houdt nu bij
+op welke modellen deze beurt geweigerd is, en de router controleert de
+whitelist van de ontvanger voordat hij een beurt uitgeeft. De melding
+zegt wat de agent moet doen: rapporteer het als NIET VASTGESTELD, noem
+de ontbrekende bron, en vul het gat niet met verzonnen cijfers. Wat
+niet gebeurt is de vraagtekst uitpluizen — gokken welk model een
+Nederlandse zin nodig heeft zou legitieme delegaties blokkeren.
+
+**Een activiteit op een model zonder activiteiten noemt nu een
+alternatief.** Sem probeerde drie dagen achter elkaar een activiteit op
+`website.page` te plannen (runs 496, 508, 536). De melding zei alleen
+wat niet kan, dus herhaalde hij het de volgende dag. Er staat nu bij
+waar de bevinding wél heen kan: de chatter van het record als het model
+die heeft, en anders een `project.task` met het record-id in de
+beschrijving.
+
+Dat lost het patroon op bij elke agent die deze fouten maakt, niet
+alleen bij Eva en Sem. Wat het niet oplost is de onderliggende vraag of
+Eva's opdracht data vraagt die zij niet hoort te zien — dat is een
+rechtenwijziging en die gaat langs Nick (taak 708).
+
+## 19.0.6.14.0 — 2026-08-03
+
+Geweigerde tools om parameternamen, en een resultaatcap die niets
+opleverde (taken 741, 742, 744). Alle drie kwamen uit het actielogboek
+van 27-7 t/m 3-8, niet uit een review.
+
+**Nederlandse keys landen nu op het Engelse schema.** Mark's run 556
+riep dezelfde tool vier keer achter elkaar aan met
+`{campagne_id, onderwerp, kanaal, datum, uitvoerder}` en kreeg vier keer
+"is missing required argument(s): 'campaign_id', 'title', 'channel',
+'date'" terug — met álle waarden correct aangeleverd. In diezelfde run
+werd een uitgewerkt marketingplan van circa 2.500 tekens geweigerd omdat
+`name` en `objective` ontbraken; dat werk is nergens opgeslagen.
+`_remap_arg_names` schuift een aangeleverde key op de schema-naam, op
+drie manieren: leestekens/kapitalen, een Nederlandse alias, en de kale
+naam van een id-parameter (`partner` → `partner_id`). Wat het niet doet
+is gokken: één onbekende key plus één ontbrekende parameter is geen
+bewijs dat ze bij elkaar horen, en een schema-naam die de agent zelf al
+heeft gevuld wordt nooit overschreven.
+
+**De foutmelding zegt niet langer iets dat niet waar is.** De oude tekst
+eindigde in "Do not call this tool with empty arguments", terwijl de
+argumenten in twee van de drie gevallen wél gevuld waren — dus
+corrigeerde het model het verkeerde en verbrandde een iteratie. Er staat
+nu in welke keys zijn ontvangen en welke de tool accepteert. Voor
+`domain` staat de vorm voor "alles" erbij (`[]`): dat was de meest
+voorkomende afzonderlijke fout in het log, altijd bij agents die een
+korte volledige tabel wilden ophalen.
+
+**Een te groot resultaat wordt afgekapt in plaats van geweigerd.** Run
+519 stuurde vijf keer vrijwel dezelfde query van 262.805 tekens en
+strandde daarna op de iteratielimiet; weigeren kost een iteratie en
+levert niets op. De agent krijgt nu de eerste N records mét
+`truncated: true` en het totaal, dus bruikbare data plus de wetenschap
+dat er meer is.
+
+**En de genoemde cap is nu de cap die geldt.** `max_tool_result_chars`
+stond in productie op 6000 terwijl deze module 50.000 afdwong, dus het
+getal in de foutmelding was niet het getal dat werd toegepast en niemand
+kon voorspellen of een query paste. De parameter wint nu; 0 zet de cap
+uit.
+
+Nog niet meegenomen: `daadit_ai_loes` heeft een eigen kopie van deze
+dispatcher met dezelfde meldingen. Dezelfde reparatie hoort daar ook,
+maar niet blind in dezelfde commit.
+
+## 19.0.6.13.0 — 2026-07-26
+
+Valt Mistral uit, dan neemt Claude de beurt over (taak 709).
+
+Tot nu toe eindigde een beurt in een foutmelding zodra Mistral niet
+antwoordde: verbinding weg, 5xx, of een rate limit die alle drie de
+pogingen overleefde. Voor een geplande run betekende dat een mislukte
+run, voor een klant in de chat een collega die er niet is.
+
+`MistralUnavailable` scheidt nu "Mistral kan niet" van "de vraag klopt
+niet". Alleen het eerste valt terug op Claude; een 400 of 401 blijft
+een fout, want dezelfde kapotte vraag naar Anthropic sturen levert
+alleen een tweede rekening op.
+
+De beurt gaat verder met dezelfde berichten, dezelfde tools en dezelfde
+agent op de threadlocal — alleen de modelnaam wordt vervangen, want een
+Mistral-id zegt Anthropic niets. Instelbaar via
+`daadit_ai_mistral.fallback_provider` (`off` zet het uit) en
+`daadit_ai_mistral.fallback_model`.
+
+## 19.0.6.12.0 — 2026-07-26
+
+Beslis zelf, vraag niet.
+
+Gesprekken eindigden in een vraag die de collega zelf had kunnen
+beantwoorden. Waargenomen op 27-07: de blog-tool gáf de lijst van twee
+blogs terug, waarna de agent "welke blog zal ik gebruiken?" doorspeelde
+naar de gebruiker. Dat kost een volle extra ronde — en het ondermijnt
+waar we voor verkopen: een collega die werk uit handen neemt, niet een
+formulier dat terugvraagt.
+
+`_SELF_SERVICE_INSTRUCTION` hangt nu achter de systeemregel die elke
+beurt meekrijgt: eerst zoeken, dan kiezen uit wat een tool al teruggaf,
+en bij gelijkwaardige opties de meest voor de hand liggende nemen en
+zéggen welke. Alleen vragen wat niet in Odoo kán staan of wat
+onomkeerbaar is (publiceren, mailen, verwijderen, geld uitgeven) — en
+dan één keer, met de aanbeveling al in de vraag.
+
+Deze regel stond al in de product-repo (19.0.7.4.0) maar bereikte
+productie nooit, omdat die lijn niet is uitgerold. Overgenomen zonder
+de rest van 7.x, zodat de deploy-only fixes ongemoeid blijven.
+
+## 19.0.6.11.0 — 2026-07-26
+
+Fair use per collega: waarschuwen bij 60%, en op 100% praten zonder
+handelen.
+
+De bestaande `daily_cost_cap_usd` is een noodrem voor de hele database
+— hij zegt niets over wat één klant of één collega mag kosten, en gaat
+pas af als het al te laat is. Deze beurt raadpleegt daarnaast de meter
+in `daadit_ai_agent_schedule` (`_agent_budget_state`), die dag- en
+maandverbruik per agent en per vestiging optelt uit álle
+verbruiksregels, dus chat én geplande runs.
+
+Boven de drempel komt er één regel boven het antwoord, in de taal van
+het gesprek. Op 100% blijven de tools weg:
+
+```python
+if _cc.should_drop_tools(_budget):
+    normalized_tools = None
+    tool_choice = None
+```
+
+De collega beantwoordt de vraag dan nog wel, maar zoekt niets op en
+wijzigt niets. Dat kost één goedkope completion in plaats van een
+toolketen, en de klant hoort waaróm — een volledige weigering leest als
+een storing en levert een supportgesprek op.
+
+Fail-open op elke stap: staat `daadit_ai_agent_schedule` niet
+geïnstalleerd of gaat de meter stuk, dan blijft alleen de oude
+systeemcap over.
+
+## 19.0.6.5.6 — 2026-08-01
+
+A sub-run hitting its budget no longer fails the whole scheduled run.
+
+`top_level_exhausted` was assigned unconditionally in the bail-out
+block, two lines after `exhausted` was correctly gated on
+`router_state.depth > 0`. So whenever a delegated sub-run reached its
+(deliberately tighter) `max_tool_iterations_subrun` budget, it wrote the
+*top-level* flag on the shared threadlocal. `daadit_ai_agent_schedule`
+reads that flag after `request_llm` returns to decide 'done' vs 'error',
+and duly marked the parent run failed — even though the parent had
+finished and produced a complete report.
+
+Consequence in production: every delegating agent was slowly killing
+itself. Eva's monthly report (schedule 37) accumulated three such
+"failures" on 29-07-2026, tripped the circuit breaker at
+`failure_threshold = 3`, and was silently deactivated. Nobody noticed
+until an audit of inactive schedules on 01-08; her 3 August report would
+not have run. Mark's marketing chain and Hilda's delegation were on the
+same path.
+
+Now only a depth-0 bail may set the flag. The parent still learns that a
+sub-run failed through `sub_failed`, which `_ai_tool_ask_agent` already
+saves and restores around every sub-run — that path is untouched.
+
+Verified against the live report: run 499 produced a full directors'
+report from real records (Avontuur, Real Oat Arts, twelve MCP-signup
+leads) and correctly declared the financial section "not established"
+rather than inventing figures — yet was still stamped 'error'.
+
+## 19.0.6.5.5 — 2026-08-01
+
+Pass-through no longer relays a runaway specialist answer.
+
+Live incident: a specialist asked to do something outside its scope
+refused correctly, then kept appending "Einde. ❌✅🛑🚀" variations until
+it hit its 4000-token cap — and 19.0.6.5.4 relayed all of it verbatim to
+the user. Before the pass-through the concierge re-generated the answer
+and silently absorbed that noise, so removing the extra generation also
+removed an accidental quality filter.
+
+`_answer_looks_degenerate()` restores it as an explicit one. Three
+independent signals, any of which blocks the relay: length beyond ~6000
+characters; fewer than 40% distinct non-empty lines over 12+ lines; or a
+short marker repeated 6+ times in the last 1500 characters (catches
+loops that vary just enough to keep lines "distinct"). On a hit we fall
+through to the normal path, so the concierge summarises and the user
+gets something readable — the latency win is simply forfeited for that
+turn, which is the right trade.
+
+Verified against the actual incident text (blocked), a normal specialist
+answer and a long legitimate report with many unique lines (both passed
+through untouched).
+
+## 19.0.6.5.4 — 2026-07-31
+
+Three fixes for the internal agent fleet, applied on top of 6.5.3.
+
+**Concierge router pass-through.** A routed chat answer used to cost one
+extra full generation: the concierge received the specialist's finished
+answer through the router tool and then re-generated ~2000 tokens
+paraphrasing it, adding 30-60s to every routed turn (measured on
+`daadit_ai_mistral.usage`: Robin 12k prompt / 1.9k completion on top of
+Mark's own 8k/1.5k for a single question). The top-level loop now
+short-circuits when a single router call returns `ok` + `answer`: the
+specialist's text is posted verbatim with a language-neutral
+attribution footer (`— <specialist> · via <concierge>`) and the final
+LLM round is skipped. Only at router depth 0, and only when the
+assistant message contained exactly ONE tool call, so multi-route turns
+that must combine several specialists keep the normal path. Kill-switch:
+System Parameter `daadit_ai_mistral.router_passthrough` (default on).
+
+**Cross-provider routing.** `_ai_tool_ask_agent` refused any target that
+was not a Mistral model, so a Mistral concierge could not delegate to a
+Claude specialist (Sem, Vince, Maud) — `ask_sem` was dead on arrival.
+The sub-run now executes on whichever provider serves the target, and
+only refuses when no provider add-on claims the model.
+
+**Model sync respects archived aliases.** The nightly `/v1/models` sync
+forced `active=True` on every upsert and searched without
+`active_test=False`, so archiving alias rows — the Mistral API returns
+every alias (`mistral-tiny-latest`, `open-mistral-nemo-2407`, …) as a
+separate model carrying the canonical `display_name`, which made the
+`llm_model` dropdown show the same model up to four times — was undone,
+or duplicated, on the next run. Archived rows are now found and their
+`active` flag left alone. Data change applied on prod 2026-07-30: 26
+alias rows archived; `ir.cron` "Sync Mistral models" was disabled to
+protect that clean-up and can be re-enabled once this ships.
+
+## 19.0.6.5.3 — 2026-07-31
+
+Agents stop piling up the same to-do on one record.
+
+`_ai_tool_schedule_activity` already had an idempotence check, but it
+matched on the **exact** summary text — and the model rewords the same
+signal every run. Helpdesk ticket 683 collected five open escalations
+for the same assignee, each a rephrasing of the previous ("Escalatie:
+Ticket langer dan 2 werkuur onopgelost" → "Ticket >2 werkuur
+onopgelost — prioriteit herzien" → …), and ticket 763 seven.
+
+Two nets now:
+
+- **Topic comparison** — summaries are normalised (lowercase, stripped
+  of punctuation and NL/EN stopwords) and compared as token sets with a
+  Jaccard threshold of 0.5, so rewordings collapse together while a
+  genuinely different to-do on the same record still gets through
+  (verified against the real prod summaries of tickets 683/755/763).
+- **Open-activity cap** — at most N open agent activities per
+  record + assignee (`daadit_ai_mistral.open_activities_per_record`,
+  default 2), catching drift the text comparison cannot see.
+
+Both skips return an explicit instruction not to reword and retry, but
+to report the outstanding to-do instead.
+
+## 19.0.6.5.2 — 2026-07-30
+
+A policy denial inside a routed sub-run is no longer relayed as an
+answer.
+
+`_ai_tool_ask_agent` returned `{'ok': True, 'answer': "🔒 Access
+blocked by your administrator…"}` whenever the sub-agent hit its
+allow-list, because the access-denial short-circuit formats a
+*user-facing* message and never set `sub_failed`. A delegating manager
+reads that as "my colleague delivered" — Eva's monthly report (run
+463) accepted the denial text from Bram (`account.move.line`) and
+Sanne (`res.users`), then filled the resulting gap with invented
+customers, revenue figures and `odoo.example.com` links while the real
+records sat in her own tool results.
+
+The denial now flags `sub_failed` plus the blocked model name, and the
+router returns an error that names the missing source and instructs the
+caller to report it as NOT ESTABLISHED and invent nothing. The generic
+sub-run failure path carries the same instruction.
+
+## 19.0.6.5.1 — 2026-07-30
+
+Custom server-action tools now resolve in **scheduled** runs too.
+
+`daadit_ai_agent_schedule._get_tool_names` advertises tools as
+`ir_actions_server_<slug-of-the-action-name>`, while the chat route
+advertises `action_<id>`. Resolution in `_resolve_tool_action` compared
+the *whole* function name against the action-name slugs, so the
+`ir_actions_server_` prefix made every custom action miss: Eva's
+monthly report died on `Unknown tool: ir_actions_server_ask_bram_eva`
+(run 460) after the model correctly called the tool it had been
+offered. Stock tools were unaffected because they fall back to their
+`_ai_tool_*` method.
+
+Resolution now also tries the prefix-stripped slug, but **only when no
+`_ai_tool_*` method backs the name** — so the stock tools keep their
+existing dispatch path and the change stays scoped to custom actions.
 
 ## 19.0.6.2.0 — 2026-07-23
 
