@@ -125,6 +125,11 @@ class AIAgent(models.Model):
                 "skill_finance_margin_report",
                 "skill_finance_month_report",
                 "skill_finance_vat_prep",
+                "skill_finance_sequence_check",
+                "skill_finance_bank_health",
+                "skill_finance_reconciliation_backlog",
+                "skill_finance_billing_pipeline",
+                "skill_finance_config_health",
             ],
             # Orderverwerking hoort bij sales: Sanne's werk loopt van
             # lead tot levering. Factureren blijft bij Marit, daarom

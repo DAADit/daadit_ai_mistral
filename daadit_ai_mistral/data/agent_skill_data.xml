@@ -69,6 +69,68 @@
         <field name="description">Bereidt controles en aandachtspunten voor; de aangifte wordt nooit door een agent ingediend.</field>
     </record>
 
+    <!-- Finance / de administratie draaiend houden: alleen lezen en melden -->
+    <record id="skill_finance_sequence_check" model="daadit.ai.agent.skill">
+        <field name="name">Factuurnummering controleren</field>
+        <field name="code">finance.sequence_check</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.move,account.journal,ir.sequence</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="description">Vindt gaten en dubbele nummers in de factuurreeksen per dagboek en boekjaar, geboekte facturen met een conceptnummer en dagboeken zonder reeks; meldt met nummer, datum en voorstel, wijzigt niets.</field>
+        <field name="schedule_prompt">Lees per verkoop- en inkoopdagboek de geboekte facturen van het lopende en vorige boekjaar (account.move: name, date, journal_id, move_type, state; alleen state = posted). Zet de nummers per dagboek en jaar op volgorde en meld: gaten (welk nummer ontbreekt, tussen welke twee facturen, datums), dubbele nummers (welke twee records), geboekte facturen met een naam die met '/' begint of 'Draft' bevat, en dagboeken (account.journal, type sale/purchase) zonder reeks. Voorstel per bevinding: het ontbrekende nummer verklaren (geannuleerde factuur?), dubbele nummers door een mens laten hernummeren, de reeks op het dagboek herstellen. Geen afwijking is ook een uitkomst.</field>
+    </record>
+
+    <record id="skill_finance_bank_health" model="daadit.ai.agent.skill">
+        <field name="name">Bankkoppeling bewaken</field>
+        <field name="code">finance.bank_health</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.journal,account.bank.statement,account.bank.statement.line,account.online.link,account.online.account</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="field_blocklist">account.bank.statement.line.account_number,account.bank.statement.line.partner_bank_id,account.online.link.access_token,account.online.link.refresh_token,account.online.link.client_id</field>
+        <field name="description">Signaleert verbroken of vastgelopen bankkoppelingen en bankdagboeken zonder recente regels; noemt dagboek, laatste synchronisatie en wat de klant moet doen.</field>
+        <field name="schedule_prompt">Lees de bankdagboeken (account.journal, type = bank: name, bank_statements_source, account_online_link_id, account_online_account_id). Bestaat account.online.link, lees dan per koppeling name, state, last_refresh, next_refresh en meld elke koppeling die niet 'connected' is of waarvan last_refresh ouder is dan 3 werkdagen. Lees per bankdagboek de nieuwste account.bank.statement.line (date, amount, is_reconciled, journal_id) en meld dagboeken waarvan de laatste regel ouder is dan 5 werkdagen. Mag je account.online.link niet lezen, meld dan 'bankkoppeling niet te controleren bij deze klant' met de reden. Noem nooit rekeningnummers of tokens. Voorstel: koppeling opnieuw verbinden in Boekhouding > Configuratie > Online synchronisatie, of bankafschriften handmatig importeren.</field>
+    </record>
+
+    <record id="skill_finance_reconciliation_backlog" model="daadit.ai.agent.skill">
+        <field name="name">Aflettering bewaken</field>
+        <field name="code">finance.reconciliation_backlog</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.bank.statement.line,account.move.line,account.payment,account.partial.reconcile</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="description">Meldt niet-afgeletterde bankregels en open posten met ouderdom en bedrag, en betalingen die nergens bij horen; lettert zelf niets af.</field>
+        <field name="schedule_prompt">Lees account.bank.statement.line met is_reconciled = false (date, amount, payment_ref, partner_id, journal_id) en groepeer per dagboek: aantal, totaalbedrag, oudste datum; noem de 10 grootste regels met datum en bedrag. Lees account.move.line met parent_state = posted, reconciled = false en account_id.account_type in ['asset_receivable', 'liability_payable'] (date, partner_id, amount_residual, move_id) en meld de open posten ouder dan 60 dagen. Lees account.payment met is_reconciled = false en state = posted en meld betalingen die niet aan een factuur hangen. Voorstel: afletteren in Boekhouding > Bank, tegenpartij aanvullen, of een afletterregel instellen voor terugkerende posten.</field>
+    </record>
+
+    <record id="skill_finance_billing_pipeline" model="daadit.ai.agent.skill">
+        <field name="name">Facturatiestroom bewaken</field>
+        <field name="code">finance.billing_pipeline</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account,sale_management</field>
+        <field name="required_models">sale.order,sale.order.line,account.move,account.analytic.line</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="description">Signaleert geleverd maar niet gefactureerd werk, blijven liggende conceptfacturen en facturen zonder betaaltermijn; geeft door aan Marit, factureert zelf niet.</field>
+        <field name="schedule_prompt">Lees sale.order met state = sale en invoice_status = 'to invoice' (name, partner_id, date_order, amount_total, amount_to_invoice) en meld per order wat er te factureren staat. Lees account.move met move_type in ['out_invoice', 'out_refund'] en state = draft ouder dan 7 dagen (name, partner_id, invoice_date, amount_total, create_date). Lees geboekte klantfacturen van de afgelopen 30 dagen zonder invoice_payment_term_id of zonder invoice_date_due. Bestaat account.analytic.line, meld dan uren van de afgelopen 60 dagen die factureerbaar zijn maar geen factuurregel hebben. Voorstel per bevinding: factuur laten maken door Marit of de klant, conceptfactuur nakijken en boeken, betaaltermijn instellen op de relatie.</field>
+    </record>
+
+    <record id="skill_finance_config_health" model="daadit.ai.agent.skill">
+        <field name="name">Inrichting controleren</field>
+        <field name="code">finance.config_health</field>
+        <field name="category">finance</field>
+        <field name="risk_level">read_only</field>
+        <field name="required_apps">account</field>
+        <field name="required_models">account.journal,account.account,account.tax,account.payment.term,res.company,ir.sequence</field>
+        <field name="capability_codes">search_read,read,fields_get</field>
+        <field name="description">Controleert de boekhoudinrichting die de andere signalen veroorzaakt: dagboeken zonder reeks of standaardrekening, rekeningen zonder type, inactieve standaardbtw, ontbrekende betaaltermijn.</field>
+        <field name="schedule_prompt">Lees account.journal (name, type, code, default_account_id, sequence_override_regex, refund_sequence) en meld verkoop-/inkoopdagboeken zonder default_account_id. Lees account.account (code, name, account_type, reconcile, deprecated) en meld rekeningen zonder account_type en debiteuren-/crediteurenrekeningen waarop reconcile uit staat. Lees res.company (name, account_sale_tax_id, account_purchase_tax_id, fiscalyear_last_day, fiscalyear_last_month) en meld ontbrekende standaardbtw. Lees account.tax (name, active, amount, type_tax_use) en meld actieve tarieven met amount 0 zonder duidelijke naam. Meld per punt welke bevinding uit de andere controles erdoor ontstaat en wat de klant in Configuratie moet zetten. Alleen maandelijks volledig; wijzig niets.</field>
+    </record>
+
     <!-- Sales / orderverwerking: tussen de handtekening en de factuur -->
     <record id="skill_sales_order_intake_check" model="daadit.ai.agent.skill">
         <field name="name">Orderintake controleren</field>
