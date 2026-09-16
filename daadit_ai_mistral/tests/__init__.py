@@ -13,3 +13,4 @@ from . import test_domain_field_names
 from . import test_skill_seed
 from . import test_consolidatie_behoud
 from . import test_derde_lijn_behoud
+from . import test_modelnaam_taalvast

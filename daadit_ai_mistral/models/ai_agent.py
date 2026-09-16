@@ -2168,7 +2168,7 @@ class AIAgent(models.Model):
         try:
             for action in target.sudo().topic_ids.tool_ids:
                 if action.model_id and action.model_id.model == "ai.agent":
-                    slug = _slug_tool_name(action.name)
+                    slug = _slug_tool_name(action.with_context(lang="en_US").name)
                     if (
                         slug
                         and slug not in tool_dispatch.ORCHESTRATOR_TOOL_SLUGS

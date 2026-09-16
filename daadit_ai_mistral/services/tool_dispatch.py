@@ -383,6 +383,23 @@ def _remap_arg_names(action, kwargs):
     return (out, renames) if renames else (kwargs, {})
 
 
+def _dotted_model_name(env, requested):
+    """``account_move`` → ``account.move`` when exactly that model exists.
+
+    Odoo model names are dotted; only the table names use underscores,
+    so an LLM regularly asks for ``res_partner``. Only the
+    one-to-one substitution of ``_`` by ``.`` is accepted, and only when
+    the result is a registered model; anything else stays unknown.
+    """
+    name = (requested or "").strip()
+    if "_" not in name or "." in name:
+        return ""
+    dotted = name.replace("_", ".")
+    if not env["ir.model"].sudo().search_count([("model", "=", dotted)]):
+        return ""
+    return dotted
+
+
 def _resolve_tool_action(agent, fn_name):
     """Resolve a tool name to its backing ``ir.actions.server`` record,
     STRICTLY within the agent's own topic tools.
@@ -2559,6 +2576,16 @@ def run_tool_call(agent, tool_call):
                     [("model", "=", requested_model)]
                 )
             )
+            if not exists:
+                dotted = _dotted_model_name(env, requested_model)
+                if dotted:
+                    _record_in_ir_logging(
+                        env, "INFO", "daadit_ai_mistral.tool_dispatch",
+                        f"MODEL_NAME_NORMALISED fn={fn_name} "
+                        f"{requested_model} -> {dotted}",
+                    )
+                    kwargs["model_name"] = requested_model = dotted
+                    exists = True
         except Exception:  # noqa: BLE001
             exists = True  # never block on a bug in our own check
         if not exists:

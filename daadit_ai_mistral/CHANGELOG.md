@@ -7,6 +7,18 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.10.0.1 — 2026-09-16 — tabelnaam wordt modelnaam; toolnaam uit de bronnaam
+
+Run 1677 (Bo bij DAADit Group) begon met vijf geweigerde aanroepen: ze
+vroeg de velden op van `account_move`, `res_partner`, `account_tax`…
+De dispatcher zet zo'n tabelnaam nu stil om naar de modelnaam
+(`account.move`) als precies dat model bestaat; een verzonnen naam
+blijft geweigerd. Daarnaast heette de tool in die run
+`ir_actions_server_velden_oproepen`: de actienaam werd in de taal van
+de gebruiker geslugd. De slug komt nu uit de Engelse bronnaam, zodat de
+schrijf- en orchestratorlijsten bij een Nederlandse gebruiker weer
+matchen.
+
 ## 19.0.10.0.0 — 2026-08-13 — de derde lijn erbij
 
 Er waren geen twee lijnen maar drie: naast deze repo en de map in
