@@ -6,6 +6,8 @@ alleen bij (een handmatig geblokkeerd model blijft dicht, een extra veld
 op de privacylijst blijft staan), de nieuwe finance-skills hangen aan
 Bo, en een tweede keer toepassen verandert niets meer.
 """
+from unittest.mock import patch
+
 from odoo.tests import common, tagged
 
 from ..services import bo_blueprint
@@ -32,7 +34,8 @@ class TestBoBlueprint(common.TransactionCase):
         return self.env["ir.model"].search([("model", "=", name)], limit=1)
 
     def test_opdracht_modellen_en_skills_komen_uit_de_blauwdruk(self):
-        result = self.Agent._daadit_apply_bo_blueprint()
+        with self._alleen_aanwezige_modellen():
+            result = self.Agent._daadit_apply_bo_blueprint()
         self.assertTrue(result["applied"])
         self.assertTrue(result["prompt"])
         self.assertIn("Bo, boekhouder", self.bo.system_prompt)
@@ -67,15 +70,50 @@ class TestBoBlueprint(common.TransactionCase):
         self.assertIn("res.partner.vat", self.bo.daadit_field_blocklist)
         self.assertIn("res.partner.bank_ids", self.bo.daadit_field_blocklist)
 
+    def _alleen_aanwezige_modellen(self):
+        aanwezig = self.env["ir.model"].search([
+            ("model", "in", list(bo_blueprint.ALLOWED_MODELS)),
+        ]).mapped("model")
+        return patch.object(
+            bo_blueprint, "ALLOWED_MODELS", tuple(sorted(aanwezig)),
+        )
+
     def test_tweede_keer_toepassen_doet_niets(self):
-        self.Agent._daadit_apply_bo_blueprint()
-        again = self.Agent._daadit_apply_bo_blueprint()
+        with self._alleen_aanwezige_modellen():
+            self.Agent._daadit_apply_bo_blueprint()
+            again = self.Agent._daadit_apply_bo_blueprint()
         self.assertFalse(again["applied"])
-        forced = self.Agent._daadit_apply_bo_blueprint(force=True)
+        with self._alleen_aanwezige_modellen():
+            forced = self.Agent._daadit_apply_bo_blueprint(force=True)
         self.assertTrue(forced["applied"])
         self.assertFalse(forced["prompt"])
         self.assertEqual(forced["models"], [])
         self.assertEqual(forced["skills"], [])
+
+    def test_een_ontbrekend_model_wordt_bij_de_volgende_ronde_alsnog_opgepikt(self):
+        """Zonder Verkoop geïnstalleerd blijft sale.order ontbreken; de
+        versie wordt dan niet vastgelegd, zodat een latere ronde het model
+        alsnog toevoegt zodra de app er is."""
+        with patch.object(
+            bo_blueprint, "ALLOWED_MODELS",
+            ("res.partner", "x.nog.niet.geinstalleerd"),
+        ):
+            first = self.Agent._daadit_apply_bo_blueprint()
+        self.assertTrue(first["applied"])
+        self.assertEqual(first["missing_models"], ["x.nog.niet.geinstalleerd"])
+        self.assertEqual(self.Agent._daadit_bo_blueprint_applied_version(), 0)
+
+        with patch.object(
+            bo_blueprint, "ALLOWED_MODELS", ("res.partner", "res.company"),
+        ):
+            second = self.Agent._daadit_apply_bo_blueprint()
+        self.assertTrue(second["applied"])
+        self.assertIn("res.company", second["models"])
+        self.assertEqual(second["missing_models"], [])
+        self.assertEqual(
+            self.Agent._daadit_bo_blueprint_applied_version(),
+            bo_blueprint.BLUEPRINT_VERSION,
+        )
 
     def test_een_klantexemplaar_is_niet_de_catalogus(self):
         if "daadit_hire_id" not in self.Agent._fields:

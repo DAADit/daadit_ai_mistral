@@ -8,6 +8,9 @@ de catalogus (een geblokkeerd model, een veld op de privacylijst) blijft
 staan. Alleen de opdracht wordt vervangen, want juist die moet bij elke
 publicatie dezelfde zijn. Eén keer per versie: de toegepaste versie
 staat in ``ir.config_parameter``; ``force=True`` past hem opnieuw toe.
+De versie wordt pas vastgelegd als geen enkel model ontbrak — anders
+probeert de volgende upgrade het opnieuw en pikt hij een later
+geïnstalleerde app (Verkoop, bank) alsnog op.
 """
 import json
 import logging
@@ -129,9 +132,10 @@ class AIAgentBlueprint(models.Model):
             })
             result["scopes"].append(model_name)
 
-        self.env["ir.config_parameter"].sudo().set_param(
-            bo_blueprint.CONFIG_KEY, str(bo_blueprint.BLUEPRINT_VERSION),
-        )
+        if not result["missing_models"]:
+            self.env["ir.config_parameter"].sudo().set_param(
+                bo_blueprint.CONFIG_KEY, str(bo_blueprint.BLUEPRINT_VERSION),
+            )
         result["applied"] = True
         _logger.info(
             "Bo-blauwdruk v%s toegepast op ai.agent %s: prompt=%s, "
