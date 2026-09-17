@@ -7,6 +7,19 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.10.1.0 — 2026-09-16 — Bo's blauwdruk in code
+
+Wat Bo is — opdracht, leesmodellen, skills, activiteitscopes — stond
+alleen in de database van DAADit, dus een verbetering kwam bij een
+tweede publicatie niet mee. `services/bo_blueprint.py` is nu de bron,
+met een versie; `ai.agent._daadit_apply_bo_blueprint()` zet hem bij
+installatie en upgrade op het catalogusrecord: opdracht vervangen,
+toegang alleen erbij (handmatige blokkades en privacyvelden blijven).
+Vijf nieuwe read-only finance-skills met werkwijze
+(`schedule_prompt`): factuurnummering, bankkoppeling, aflettering,
+facturatiestroom en inrichting. Bank- en synchronisatiemodellen zijn
+leesbaar; rekeningnummers en tokens staan op de veldblokkade.
+
 ## 19.0.10.0.1 — 2026-09-16 — tabelnaam wordt modelnaam; toolnaam uit de bronnaam
 
 Run 1677 (Bo bij DAADit Group) begon met vijf geweigerde aanroepen: ze

@@ -107,6 +107,12 @@ def post_init_hook(env):
         _logger.exception(
             "daadit_ai_mistral.post_init_hook: orchestrator seed failed"
         )
+    try:
+        env["ai.agent"]._daadit_apply_bo_blueprint()
+    except Exception:  # noqa: BLE001
+        _logger.exception(
+            "daadit_ai_mistral.post_init_hook: Bo blueprint failed"
+        )
 
 
 def uninstall_hook(env):
