@@ -69,6 +69,33 @@ class TestAnswerSanitizer(common.TransactionCase):
         self.assertTrue(trimmed)
         self.assertEqual(cleaned, "Overzicht staat hieronder.")
 
+    def test_wide_table_rule_is_not_a_runaway(self):
+        """Taak 1337: Bo's grootboekcontrole kwam als leeg tabelletje
+        aan. De scheidingsregel van een brede kolom telt 40+ streepjes
+        en werd als doorgeslagen staart gezien, waarna alle rijen en
+        alles erna wegvielen."""
+        text = (
+            "**Bevinding:** 18 onafgeletterde bankregels.\n"
+            "| Datum | Bedrag | Omschrijving" + " " * 34 + "| Dagboek |\n"
+            "|-------|--------|" + "-" * 47 + "|---------|\n"
+            "| 2026-09-01 | -1.200,00 | Huur september | bunq |\n"
+            "| 2026-09-03 | -300,00 | Telefoon | bunq |\n\n"
+            "#### 2. Openstaande posten\nGeen afwijkingen."
+        )
+        cleaned, trimmed = _strip_runaway_and_leaks(text)
+        self.assertFalse(trimmed)
+        self.assertEqual(cleaned, text)
+
+    def test_runaway_after_a_table_is_still_cut(self):
+        text = (
+            "| A | B" + " " * 45 + "|\n|---|" + "-" * 50 + "|\n"
+            "| 1 | 2 |\n\nTot zover.\n" + "-" * 300 + ">" * 100
+        )
+        cleaned, trimmed = _strip_runaway_and_leaks(text)
+        self.assertTrue(trimmed)
+        self.assertTrue(cleaned.endswith("Tot zover."))
+        self.assertIn("| 1 | 2 |", cleaned)
+
     def test_non_string_and_empty_input_do_not_crash(self):
         for value in (None, "", 42, {"a": 1}):
             cleaned, trimmed = _strip_runaway_and_leaks(value)

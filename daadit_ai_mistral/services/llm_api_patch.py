@@ -1703,6 +1703,9 @@ _LEAK_DELEGATION_RE = re.compile(r"\]\]\s*-+\s*[A-Z][a-z]+\b")
 # Tekens waar een doorgeslagen generatie in blijft hangen. Een echte
 # tekst gebruikt deze nooit tientallen keren achter elkaar.
 _RUNAWAY_RE = re.compile(r"[>\-*=._~#·]{40,}")
+# Een scheidingsregel van een markdowntabel (``|-----|:---:|``) bestaat
+# ook uit tientallen streepjes, maar is geen doorgeslagen staart.
+_TABLE_RULE_LINE_RE = re.compile(r"^[\s:\-]*\|[\s|:\-]*$")
 _EMPTY_AFTER_STRIP = (
     "Er ging iets mis bij het opstellen van dit antwoord. "
     "Stel je vraag opnieuw."
@@ -1844,9 +1847,9 @@ def _strip_runaway_and_leaks(text):
     delegation_hit = _LEAK_DELEGATION_RE.search(text)
     if delegation_hit and delegation_hit.start() < cut:
         cut = delegation_hit.start()
-    runaway_hit = _RUNAWAY_RE.search(text)
-    if runaway_hit and runaway_hit.start() < cut:
-        cut = runaway_hit.start()
+    runaway_hit = _find_runaway(text)
+    if runaway_hit is not None and runaway_hit < cut:
+        cut = runaway_hit
     text = text[:cut]
 
     # Losse resten van de afgesneden blokken: de sluithaken van de
@@ -1855,6 +1858,24 @@ def _strip_runaway_and_leaks(text):
     text = re.sub(r"(?:\n\s*(?:-+|>+|=+|Einde bericht\.?)\s*)+\Z", "", text)
     text = text.rstrip()
     return text, text != original
+
+
+def _find_runaway(text):
+    """Positie van de eerste doorgeslagen tekenreeks, of ``None``.
+
+    Een brede kolom in een markdowntabel geeft een scheidingsregel met
+    40+ streepjes; die regel wordt overgeslagen, anders verdwijnt de
+    hele tabel met alles erna uit het verslag.
+    """
+    for hit in _RUNAWAY_RE.finditer(text):
+        line_start = text.rfind("\n", 0, hit.start()) + 1
+        line_end = text.find("\n", hit.end())
+        if line_end < 0:
+            line_end = len(text)
+        if _TABLE_RULE_LINE_RE.match(text[line_start:line_end]):
+            continue
+        return hit.start()
+    return None
 
 
 # Werkwoorden waarmee een agent zegt dat er iets ís gebeurd. Bewust
