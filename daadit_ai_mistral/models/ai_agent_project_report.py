@@ -155,7 +155,12 @@ class AIAgent(models.Model):
         tasks = Task.search([("project_id", "=", project.id)])
         closed = tasks.filtered(lambda t: t.state in CLOSED_TASK_STATES)
         allocated = sum(tasks.mapped("allocated_hours") or [0.0])
-        spent = sum(tasks.mapped("effective_hours") or [0.0])
+        # effective_hours komt uit hr_timesheet; zonder die app is er niets
+        # geboekt.
+        spent = (
+            sum(tasks.mapped("effective_hours") or [0.0])
+            if "effective_hours" in Task._fields else 0.0
+        )
         total = len(tasks)
         return {
             "task_count": total,

@@ -32,7 +32,7 @@ in their respective files. Multiple candidate names are wrapped to survive
 across Odoo versions; verify against the installed Enterprise source on your
 Odoo.sh dev branch before relying on this in production.
 """,
-    "version": "19.0.10.1.1",
+    "version": "20.0.10.1.1",
     "category": "Productivity/Discuss",
     "author": "DAADit",
     "website": "https://daadit.group",
@@ -53,8 +53,6 @@ Odoo.sh dev branch before relying on this in production.
         "python": ["requests"],
     },
     "data": [
-        "security/ir.model.access.csv",
-        "security/mistral_usage_security.xml",
         "data/ai_tools.xml",
         "data/cost_cap_params.xml",
         "data/fallback_params.xml",
@@ -80,7 +78,8 @@ Odoo.sh dev branch before relying on this in production.
         # ai.agent._ai_tool_schedule_activity. Their slugified action
         # names (ir_actions_server_assign_user / ir_actions_server_
         # schedule_activity) match the dispatch mapping in
-        # services/tool_dispatch.py.
+        # services/tool_dispatch.py.,
+        'security/ir.access.csv',
     ],
     "pre_init_hook": "pre_init_hook",
     "post_init_hook": "post_init_hook",

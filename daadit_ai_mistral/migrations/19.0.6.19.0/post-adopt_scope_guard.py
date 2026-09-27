@@ -48,7 +48,7 @@ def migrate(cr, version):
         _logger.info("Scope-guard: geen serveractie om over te zetten.")
         return
 
-    env["ir.config_parameter"].sudo().set_param(
+    env["ir.config_parameter"].sudo().set_str(
         BACKUP_PARAM,
         "\n\n# ---- volgende actie ----\n\n".join(
             "# actie %s (%s)\n%s" % (a.id, a.name, a.code) for a in actions),

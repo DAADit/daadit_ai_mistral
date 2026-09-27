@@ -14,7 +14,7 @@ class TestActivityReliability(common.TransactionCase):
         self.partner = self.env["res.partner"].create({
             "name": "Reliability partner (test)",
         })
-        self.assignee = self.env.user
+        self.assignee = self.env.ref("base.user_admin")
 
     def _schedule(self, summary, note=""):
         return self.agent._ai_tool_schedule_activity(
@@ -71,7 +71,7 @@ class TestActivityReliability(common.TransactionCase):
 
     def test_emoji_auto_apply_bypasses_open_cap(self):
         # Fill the per-record cap with ordinary todos.
-        self.env["ir.config_parameter"].sudo().set_param(
+        self.env["ir.config_parameter"].sudo().set_str(
             "daadit_ai_mistral.open_activities_per_record", "1",
         )
         blocked = self._schedule("Eerste herinnering")

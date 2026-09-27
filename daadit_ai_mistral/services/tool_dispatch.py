@@ -1229,7 +1229,7 @@ def _result_cap_chars(env):
     if env is None:
         return _MAX_TOOL_RESULT_CHARS
     try:
-        raw = env["ir.config_parameter"].sudo().get_param(
+        raw = env["ir.config_parameter"].sudo().get_str(
             _RESULT_CAP_ICP, _MAX_TOOL_RESULT_CHARS,
         )
         return max(0, int(str(raw).strip()))
@@ -2344,7 +2344,7 @@ def _result_logging_enabled(env):
     """
     global _LOG_TOOL_FLAG_WARNED
     try:
-        flag = env["ir.config_parameter"].sudo().get_param(
+        flag = env["ir.config_parameter"].sudo().get_str(
             _LOG_TOOL_FLAG_ICP, default="False"
         )
     except Exception:  # noqa: BLE001

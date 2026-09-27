@@ -36,7 +36,7 @@ class AIAgentBlueprint(models.Model):
 
     @api.model
     def _daadit_bo_blueprint_applied_version(self):
-        raw = self.env["ir.config_parameter"].sudo().get_param(
+        raw = self.env["ir.config_parameter"].sudo().get_str(
             bo_blueprint.CONFIG_KEY, "0",
         )
         try:
@@ -133,7 +133,7 @@ class AIAgentBlueprint(models.Model):
             result["scopes"].append(model_name)
 
         if not result["missing_models"]:
-            self.env["ir.config_parameter"].sudo().set_param(
+            self.env["ir.config_parameter"].sudo().set_str(
                 bo_blueprint.CONFIG_KEY, str(bo_blueprint.BLUEPRINT_VERSION),
             )
         result["applied"] = True
