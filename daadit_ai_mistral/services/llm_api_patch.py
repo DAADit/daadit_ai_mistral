@@ -97,7 +97,7 @@ def _fallback_model(env):
     if env is None:
         return _FALLBACK_MODEL_DEFAULT
     try:
-        name = env["ir.config_parameter"].sudo().get_param(
+        name = env["ir.config_parameter"].sudo().get_str(
             _FALLBACK_MODEL_ICP,
         )
     except Exception:  # noqa: BLE001
@@ -112,7 +112,7 @@ def _fallback_enabled(env):
     if env is None:
         return False
     try:
-        mode = env["ir.config_parameter"].sudo().get_param(
+        mode = env["ir.config_parameter"].sudo().get_str(
             _FALLBACK_ICP, "claude",
         )
     except Exception:  # noqa: BLE001
@@ -287,9 +287,9 @@ def patch_llm_api_service() -> bool:
             return None
         try:
             icp = env["ir.config_parameter"].sudo()
-            mode = (icp.get_param(
+            mode = (icp.get_str(
                 "daadit_ai_mistral.force_provider") or "").strip().lower()
-            forced = (icp.get_param(
+            forced = (icp.get_str(
                 "daadit_ai_mistral.force_provider_name")
                 or "mistral").strip().lower()
         except Exception:  # noqa: BLE001
@@ -2160,7 +2160,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
         try:
             icp = api_self.env["ir.config_parameter"].sudo()
             mistral_default = (
-                icp.get_param("daadit_ai_mistral.default_chat_model")
+                icp.get_str("daadit_ai_mistral.default_chat_model")
                 or "mistral-medium-latest"
             ).strip()
         except Exception:  # noqa: BLE001
@@ -2405,9 +2405,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # whole parent turn.
     try:
         _icp = api_self.env["ir.config_parameter"].sudo()
-        MAX_ITER = int(_icp.get_param("daadit_ai_mistral.max_tool_iterations") or 20)
+        MAX_ITER = int(_icp.get_str("daadit_ai_mistral.max_tool_iterations") or 20)
         _max_iter_subrun = int(
-            _icp.get_param("daadit_ai_mistral.max_tool_iterations_subrun") or 4
+            _icp.get_str("daadit_ai_mistral.max_tool_iterations_subrun") or 4
         )
     except Exception:  # noqa: BLE001
         MAX_ITER = 20
@@ -2489,7 +2489,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     open_chat_passthrough = None
     try:
         _passthrough_enabled = str(
-            _icp.get_param("daadit_ai_mistral.router_passthrough", "1")
+            _icp.get_str("daadit_ai_mistral.router_passthrough", "1")
         ).strip().lower() not in ("0", "false")
     except Exception:  # noqa: BLE001
         _passthrough_enabled = True

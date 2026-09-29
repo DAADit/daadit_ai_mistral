@@ -1,0 +1,11 @@
+id,name,model_id,group_id/id,operation,domain
+rule_daadit_ai_mistral_usage_user_own,Mistral usage: user sees own rows,daadit_ai_mistral.usage,base.group_user,r,"[('user_id', '=', user.id)]"
+rule_daadit_ai_mistral_usage_system_company,Mistral usage: settings users see own company,daadit_ai_mistral.usage,base.group_system,crud,"['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]"
+access_daadit_ai_mistral_model_user,daadit.ai.mistral.model user read,daadit.ai.mistral.model,base.group_user,r,
+access_daadit_ai_mistral_model_system,daadit.ai.mistral.model system,daadit.ai.mistral.model,base.group_system,crud,
+access_daadit_ai_agent_read_scope_user,daadit.ai.agent.read.scope user read,daadit.ai.agent.read.scope,base.group_user,r,
+access_daadit_ai_agent_read_scope_system,daadit.ai.agent.read.scope system,daadit.ai.agent.read.scope,base.group_system,crud,
+access_daadit_ai_agent_activity_scope_user,daadit.ai.agent.activity.scope user read,daadit.ai.agent.activity.scope,base.group_user,r,
+access_daadit_ai_agent_activity_scope_system,daadit.ai.agent.activity.scope system,daadit.ai.agent.activity.scope,base.group_system,crud,
+access_daadit_ai_agent_skill_user,daadit.ai.agent.skill user read,daadit.ai.agent.skill,base.group_user,r,
+access_daadit_ai_agent_skill_system,daadit.ai.agent.skill system,daadit.ai.agent.skill,base.group_system,crud,

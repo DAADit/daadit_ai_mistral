@@ -558,7 +558,7 @@ class AIAgent(models.Model):
 
     def _daadit_repair_channel_user(self):
         """Wie krijgt een reparatievoorstel als niemand is meegegeven?"""
-        param = self.env["ir.config_parameter"].sudo().get_param(
+        param = self.env["ir.config_parameter"].sudo().get_str(
             "daadit_ai_mistral.repair_channel_user_id")
         if param and param.isdigit() and int(param):
             return int(param)

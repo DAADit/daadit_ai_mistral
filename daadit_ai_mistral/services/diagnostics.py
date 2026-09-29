@@ -105,7 +105,7 @@ def maybe_install_trace_tap_from_env(env):
     ``ai.agent._register_hook`` so we have an env to read config from.
     """
     try:
-        flag = env["ir.config_parameter"].sudo().get_param(
+        flag = env["ir.config_parameter"].sudo().get_str(
             "daadit_ai_mistral.diag_trace_user_errors", default="False"
         )
     except Exception:  # noqa: BLE001

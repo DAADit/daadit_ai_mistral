@@ -19,7 +19,7 @@ class TestBoBlueprint(common.TransactionCase):
     def setUp(self):
         super().setUp()
         self.Agent = self.env["ai.agent"]
-        self.env["ir.config_parameter"].sudo().set_param(
+        self.env["ir.config_parameter"].sudo().set_str(
             bo_blueprint.CONFIG_KEY, "0",
         )
         self.bo = self.Agent.search([("name", "=", "Bo")], limit=1)

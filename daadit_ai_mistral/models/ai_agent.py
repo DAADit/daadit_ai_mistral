@@ -428,7 +428,7 @@ class AIAgent(models.Model):
         # Logging / audit
         "ir.logging",
         # Model + permission metadata
-        "ir.model", "ir.model.access", "ir.model.fields",
+        "ir.model", "ir.model.access", "ir.access", "ir.model.fields",
         "ir.model.data", "ir.model.constraint",
         "ir.rule", "ir.actions.server",
         # Mistral-internal: never expose own usage rows via AI
@@ -1258,6 +1258,12 @@ class AIAgent(models.Model):
             return True
         tokens_a = cls._daadit_activity_tokens(summary_a)
         tokens_b = cls._daadit_activity_tokens(summary_b)
+        if cls._daadit_is_rolling_signal(summary_a) and \
+                cls._daadit_is_rolling_signal(summary_b):
+            # A rolling list is the same to-do every day; its date and
+            # counts are exactly what changes, so they must not decide.
+            tokens_a = {t for t in tokens_a if not t.isdigit()}
+            tokens_b = {t for t in tokens_b if not t.isdigit()}
         if not tokens_a or not tokens_b:
             return False
         union = tokens_a | tokens_b
@@ -1316,7 +1322,7 @@ class AIAgent(models.Model):
         self.ensure_one()
         icp = self.env["ir.config_parameter"].sudo()
         try:
-            limit = int(icp.get_param(self._THROTTLE_ICP_LIMIT, "5") or 5)
+            limit = int(icp.get_str(self._THROTTLE_ICP_LIMIT, "5") or 5)
         except (TypeError, ValueError):
             limit = 5
         if limit <= 0:
@@ -1335,7 +1341,7 @@ class AIAgent(models.Model):
             return None
 
         fallback = self.env["res.users"].browse()
-        raw_fb = icp.get_param(self._THROTTLE_ICP_FALLBACK, "")
+        raw_fb = icp.get_str(self._THROTTLE_ICP_FALLBACK, "")
         try:
             if raw_fb:
                 fallback = self.env["res.users"].sudo().browse(
@@ -1721,7 +1727,7 @@ class AIAgent(models.Model):
         # record (ticket 683 collected five). Past the cap we stop
         # adding — the outstanding to-do is the reminder.
         try:
-            open_cap = int(self.env["ir.config_parameter"].sudo().get_param(
+            open_cap = int(self.env["ir.config_parameter"].sudo().get_str(
                 self._OPEN_PER_RECORD_ICP, "2",
             ) or 2)
         except (TypeError, ValueError):

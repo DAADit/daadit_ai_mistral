@@ -87,9 +87,9 @@
                         domain="[('kind', '=', 'chat'), ('depth', '=', 0)]"/>
                 <separator/>
                 <filter name="today" string="Today"
-                        domain="[('create_date', '&gt;=', context_today().strftime('%Y-%m-%d 00:00:00'))]"/>
+                        domain="[('create_date', '&gt;=', 'now')]"/>
                 <filter name="last_7" string="Last 7 days"
-                        domain="[('create_date', '&gt;=', (context_today() - relativedelta(days=7)).strftime('%Y-%m-%d 00:00:00'))]"/>
+                        domain="[('create_date', '&gt;=', '-7d')]"/>
                 <!--
                     Odoo 19 view-validator note: <group> inside <search>
                     must be bare — no `string=` or `expand=` attributes,

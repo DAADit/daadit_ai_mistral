@@ -91,7 +91,7 @@ class TestArgNameRepair(common.TransactionCase):
 class TestResultCap(common.TransactionCase):
 
     def _set_cap(self, value):
-        self.env["ir.config_parameter"].sudo().set_param(
+        self.env["ir.config_parameter"].sudo().set_str(
             td._RESULT_CAP_ICP, value,
         )
 
@@ -140,8 +140,15 @@ class TestResultCap(common.TransactionCase):
             {"report": "y" * 40000}, "read", env=self.env,
         )
         self.assertTrue(out["truncated"])
-        self.assertTrue(out["partial_result"])
-        self.assertLessEqual(len(out["partial_result"]), 6000)
+        # Per-veld knippen houdt de structuur heel: het zware veld komt
+        # ingekort terug, met een melding welk veld geknipt is.
+        self.assertTrue(out["result"]["report"].startswith("y"))
+        self.assertLess(len(out["result"]["report"]), 40000)
+        self.assertEqual(out["truncated_fields"][0]["field"], "report")
+        self.assertLessEqual(
+            len(json.dumps(out["result"], default=str)), 6000,
+        )
+        self.assertNotIn("partial_result", out)
 
     def test_result_within_cap_is_untouched(self):
         self._set_cap("6000")
