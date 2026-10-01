@@ -6,6 +6,7 @@ from . import test_activity_scope
 from . import test_activity_scope_guard
 from . import test_activity_reliability
 from . import test_orchestrator
+from . import test_delegation_depth
 from . import test_vault_scope_and_summary
 from . import test_write_scope_assign_user
 from . import test_project_report

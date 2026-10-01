@@ -57,13 +57,27 @@ turn_hooks = None
 
 # Router state for the ``AI: Ask Agent`` tool (v19.0.4.2.0). ``depth``
 # counts how many routed sub-runs are active on this thread; the tool
-# refuses to route when depth >= 1 (Concierge → specialist only, no
-# chains, no A→B→A loops) and the Mistral loop shortens its iteration
-# budget for sub-runs. ``calls`` is the per-turn width budget (reset at
-# each top-level turn). ``exhausted`` is set by the Mistral loop when a
-# sub-run hits MAX_ITER so the router can report failure instead of
-# passing off truncated narration as a real answer (v19.0.4.2.1).
+# refuses to route when depth >= MAX_ROUTER_DEPTH and the provider loops
+# shorten their iteration budget for sub-runs. ``chain`` holds the ids of
+# the agents on the current delegation path, so A→B→A is refused.
+# ``calls`` is the per-turn width budget (reset at each top-level turn).
+# ``exhausted`` is set by the provider loop when a sub-run hits MAX_ITER
+# so the router can report failure instead of passing off truncated
+# narration as a real answer (v19.0.4.2.1).
+#
+# This is the one router state for every provider: Claude reads its
+# depth, and a Loes sub-run gets it mirrored by the router.
 router_state = threading.local()
+
+# Depth 0 is the top-level turn, 1 a delegated sub-run, 2 a sub-run of
+# that sub-run. Delegating from depth 2 (to depth 3) is refused.
+MAX_ROUTER_DEPTH = 2
+
+# Optional observer for delegations, set by ``daadit_ai_agent_schedule``
+# so every sub-run is filed under the run that started it. Contract:
+# ``token = begin(caller, target, question, depth)`` before the sub-run,
+# ``end(token, result)`` after it, always, including on failure.
+delegation_hooks = None
 
 # Read-only stock tools. Everything else is a custom action, and those
 # exist precisely to write (create a campaign, draft a post, update a
@@ -142,6 +156,53 @@ ORCHESTRATOR_TOOL_SLUGS = frozenset({
     ROUTER_TOOL_SLUG,
     OPEN_CHAT_TOOL_SLUG,
 })
+
+
+def begin_top_level_turn():
+    """Reset the per-turn router state at the start of a depth-0 turn.
+
+    Called by every provider loop that can start a turn, so a width
+    budget or failure flag from a previous turn on this worker thread
+    never leaks into the next one.
+    """
+    router_state.calls = 0
+    router_state.exhausted = False
+    router_state.sub_failed = False
+    router_state.calls_made = 0
+    router_state.writes_made = 0
+    router_state.denied_models = set()
+    router_state.top_level_exhausted = False
+    router_state.exhaustion_reason = None
+    router_state.chain = ()
+
+
+def flag_bail(reason):
+    """Record that the running loop gave up, at the right level.
+
+    Inside a sub-run only ``exhausted`` is set: the router turns it into
+    a failed delegation and the caller carries on. Only a depth-0 bail
+    sets ``top_level_exhausted``, the flag the scheduler reads to mark
+    the whole run as failed.
+    """
+    if getattr(router_state, "depth", 0) > 0:
+        router_state.exhausted = True
+        return
+    router_state.top_level_exhausted = True
+    router_state.exhaustion_reason = reason
+
+
+def subrun_tool_allowed(slug, depth):
+    """Whether a routed sub-run running at ``depth`` may get ``slug``.
+
+    Sub-runs never write and never hand the user off to another chat.
+    They may delegate once more, as long as that stays within
+    MAX_ROUTER_DEPTH.
+    """
+    if slug in WRITE_SIDE_TOOL_SLUGS or slug == OPEN_CHAT_TOOL_SLUG:
+        return False
+    if slug == ROUTER_TOOL_SLUG:
+        return depth < MAX_ROUTER_DEPTH
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -829,9 +890,10 @@ TOOL_SCHEMAS = {
                 "agent_name": {
                     "type": "string",
                     "description": (
-                        "Exact display name of the target agent, e.g. "
-                        "'Bram', 'Pim', 'Sem', 'Nova', 'Sales Agent', "
-                        "'Project Agent'."
+                        "Name or role of the target agent, e.g. "
+                        "'Bram', 'Pim' or a role such as "
+                        "'Rapportage'. A role keeps working when the "
+                        "colleague behind it is renamed."
                     ),
                 },
                 "question": {

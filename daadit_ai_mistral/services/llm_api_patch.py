@@ -2282,9 +2282,8 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                     slug = _slug_tool_name(action.with_context(lang="en_US").name)
                     if not slug or slug in names:
                         continue
-                    if _in_subrun and (
-                        slug in tool_dispatch.ORCHESTRATOR_TOOL_SLUGS
-                        or slug in tool_dispatch.WRITE_SIDE_TOOL_SLUGS
+                    if _in_subrun and not tool_dispatch.subrun_tool_allowed(
+                        slug, tool_dispatch.router_state.depth,
                     ):
                         continue
                     names.append(slug)
@@ -2441,29 +2440,10 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     if _router_depth > 0:
         MAX_ITER = _max_iter_subrun
     else:
-        # Top-level turn: reset per-turn router width budget and
-        # exhaustion flags so state from a previous turn on this
-        # worker thread never leaks in (v19.0.4.2.1 / v19.0.4.4.0).
-        tool_dispatch.router_state.calls = 0
-        tool_dispatch.router_state.exhausted = False
-        tool_dispatch.router_state.sub_failed = False
-        # Tool tallies for this turn (v19.0.6.24.0). Zeroed here so a
-        # write from a previous turn on this worker thread can never
-        # vouch for a claim made in this one.
-        tool_dispatch.router_state.calls_made = 0
-        tool_dispatch.router_state.writes_made = 0
-        # Models this turn was refused on policy grounds. Read by the
-        # router to refuse a hop to a colleague who may not read them
-        # either; reset here so a refusal from a previous turn on this
-        # worker thread never blocks a legitimate delegation.
-        tool_dispatch.router_state.denied_models = set()
-        # v19.0.4.4.0: top_level_exhausted is read by
-        # ``daadit_ai_agent_schedule`` after ``request_llm`` returns to
-        # decide whether a scheduled run should be marked 'done' or
-        # 'error'. Namespaced separately from ``exhausted`` (which is
-        # sub-run specific) to keep concerns clean.
-        tool_dispatch.router_state.top_level_exhausted = False
-        tool_dispatch.router_state.exhaustion_reason = None
+        # Top-level turn: reset per-turn router width budget, tool
+        # tallies, denied models and exhaustion flags so state from a
+        # previous turn on this worker thread never leaks in.
+        tool_dispatch.begin_top_level_turn()
         # v19.0.4.8.0: one uuid per top-level turn. Every usage row
         # this turn creates (including router sub-calls, which inherit
         # the threadlocal) carries it, so the performance report can
@@ -2974,42 +2954,16 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             "(iteration=%d MAX_ITER=%d unknown_tool_count=%d)",
             bail_reason, iteration, MAX_ITER, unknown_tool_count,
         )
-        # v19.0.4.2.1: flag budget exhaustion so the router tool
-        # (_ai_tool_ask_agent) can report failure instead of relaying
-        # truncated narration or the panel fallback sentinel as if it
-        # were a real specialist answer. Only meaningful inside a
-        # routed sub-run (depth > 0).
+        # A sub-run bail tells the router (which reports a failed
+        # delegation instead of relaying truncated narration); only a
+        # depth-0 bail marks the turn itself as exhausted for the
+        # scheduler. Mixing the two once marked whole scheduled runs
+        # 'error' after a sub-run hit its tighter budget, and three in a
+        # row tripped the circuit breaker (Eva, schedule 37, 29-07-2026).
         try:
-            _bail_depth = getattr(tool_dispatch.router_state, "depth", 0)
-        except Exception:  # noqa: BLE001
-            _bail_depth = 0
-        try:
-            if _bail_depth > 0:
-                tool_dispatch.router_state.exhausted = True
+            tool_dispatch.flag_bail(bail_reason)
         except Exception:  # noqa: BLE001
             pass
-        # v19.0.4.4.0: top-level flag read by the schedule module.
-        # Namespaced separately from ``exhausted`` (sub-run only) so
-        # each caller can inspect its own state without interference.
-        #
-        # v19.0.6.5.6: only a DEPTH-0 bail may set it. Before this the
-        # assignment was unconditional, so a sub-run hitting its
-        # (deliberately tighter) budget wrote the TOP-LEVEL flag on the
-        # shared threadlocal. ``daadit_ai_agent_schedule`` reads that
-        # flag after ``request_llm`` returns and marked the whole
-        # scheduled run 'error' — even when the parent finished and
-        # produced a complete report. Three in a row tripped the
-        # circuit breaker, which is what silently disabled Eva's
-        # monthly report (schedule 37) on 29-07-2026 and would hit any
-        # delegating agent. The parent still learns a sub-run failed
-        # via ``sub_failed``, which ``_ai_tool_ask_agent`` saves and
-        # restores around every sub-run.
-        if _bail_depth == 0:
-            try:
-                tool_dispatch.router_state.top_level_exhausted = True
-                tool_dispatch.router_state.exhaustion_reason = bail_reason
-            except Exception:  # noqa: BLE001
-                pass
         if bail_reason == "deadline":
             en_message = (
                 "This run reached its hard time budget before the "
