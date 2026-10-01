@@ -41,6 +41,26 @@ SUPPORTED_MODELS = (
 EMBEDDING_MODEL = "mistral-embed"
 
 
+def pad_vector(vector, width):
+    """Zero-pad ``vector`` to ``width`` floats.
+
+    The ``ai.embedding`` column has a fixed width (1536 on Enterprise)
+    and ``mistral-embed`` returns 1024 floats. Trailing zeros leave
+    dot products, norms and cosine distances unchanged, so padded
+    vectors stay comparable as long as stored chunks and queries are
+    padded the same way.
+    """
+    vector = list(vector)
+    if not width or len(vector) == width:
+        return vector
+    if len(vector) > width:
+        raise ValueError(
+            "embedding has %d dimensions, the column holds %d"
+            % (len(vector), width)
+        )
+    return vector + [0.0] * (width - len(vector))
+
+
 # Keys that ``extra`` is allowed to set on a chat-completion payload.
 # Anything outside this set is silently dropped — preventing a
 # misbehaving caller from overriding ``messages`` / ``tools`` /
