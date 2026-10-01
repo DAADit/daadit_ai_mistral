@@ -51,6 +51,13 @@ LLM-provider voor Odoo.
   ``daadit_ai_bridge`` in dezelfde build als deze upgrade; dan is er
   geen functieverlies.
 
+## 19.0.10.3.2 — 2026-10-01 — logregels op een eigen cursor (taak 1488)
+
+- Diagnose- en toolregels in `ir.logging` worden op een eigen cursor
+  geschreven in plaats van met `env.cr.commit()` op de cursor van de
+  aanroeper. Een geplande run houdt zo zijn savepoint en kan bij een fout
+  lokaal terugdraaien; de logregel blijft toch staan.
+
 ## 19.0.10.1.0 — 2026-09-16 — Bo's blauwdruk in code
 
 Wat Bo is — opdracht, leesmodellen, skills, activiteitscopes — stond

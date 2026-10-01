@@ -28,6 +28,7 @@ This module:
   ten stock AI tools, replacing the empty ``{}`` schema used in
   v3.6.6–v3.6.8. With these, Mistral knows what args each tool takes.
 """
+from odoo import SUPERUSER_ID as _SUPERUSER_ID, api as _api
 from odoo.fields import Domain as _Domain
 import ast
 import difflib
@@ -2477,6 +2478,17 @@ def _result_logging_enabled(env):
     return on
 
 
+def write_log_row(env, vals):
+    """Schrijf een ``ir.logging``-rij op een eigen cursor.
+
+    De rij blijft staan als de aanroeper terugdraait, en de transactie
+    van de aanroeper (met de savepoint van een geplande run) blijft
+    ongemoeid.
+    """
+    with env.registry.cursor() as cr:
+        _api.Environment(cr, _SUPERUSER_ID, {})["ir.logging"].create(vals)
+
+
 def _record_in_ir_logging(env, level, name, message):
     """Write a row to ``ir.logging`` so the call is visible from
     XML-RPC. Best-effort — swallow any error so a logging hiccup never
@@ -2491,7 +2503,7 @@ def _record_in_ir_logging(env, level, name, message):
     if level == "INFO" and not _result_logging_enabled(env):
         return
     try:
-        env["ir.logging"].sudo().create({
+        write_log_row(env, {
             "name": name,
             "type": "server",
             "level": level,
@@ -2500,9 +2512,6 @@ def _record_in_ir_logging(env, level, name, message):
             "func": "run_tool_call",
             "line": "0",
         })
-        # ir.logging writes are inside a transaction — savepoint so
-        # they survive a later rollback if the chat handler aborts.
-        env.cr.commit()
     except Exception:  # noqa: BLE001
         pass
 
