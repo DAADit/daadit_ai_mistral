@@ -7,6 +7,50 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.11.0.0 — 2026-10-01 — De split: provider, persona's en bridge uit elkaar
+
+Structuurrelease zonder functionele wijziging voor een database waarop
+``daadit_ai_personas`` en ``daadit_ai_bridge`` mee worden
+geïnstalleerd. De module wordt weer wat hij moet zijn: Mistral als
+LLM-provider voor Odoo.
+
+### Verhuisd naar ``daadit_ai_personas`` (nieuw module)
+
+* Skillscatalogus: ``daadit.ai.agent.skill``, ``daadit_skill_ids``,
+  de 21 productskills, views/menu en de additive seeding op de
+  bekende agentnamen.
+* Bo-blauwdruk (``services/bo_blueprint`` + de toepasser) en de
+  orchestrator-seed (Robin / Ask AI).
+* De activiteitscope-seedtabel (``SEED_ACTIVITY_SCOPES``) en
+  ``_daadit_seed_activity_scopes``. Het scopemechanisme zelf blijft
+  hier.
+* De pre-migratie ``19.0.11.0.0/pre-rehome_personas_data`` hangt de
+  bestaande ``ir.model.data``-records om naar het nieuwe module, zodat
+  de upgrade niets opruimt. De twaalf historische seed-migraties zijn
+  afgeschermd met een ``hasattr``-wacht: een upgradepad van vóór de
+  split werkt met én zonder personas-module.
+
+### Verhuisd naar ``daadit_ai_bridge`` (nieuw module)
+
+* De Claude-fallback (ICP-schakelaars, model-vervanging,
+  threadlocal-overdracht) en de cross-provider sub-run-dispatch naar
+  Claude en Loes.
+* Deze module importeert **geen enkele** zusterprovider meer. Twee
+  nieuwe haakpunten in ``tool_dispatch`` — ``fallback_executor`` en
+  ``foreign_providers``/``register_foreign_provider`` (zelfde patroon
+  als ``delegation_hooks``) — worden door de bridge gevuld. Zonder
+  bridge: ``MistralUnavailable`` propageert gewoon, en de router
+  weigert een hop naar een niet-Mistral-agent met de bestaande
+  nette foutmelding.
+
+### Gedragsnota
+
+* Een omgeving die alléén deze provider wil draaien kan dat nu echt:
+  geen persona-seeds, geen fallback, geen soft-imports.
+* Voor DAADit-omgevingen: installeer ``daadit_ai_personas`` en
+  ``daadit_ai_bridge`` in dezelfde build als deze upgrade; dan is er
+  geen functieverlies.
+
 ## 19.0.10.3.2 — 2026-10-01 — logregels op een eigen cursor (taak 1488)
 
 - Diagnose- en toolregels in `ir.logging` worden op een eigen cursor
