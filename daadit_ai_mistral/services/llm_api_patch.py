@@ -153,9 +153,34 @@ def _request_with_fallback(api_self, args, kwargs):
             a for a in args
             if not (isinstance(a, str) and is_mistral_model(a))
         )
-        return claude_patch._request_llm_claude(
-            api_self, *claude_args, **claude_kwargs
+        _mark_fallback("claude", model, exc)
+        claude_td = claude_patch.tool_dispatch
+        prev_agent = getattr(claude_td.current_agent, "record", None)
+        prev_deadline = getattr(
+            claude_td.router_state, "run_deadline_monotonic", None,
         )
+        claude_td.current_agent.record = getattr(
+            tool_dispatch.current_agent, "record", None,
+        )
+        claude_td.router_state.run_deadline_monotonic = getattr(
+            tool_dispatch.router_state, "run_deadline_monotonic", None,
+        )
+        try:
+            return claude_patch._request_llm_claude(
+                api_self, *claude_args, **claude_kwargs
+            )
+        finally:
+            claude_td.current_agent.record = prev_agent
+            claude_td.router_state.run_deadline_monotonic = prev_deadline
+
+
+def _mark_fallback(provider, model, exc):
+    """Tell the caller (a scheduled run) that this turn switched
+    provider, so the switch is on the run and never silent."""
+    state = tool_dispatch.router_state
+    state.fallback_provider = provider
+    state.fallback_model = model
+    state.fallback_reason = str(exc)[:250]
 
 
 def _diag_nonmistral_delegation(api_self, where, kwargs):
