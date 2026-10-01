@@ -225,7 +225,7 @@ def _diag_nonmistral_delegation(api_self, where, kwargs):
             depth += 1
         env = getattr(api_self, "env", None)
         if env is not None:
-            env["ir.logging"].sudo().create({
+            tool_dispatch.write_log_row(env, {
                 "name": "daadit_ai_mistral.nonmistral",
                 "type": "server",
                 "level": "WARNING",
@@ -241,7 +241,6 @@ def _diag_nonmistral_delegation(api_self, where, kwargs):
                 "func": "_diag_nonmistral_delegation",
                 "line": "0",
             })
-            env.cr.commit()
     except Exception:  # noqa: BLE001
         pass
 
@@ -1526,7 +1525,7 @@ def _record_resolution_diagnostics(api_self, request_kwargs, resolved_via):
             )
             frame = frame.f_back
             depth += 1
-        api_self.env["ir.logging"].sudo().create({
+        tool_dispatch.write_log_row(api_self.env, {
             "name": "daadit_ai_mistral.agent_resolution",
             "type": "server",
             "level": "WARNING",
@@ -1538,7 +1537,6 @@ def _record_resolution_diagnostics(api_self, request_kwargs, resolved_via):
             "func": "_resolve_agent",
             "line": "0",
         })
-        api_self.env.cr.commit()
     except Exception:  # noqa: BLE001
         pass
 
@@ -2418,7 +2416,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             t.get("function", {}).get("name", "?")
             for t in (normalized_tools or [])
         ][:12]
-        api_self.env["ir.logging"].sudo().create({
+        tool_dispatch.write_log_row(api_self.env, {
             "name": "daadit_ai_mistral.request",
             "type": "server",
             "level": "INFO",
@@ -2432,7 +2430,6 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             "func": "_request_llm_mistral",
             "line": "0",
         })
-        api_self.env.cr.commit()
     except Exception:  # noqa: BLE001
         pass
 
