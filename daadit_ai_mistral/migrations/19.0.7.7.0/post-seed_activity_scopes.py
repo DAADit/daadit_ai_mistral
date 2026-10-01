@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Zet de vastgelegde activiteit-scoperegels neer bij de upgrade.
+"""Activiteitscope-seed (historisch).
 
-De regels zelf staan in ``SEED_ACTIVITY_SCOPES``; deze migratie maakt
-ze aan voor de agents die nog geen enkele regel hebben. Dat is
-niet-verruimend: bestaat er al een regel, dan blijft die staan.
-
-De live serveractie blijft in deze versie ongewijzigd — hij wordt in een
-aparte ronde naar :meth:`_daadit_activity_scope` gebracht, zodat de
-grens per agent eerst te vergelijken en te controleren is voordat hij
-de beslissing overneemt.
+v19.0.11.0.0: de persona-seeds verhuisden naar ``daadit_ai_personas``.
+Deze migratie draait alleen nog als dat module de methode(n) al op
+``ai.agent`` heeft gezet (personas geinstalleerd); anders is er niets
+te seeden en slaat hij stil over. Upgradepaden van voor de split
+blijven zo werken zonder import van verdwenen code.
 """
 from odoo import SUPERUSER_ID, api
 
@@ -17,4 +14,7 @@ def migrate(cr, version):
     if not version:
         return
     env = api.Environment(cr, SUPERUSER_ID, {})
-    env["ai.agent"]._daadit_seed_activity_scopes()
+    agent = env["ai.agent"]
+    for method in ['_daadit_seed_activity_scopes']:
+        if hasattr(agent, method):
+            getattr(agent, method)()

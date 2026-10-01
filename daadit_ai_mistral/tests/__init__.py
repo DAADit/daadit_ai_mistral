@@ -11,9 +11,6 @@ from . import test_vault_scope_and_summary
 from . import test_write_scope_assign_user
 from . import test_project_report
 from . import test_domain_field_names
-from . import test_skill_seed
 from . import test_consolidatie_behoud
 from . import test_derde_lijn_behoud
 from . import test_modelnaam_taalvast
-from . import test_bo_blueprint
-from . import test_fallback_signal

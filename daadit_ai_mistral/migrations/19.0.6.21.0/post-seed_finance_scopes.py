@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Zet de scoperegels van de financiële bezetting neer bij de upgrade.
+"""Financiele scoperegels (historisch).
 
-De vier rollen onder Floris (Bo, Dirk, Marit, Coen) staan sinds deze
-versie in ``SEED_ACTIVITY_SCOPES``. Hetzelfde seed-pad als 19.0.6.18.0:
-idempotent en niet-verruimend — een agent die al regels heeft wordt niet
-aangeraakt, en een agent die in deze database niet bestaat wordt
-overgeslagen. Een database zonder financiële agents merkt hier dus
-niets van.
+v19.0.11.0.0: de persona-seeds verhuisden naar ``daadit_ai_personas``.
+Deze migratie draait alleen nog als dat module de methode(n) al op
+``ai.agent`` heeft gezet (personas geinstalleerd); anders is er niets
+te seeden en slaat hij stil over. Upgradepaden van voor de split
+blijven zo werken zonder import van verdwenen code.
 """
 from odoo import SUPERUSER_ID, api
 
@@ -15,4 +14,7 @@ def migrate(cr, version):
     if not version:
         return
     env = api.Environment(cr, SUPERUSER_ID, {})
-    env["ai.agent"]._daadit_seed_activity_scopes()
+    agent = env["ai.agent"]
+    for method in ['_daadit_seed_activity_scopes']:
+        if hasattr(agent, method):
+            getattr(agent, method)()
