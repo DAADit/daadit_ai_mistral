@@ -17,3 +17,4 @@ from . import test_derde_lijn_behoud
 from . import test_modelnaam_taalvast
 from . import test_bo_blueprint
 from . import test_fallback_signal
+from . import test_embedding_width

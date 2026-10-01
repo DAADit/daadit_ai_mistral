@@ -48,6 +48,7 @@ from .mistral_client import (
     MistralUnavailable,
     is_mistral_embedding_model,
     is_mistral_model,
+    pad_vector,
 )
 from . import tool_dispatch
 
@@ -69,6 +70,19 @@ _ASK_AGENT_NAME_KEYS = (
     "agent_name", "agent", "name", "target",
     "target_agent", "agent_id", "specialist",
 )
+
+
+def pad_embedding_response(response, width):
+    """Zero-pad every vector in an /embeddings response to ``width``."""
+    try:
+        width = int(width or 0)
+    except (TypeError, ValueError):
+        width = 0
+    if not width:
+        return response
+    for item in (response or {}).get("data") or []:
+        item["embedding"] = pad_vector(item.get("embedding") or [], width)
+    return response
 
 
 def _delegate_target_name(tool_call):
@@ -498,11 +512,10 @@ def patch_llm_api_service() -> bool:
         else:
             inputs = list(inputs)
 
-        # `dimensions` is accepted and ignored: mistral-embed has a fixed
-        # 1024-wide output, and the stored vectors were written by
-        # ai_embedding._daadit_call_mistral_embeddings, which ignores it
-        # too. Honouring it here would query a different vector space
-        # than the one the sources were indexed into.
+        # mistral-embed has a fixed 1024-wide output. `dimensions` is
+        # honoured by zero-padding, exactly like the stored chunks in
+        # ai_embedding._daadit_run_embedding_pipeline, so query and
+        # chunks stay in the same vector space.
         model = kwargs.get("model") or EMBEDDING_MODEL
         if not is_mistral_embedding_model(model):
             _logger.info(
@@ -514,7 +527,10 @@ def patch_llm_api_service() -> bool:
             model = EMBEDDING_MODEL
 
         client = MistralClient.from_env(api_self.env)
-        response = client.embeddings(inputs, model=model)
+        response = pad_embedding_response(
+            client.embeddings(inputs, model=model),
+            kwargs.get("dimensions"),
+        )
 
         try:
             usage = MistralClient.extract_usage(response)

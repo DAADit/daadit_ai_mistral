@@ -38,6 +38,7 @@ from odoo import api, fields, models
 from ..services.mistral_client import (
     EMBEDDING_MODEL as MISTRAL_EMBED,
     MistralClient,
+    pad_vector,
     is_mistral_embedding_model,
 )
 from ..services import registry_patches
@@ -234,6 +235,13 @@ class AIEmbedding(models.Model):
     # Internal pipeline                                                  #
     # ------------------------------------------------------------------ #
 
+    @api.model
+    def _daadit_vector_width(self):
+        """Width of the ``embedding_vector`` column, or 0 when unknown."""
+        if "_get_dimensions" not in dir(type(self)):
+            return 0
+        return int(self._get_dimensions() or 0)
+
     def _daadit_run_embedding_pipeline(self):
         """Generate embeddings for the selected ai.embedding chunks.
 
@@ -249,6 +257,7 @@ class AIEmbedding(models.Model):
         records = self.filtered(lambda r: r.content)
         if not records:
             return True
+        width = self._daadit_vector_width()
         try:
             for offset in range(0, len(records), BATCH):
                 chunk = records[offset:offset + BATCH]
@@ -256,7 +265,7 @@ class AIEmbedding(models.Model):
                     [r.content for r in chunk]
                 )
                 for record, vector in zip(chunk, vectors):
-                    record.embedding_vector = vector
+                    record.embedding_vector = pad_vector(vector, width)
                     record.has_embedding_generation_failed = False
         except Exception as exc:  # noqa: BLE001
             _logger.exception(
