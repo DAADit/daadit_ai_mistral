@@ -1907,8 +1907,9 @@ class AIAgent(models.Model):
     #   fields (system_prompt, topics), mirroring the schedule module.   #
     # ------------------------------------------------------------------ #
 
-    # Per-turn cap on how many sub-runs one concierge turn may launch.
-    # Depth is bounded at 1; this bounds WIDTH so a multi-route turn (or
+    # Per-turn cap on how many sub-runs one concierge turn may launch,
+    # nested ones included. Depth is bounded by
+    # ``tool_dispatch.MAX_ROUTER_DEPTH``; this bounds WIDTH so a multi-route turn (or
     # a model that re-routes a failing question every iteration) can't
     # stack dozens of sequential Mistral calls into one HTTP request and
     # trip the Odoo worker's limit_time_real. (v19.0.4.2.1)
@@ -1979,38 +1980,68 @@ class AIAgent(models.Model):
             )
         return "Answer with your own tools instead."
 
+    # Where a colleague's role lives. ``x_role`` is the organogram field
+    # (Studio); ``subtitle`` is the role line on the agent card.
+    _DAADIT_ROLE_FIELDS = ("x_role", "subtitle")
+
+    def _daadit_agent_role(self, agent=None):
+        """The role of ``agent`` (default: self), or an empty string."""
+        agent = agent if agent is not None else self
+        for fname in self._DAADIT_ROLE_FIELDS:
+            if fname in agent._fields:
+                value = agent[fname]
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
     def _daadit_resolve_named_agent(self, agent_name):
         """Resolve ``agent_name`` to an ``ai.agent`` or return an error dict.
 
         Shared by Ask Agent and Open Agent Chat so both tools accept the
-        same aliases and the same unambiguous-name rules.
+        same aliases and the same unambiguous-name rules. The value may
+        be a name or a role: exact name, exact role, then a partial name
+        and a partial role. A route written as a role keeps working when
+        the colleague behind it is renamed.
         """
         self.ensure_one()
         if not agent_name or not isinstance(agent_name, str):
             return None, {"error": (
                 "Missing 'agent_name'. Re-call with parameters "
-                "agent_name (exact specialist name) and the other "
-                "required fields."
+                "agent_name (exact specialist name or role) and the "
+                "other required fields."
             )}
         Agent = self.env["ai.agent"]
         needle = agent_name.strip()
         safe = needle.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
-        target = Agent.search([("name", "=ilike", safe)], limit=1)
-        if not target:
-            matches = Agent.search([("name", "ilike", safe)], limit=2)
+        role_fields = [f for f in self._DAADIT_ROLE_FIELDS if f in Agent._fields]
+        lookups = [("name", "=ilike")]
+        lookups += [(f, "=ilike") for f in role_fields]
+        lookups += [("name", "ilike")]
+        lookups += [(f, "ilike") for f in role_fields]
+        target = Agent.browse()
+        for fname, operator in lookups:
+            matches = Agent.search([(fname, operator, safe)], limit=2)
             if len(matches) > 1:
                 return None, {"error": (
-                    "Agent name '%s' is ambiguous (%s). Re-call with the "
-                    "exact agent name." % (
+                    "Agent name or role '%s' is ambiguous (%s). Re-call "
+                    "with the exact agent name." % (
                         needle, ", ".join(sorted(matches.mapped("name")))
                     )
                 )}
-            target = matches[:1]
+            if matches:
+                target = matches
+                break
         if not target:
-            available = Agent.search([]).mapped("name")
+            available = []
+            for agent in Agent.search([]):
+                role = self._daadit_agent_role(agent)
+                available.append(
+                    "%s (%s)" % (agent.name, role) if role else agent.name
+                )
             return None, {"error": (
-                "No agent named '%s'. Available agents: %s. Re-call with "
-                "one of these exact names. %s" % (
+                "No agent named '%s' and no agent with that role. "
+                "Available agents: %s. Re-call with one of these names "
+                "or roles. %s" % (
                     needle, ", ".join(sorted(available)),
                     self._daadit_routing_fallback_hint(),
                 )
@@ -2035,7 +2066,6 @@ class AIAgent(models.Model):
         a fallback to their own tools.
         """
         self.ensure_one()
-        from ..services.llm_api_patch import _slug_tool_name
 
         # --- Alias repair: pull agent_name/question out of _extra -----
         if not agent_name or not question:
@@ -2066,10 +2096,13 @@ class AIAgent(models.Model):
             )}
 
         depth = getattr(tool_dispatch.router_state, "depth", 0)
-        if depth >= 1:
+        if depth >= tool_dispatch.MAX_ROUTER_DEPTH:
             return {"error": (
-                "Routing depth limit reached: a routed agent cannot "
-                "route further. %s" % self._daadit_routing_fallback_hint()
+                "Routing depth limit reached: a question may be passed on "
+                "at most %d times. %s" % (
+                    tool_dispatch.MAX_ROUTER_DEPTH,
+                    self._daadit_routing_fallback_hint(),
+                )
             )}
 
         # --- Per-turn width budget ------------------------------------
@@ -2084,6 +2117,52 @@ class AIAgent(models.Model):
         target, err = self._daadit_resolve_named_agent(agent_name)
         if err:
             return err
+        chain = tuple(getattr(tool_dispatch.router_state, "chain", ()) or ())
+        if target.id in chain:
+            return {"error": (
+                "Agent '%s' already passed this question on; routing it "
+                "back would loop. %s" % (
+                    target.name, self._daadit_routing_fallback_hint(),
+                )
+            )}
+
+        hooks = tool_dispatch.delegation_hooks
+        token = None
+        if hooks is not None:
+            try:
+                token = hooks.begin(self, target, question.strip(), depth + 1)
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "daadit_ai_mistral.router: delegation hook failed to "
+                    "start for %s(%s)", target.name, target.id,
+                )
+                token = None
+        result = None
+        try:
+            tool_dispatch.router_state.chain = chain + (self.id,)
+            result = self._daadit_ask_resolved(target, question, depth, calls)
+            return result
+        finally:
+            tool_dispatch.router_state.chain = chain
+            if hooks is not None and token is not None:
+                try:
+                    hooks.end(token, result)
+                except Exception:  # noqa: BLE001
+                    _logger.exception(
+                        "daadit_ai_mistral.router: delegation hook failed "
+                        "to close for %s(%s)", target.name, target.id,
+                    )
+
+    def _daadit_ask_resolved(self, target, question, depth, calls):
+        """Run the sub-run for an already resolved and permitted target.
+
+        One mechanism for every provider: the sub-run runs on the
+        target's own provider (Mistral, Claude or Loes) under the shared
+        router state of ``tool_dispatch``.
+        """
+        self.ensure_one()
+        from ..services.llm_api_patch import _slug_tool_name
+
         # v19.0.6.5.4: route to non-Mistral agents too. The sub-run runs
         # on whichever provider the TARGET uses, so a Mistral concierge
         # can delegate to a Claude specialist (Sem, Vince, Maud, …)
@@ -2093,6 +2172,9 @@ class AIAgent(models.Model):
             target.llm_model or ""
         ) else None
         sub_patch = None
+        # Providers with their own router threadlocal (Loes) get the
+        # shared depth mirrored in, so their loop knows it is a sub-run.
+        sub_dispatch = None
         if sub_provider is None:
             try:
                 from odoo.addons.daadit_ai_claude.services.claude_client import (
@@ -2100,13 +2182,31 @@ class AIAgent(models.Model):
                 )
                 if is_claude_model(target.llm_model or ""):
                     from odoo.addons.daadit_ai_claude.services import (
-                        llm_api_patch as sub_patch,
+                        llm_api_patch as claude_patch,
                     )
+                    sub_patch = claude_patch
                     sub_provider = "anthropic"
             except ImportError:
                 _logger.info(
                     "daadit_ai_mistral.router: daadit_ai_claude not "
                     "importable — cannot route to Claude agents"
+                )
+        if sub_provider is None:
+            try:
+                from odoo.addons.daadit_ai_loes.services.loes_client import (
+                    is_loes_model,
+                )
+                if is_loes_model(target.llm_model or ""):
+                    from odoo.addons.daadit_ai_loes.services import (
+                        llm_api_patch as loes_patch,
+                        tool_dispatch as sub_dispatch,
+                    )
+                    sub_patch = loes_patch
+                    sub_provider = "loes"
+            except ImportError:
+                _logger.info(
+                    "daadit_ai_mistral.router: daadit_ai_loes not "
+                    "importable — cannot route to Loes agents"
                 )
         if sub_provider is None:
             return {"error": (
@@ -2159,8 +2259,8 @@ class AIAgent(models.Model):
             pass
 
         # Build the sub-run tool list from the TARGET's topics. Strip
-        # orchestrator tools (no chains / no handoffs) AND all
-        # write-side tools: routing fetches an ANSWER, never a mutation
+        # the handoff tool, the router tool once the next level would
+        # exceed MAX_ROUTER_DEPTH, AND all write-side tools: routing fetches an ANSWER, never a mutation
         # on the caller's behalf, so the draft-only policy holds across
         # the router boundary even when routing to a write-capable
         # agent (e.g. Helpdesk SLA).
@@ -2171,8 +2271,7 @@ class AIAgent(models.Model):
                     slug = _slug_tool_name(action.with_context(lang="en_US").name)
                     if (
                         slug
-                        and slug not in tool_dispatch.ORCHESTRATOR_TOOL_SLUGS
-                        and slug not in tool_dispatch.WRITE_SIDE_TOOL_SLUGS
+                        and tool_dispatch.subrun_tool_allowed(slug, depth + 1)
                         and slug not in tool_names
                     ):
                         tool_names.append(slug)
@@ -2216,6 +2315,7 @@ class AIAgent(models.Model):
         # caller's. See ``tool_dispatch.note_tool_call``.
         prev_calls_made = getattr(tool_dispatch.router_state, "calls_made", 0)
         prev_writes_made = getattr(tool_dispatch.router_state, "writes_made", 0)
+        mirror_prev = None
         # Set state and run inside one try/finally so a raise anywhere —
         # including before request_llm — can never leak depth or the
         # active-agent record onto this worker thread.
@@ -2226,6 +2326,17 @@ class AIAgent(models.Model):
             tool_dispatch.router_state.calls_made = 0
             tool_dispatch.router_state.writes_made = 0
             tool_dispatch.current_agent.record = target
+            if sub_dispatch is not None:
+                mirror_prev = (
+                    getattr(sub_dispatch.router_state, "depth", 0),
+                    getattr(sub_dispatch.router_state, "exhausted", False),
+                    getattr(sub_dispatch.router_state, "sub_failed", False),
+                    getattr(sub_dispatch.current_agent, "record", None),
+                )
+                sub_dispatch.router_state.depth = depth + 1
+                sub_dispatch.router_state.exhausted = False
+                sub_dispatch.router_state.sub_failed = False
+                sub_dispatch.current_agent.record = target
             _logger.info(
                 "daadit_ai_mistral.router: agent %s(%s) routing question "
                 "to %s(%s) as user %s (depth %s->%s, call %s, %d tools)",
@@ -2248,6 +2359,13 @@ class AIAgent(models.Model):
             sub_failed = bool(
                 getattr(tool_dispatch.router_state, "sub_failed", False)
             )
+            if sub_dispatch is not None:
+                exhausted = exhausted or bool(
+                    getattr(sub_dispatch.router_state, "exhausted", False)
+                )
+                sub_failed = sub_failed or bool(
+                    getattr(sub_dispatch.router_state, "sub_failed", False)
+                )
             denied_model = getattr(
                 tool_dispatch.router_state, "sub_denied_model", "",
             ) or ""
@@ -2272,6 +2390,13 @@ class AIAgent(models.Model):
             tool_dispatch.router_state.sub_denied_model = prev_denied
             tool_dispatch.router_state.calls_made = prev_calls_made
             tool_dispatch.router_state.writes_made = prev_writes_made
+            if mirror_prev is not None:
+                (
+                    sub_dispatch.router_state.depth,
+                    sub_dispatch.router_state.exhausted,
+                    sub_dispatch.router_state.sub_failed,
+                    sub_dispatch.current_agent.record,
+                ) = mirror_prev
 
         if isinstance(result, (list, tuple)):
             answer = "\n\n".join(
@@ -2328,6 +2453,7 @@ class AIAgent(models.Model):
         claim = {
             "ok": True,
             "agent": target.name,
+            "provider": sub_provider,
             "answer": answer,
             "tool_calls_made": sub_calls,
             "write_actions_made": sub_writes,
