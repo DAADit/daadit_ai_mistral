@@ -1928,34 +1928,11 @@ class AIAgent(models.Model):
         "message": "question", "text": "question", "vraag": "question",
     }
 
-    @api.model
-    def _daadit_seed_orchestrator(self):
-        """Mark Robin / Ask AI as orchestrator and attach the handoff tool.
-
-        Idempotent. Safe to call from migrations and post_init.
-        """
-        for name in ("Robin", "Ask AI"):
-            agents = self.sudo().search([
-                ("name", "=ilike", name),
-                ("daadit_is_orchestrator", "=", False),
-            ])
-            if agents:
-                agents.write({"daadit_is_orchestrator": True})
-        ask = self.env.ref(
-            "daadit_ai_mistral.ir_actions_server_ask_agent",
-            raise_if_not_found=False,
-        )
-        open_chat = self.env.ref(
-            "daadit_ai_mistral.ir_actions_server_open_agent_chat",
-            raise_if_not_found=False,
-        )
-        if not ask or not open_chat or "ai.topic" not in self.env:
-            return
-        for topic in self.env["ai.topic"].sudo().search(
-            [("tool_ids", "in", ask.ids)]
-        ):
-            if open_chat.id not in topic.tool_ids.ids:
-                topic.write({"tool_ids": [(4, open_chat.id)]})
+    # v19.0.11.0.0: ``_daadit_seed_orchestrator`` (Robin / Ask AI als
+    # orchestrator markeren) verhuisde naar ``daadit_ai_personas`` —
+    # persona-content, geen provider-infrastructuur. Het mechanisme
+    # (``daadit_is_orchestrator`` + ``_daadit_orchestrator_mode``)
+    # blijft hier.
 
     def _daadit_orchestrator_mode(self):
         """True when this agent must only ask / hand off, never execute."""
@@ -2167,47 +2144,26 @@ class AIAgent(models.Model):
         # on whichever provider the TARGET uses, so a Mistral concierge
         # can delegate to a Claude specialist (Sem, Vince, Maud, …)
         # instead of refusing. Falls back to the old refusal only when
-        # no provider add-on claims the model.
+        # no provider claims the model.
+        #
+        # v19.0.11.0.0: sibling providers are no longer imported here.
+        # ``daadit_ai_bridge`` registers them on
+        # ``tool_dispatch.foreign_providers``; without the bridge (or
+        # without that provider installed) the old refusal applies.
         sub_provider = "mistral" if is_mistral_model(
             target.llm_model or ""
         ) else None
-        sub_patch = None
+        sub_entry = None
         # Providers with their own router threadlocal (Loes) get the
         # shared depth mirrored in, so their loop knows it is a sub-run.
         sub_dispatch = None
         if sub_provider is None:
-            try:
-                from odoo.addons.daadit_ai_claude.services.claude_client import (
-                    is_claude_model,
-                )
-                if is_claude_model(target.llm_model or ""):
-                    from odoo.addons.daadit_ai_claude.services import (
-                        llm_api_patch as claude_patch,
-                    )
-                    sub_patch = claude_patch
-                    sub_provider = "anthropic"
-            except ImportError:
-                _logger.info(
-                    "daadit_ai_mistral.router: daadit_ai_claude not "
-                    "importable — cannot route to Claude agents"
-                )
-        if sub_provider is None:
-            try:
-                from odoo.addons.daadit_ai_loes.services.loes_client import (
-                    is_loes_model,
-                )
-                if is_loes_model(target.llm_model or ""):
-                    from odoo.addons.daadit_ai_loes.services import (
-                        llm_api_patch as loes_patch,
-                        tool_dispatch as sub_dispatch,
-                    )
-                    sub_patch = loes_patch
-                    sub_provider = "loes"
-            except ImportError:
-                _logger.info(
-                    "daadit_ai_mistral.router: daadit_ai_loes not "
-                    "importable — cannot route to Loes agents"
-                )
+            sub_entry = tool_dispatch.foreign_provider_for(
+                target.llm_model or ""
+            )
+            if sub_entry is not None:
+                sub_provider = sub_entry["provider"]
+                sub_dispatch = sub_entry.get("dispatch")
         if sub_provider is None:
             return {"error": (
                 "Agent '%s' runs on model '%s', for which no provider "
@@ -2343,10 +2299,10 @@ class AIAgent(models.Model):
                 self.name, self.id, target.name, target.id, self.env.uid,
                 depth, depth + 1, calls + 1, len(tool_names),
             )
-            if sub_patch is not None:
+            if sub_entry is not None:
                 # Cross-provider hop: patch the target's provider in
                 # before we ask LLMApiService for it.
-                sub_patch.patch_llm_api_service()
+                sub_entry["patch"]()
             service = LLMApiService(env=self.env, provider=sub_provider)
             result = service.request_llm(
                 model=target.llm_model,
