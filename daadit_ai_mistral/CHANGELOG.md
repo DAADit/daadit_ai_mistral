@@ -7,6 +7,10 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.11.0.3 — 2026-10-02 — een lege lijst door de leesscope zegt dat ook
+
+- Een zoekopdracht die door de harde leesscope leeg blijft, geeft geen kale `[]` meer terug maar `records: []` met een melding dat records buiten de scope onzichtbaar zijn en niet nagebouwd mogen worden (taak 820, run 1665). Op de 19.0.10-lijn: 19.0.10.3.5.
+
 ## 19.0.11.0.2 — 2026-10-02 — een domein met één haakje te veel komt toch door
 
 - Een genest domein dat de buitenste lijst één `]` te vroeg sluit (`[A, B]], C]`, "Extra data") wordt weer één lijst (taak 775).
