@@ -52,16 +52,6 @@ from .mistral_client import (
 )
 from . import tool_dispatch
 
-try:
-    # Optional: daadit_ai_claude is not a hard dependency, so a
-    # deployment without it must still import this module. When it is
-    # installed, its request path doubles as our fallback provider.
-    from odoo.addons.daadit_ai_claude.services import (
-        llm_api_patch as claude_patch,
-    )
-except ImportError:  # pragma: no cover - depends on installed addons
-    claude_patch = None
-
 _logger = logging.getLogger(__name__)
 
 _PATCHED = False
@@ -101,100 +91,29 @@ def _delegate_target_name(tool_call):
     return None
 
 
-# Fallback provider (taak 709). "claude" (default) or "off".
-_FALLBACK_ICP = "daadit_ai_mistral.fallback_provider"
-_FALLBACK_MODEL_ICP = "daadit_ai_mistral.fallback_model"
-_FALLBACK_MODEL_DEFAULT = "claude-sonnet-4-6"
-
-
-def _fallback_model(env):
-    if env is None:
-        return _FALLBACK_MODEL_DEFAULT
-    try:
-        name = env["ir.config_parameter"].sudo().get_param(
-            _FALLBACK_MODEL_ICP,
-        )
-    except Exception:  # noqa: BLE001
-        return _FALLBACK_MODEL_DEFAULT
-    return (name or "").strip() or _FALLBACK_MODEL_DEFAULT
-
-
-def _fallback_enabled(env):
-    """True when an unavailable Mistral may be answered by Claude."""
-    if claude_patch is None:
-        return False
-    if env is None:
-        return False
-    try:
-        mode = env["ir.config_parameter"].sudo().get_param(
-            _FALLBACK_ICP, "claude",
-        )
-    except Exception:  # noqa: BLE001
-        return False
-    return (mode or "").strip().lower() in ("claude", "anthropic", "on", "1")
-
-
 def _request_with_fallback(api_self, args, kwargs):
-    """Run the Mistral turn; hand it to Claude when Mistral is down.
+    """Run the Mistral turn; a registered cross-provider fallback may
+    answer when Mistral is down.
 
-    Only ``MistralUnavailable`` triggers the switch — connection
+    v19.0.11.0.0: the fallback itself (which provider, which model,
+    the ICP switches, the threadlocal hand-over) moved to
+    ``daadit_ai_bridge`` — this module never imports a sibling
+    provider. The bridge registers a callable on
+    ``tool_dispatch.fallback_executor``; without one, the
+    ``MistralUnavailable`` propagates unchanged.
+
+    Only ``MistralUnavailable`` reaches the executor — connection
     failure, 5xx, or a rate limit that survived every retry. A 4xx is
     the request being wrong, and re-sending a wrong request to another
     provider just burns a second bill.
-
-    The model name is replaced, because a Mistral model id means
-    nothing to Anthropic; everything else (messages, tools, the agent
-    on the threadlocal) carries over unchanged, so the colleague keeps
-    the same instructions and the same tools.
     """
     try:
         return _request_llm_mistral(api_self, *args, **kwargs)
     except MistralUnavailable as exc:
-        env = getattr(api_self, "env", None)
-        if not _fallback_enabled(env):
+        handler = tool_dispatch.fallback_executor
+        if handler is None:
             raise
-        model = _fallback_model(env)
-        _logger.warning(
-            "daadit_ai_mistral.llm_api_patch: Mistral niet beschikbaar "
-            "(%s) — deze beurt wordt beantwoord door %s", exc, model,
-        )
-        claude_kwargs = dict(kwargs)
-        claude_kwargs["model"] = model
-        # Positional Mistral model ids are dropped: Claude sniffs
-        # positional strings for a model name and would ignore a
-        # Mistral id anyway, but leaving it in reads as a bug later.
-        claude_args = tuple(
-            a for a in args
-            if not (isinstance(a, str) and is_mistral_model(a))
-        )
-        _mark_fallback("claude", model, exc)
-        claude_td = claude_patch.tool_dispatch
-        prev_agent = getattr(claude_td.current_agent, "record", None)
-        prev_deadline = getattr(
-            claude_td.router_state, "run_deadline_monotonic", None,
-        )
-        claude_td.current_agent.record = getattr(
-            tool_dispatch.current_agent, "record", None,
-        )
-        claude_td.router_state.run_deadline_monotonic = getattr(
-            tool_dispatch.router_state, "run_deadline_monotonic", None,
-        )
-        try:
-            return claude_patch._request_llm_claude(
-                api_self, *claude_args, **claude_kwargs
-            )
-        finally:
-            claude_td.current_agent.record = prev_agent
-            claude_td.router_state.run_deadline_monotonic = prev_deadline
-
-
-def _mark_fallback(provider, model, exc):
-    """Tell the caller (a scheduled run) that this turn switched
-    provider, so the switch is on the run and never silent."""
-    state = tool_dispatch.router_state
-    state.fallback_provider = provider
-    state.fallback_model = model
-    state.fallback_reason = str(exc)[:250]
+        return handler(api_self, args, kwargs, exc)
 
 
 def _diag_nonmistral_delegation(api_self, where, kwargs):

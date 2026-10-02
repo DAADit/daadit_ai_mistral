@@ -80,61 +80,6 @@ class AiAgentActivityScope(models.Model):
                     "Het record-domein moet een lijst zijn."))
 
 
-# De stand zoals hij in serveractie 1142 leefde, per agentnaam in plaats
-# van per database-id, met twee correcties: ``website.page`` is eruit (dat
-# model kan geen activiteit dragen) en Lux en Sem leveren op één vaste
-# postbus in plaats van op willekeurig welk artikel. De record-ids zijn
-# configuratie van déze database; een nieuwe klantdatabase krijgt zijn
-# eigen regels via de blueprint-export.
-SEED_ACTIVITY_SCOPES = {
-    "Vera": [("knowledge.article", [["root_article_id", "=", 191]])],
-    "Argus": [(
-        "knowledge.article",
-        [["id", "in", [182, 183, 184, 185, 186, 187]]],
-    )],
-    "Hilda": [(
-        "helpdesk.ticket",
-        [["close_date", "=", False], ["stage_id.fold", "=", False]],
-    )],
-    # Lux levert concepten af op de Conceptenbak, Sem zijn
-    # WEB-WIJZIGING-voorstellen op de Zichtbaarheids-worklist.
-    "Lux": [("knowledge.article", [["id", "=", 332]])],
-    "Sem": [("knowledge.article", [["id", "=", 304]])],
-    "Sanne": [
-        ("crm.lead", []), ("sale.order", []), ("res.partner", []),
-    ],
-    "Pim": [("project.project", []), ("project.task", [])],
-    "Daan": [("product.template", []), ("project.task", [])],
-    "Bram": [
-        ("crm.lead", []), ("sale.order", []), ("account.move", []),
-        ("helpdesk.ticket", []), ("project.task", []),
-    ],
-    "Floris": [
-        ("account.move", []), ("sale.order", []),
-        ("project.project", []), ("project.task", []),
-    ],
-    # De financiële bezetting onder Floris. Elk van de vier levert op één
-    # eigen artikel af; de bredere modellen staan erbij zodat een
-    # bevinding ook op het record zelf zichtbaar wordt. Geen van hen mag
-    # een boeking, factuur of prijs wijzigen — dat blijft buiten de
-    # activiteit-scope en buiten hun modellijst.
-    "Bo": [
-        ("knowledge.article", [["id", "=", 350]]),
-        ("account.move", []),
-    ],
-    "Dirk": [
-        ("knowledge.article", [["id", "=", 351]]),
-        ("account.move", [["move_type", "=", "out_invoice"]]),
-    ],
-    "Marit": [
-        ("knowledge.article", [["id", "=", 352]]),
-        ("sale.order", []),
-    ],
-    "Coen": [
-        ("knowledge.article", [["id", "=", 353]]),
-        ("res.partner", []),
-    ],
-}
 
 
 # De code die in de serveractie achter de plan-activiteit-tool hoort te
@@ -225,30 +170,6 @@ class AIAgent(models.Model):
              "schrijfscope blijft onverkort gelden.",
     )
 
-    @api.model
-    def _daadit_seed_activity_scopes(self):
-        """Zet de vastgelegde scoperegels neer waar ze nog missen.
-
-        Idempotent en niet-verruimend: een agent die al regels heeft
-        wordt niet aangeraakt, zodat een handmatige aanscherping niet
-        stilletjes wordt teruggedraaid.
-        """
-        Scope = self.env["daadit.ai.agent.activity.scope"].sudo()
-        created = 0
-        for name, lines in SEED_ACTIVITY_SCOPES.items():
-            agent = self.sudo().search([("name", "=", name)], limit=1)
-            if not agent or agent.daadit_activity_scope_ids:
-                continue
-            for model_name, domain in lines:
-                Scope.create({
-                    "agent_id": agent.id,
-                    "model_name": model_name,
-                    "record_domain": json.dumps(domain),
-                })
-                created += 1
-        _logger.info(
-            "Activity scope seeding: %s regels aangemaakt", created)
-        return created
 
     def _daadit_activity_capable(self, model_name):
         """Kan dit model een activiteit dragen?"""

@@ -2,7 +2,7 @@
 import logging
 
 _logger = logging.getLogger(__name__)
-_logger.info("daadit_ai_mistral: __init__ loading (v19.0.6.0.0)")
+_logger.info("daadit_ai_mistral: __init__ loading (v19.0.11.0.0)")
 
 # Services first so diagnostics installs its UserError tap before any model
 # code is imported.
@@ -90,29 +90,9 @@ def pre_init_hook(env):
     _reset_mistral_values(env)
 
 
-def post_init_hook(env):
-    """Seed optional agent metadata on fresh install."""
-    _logger.info(
-        "daadit_ai_mistral.post_init_hook: seeding initial agent skills"
-    )
-    try:
-        env["ai.agent"]._daadit_seed_skills()
-    except Exception:  # noqa: BLE001
-        _logger.exception(
-            "daadit_ai_mistral.post_init_hook: agent skill seed failed"
-        )
-    try:
-        env["ai.agent"]._daadit_seed_orchestrator()
-    except Exception:  # noqa: BLE001
-        _logger.exception(
-            "daadit_ai_mistral.post_init_hook: orchestrator seed failed"
-        )
-    try:
-        env["ai.agent"]._daadit_apply_bo_blueprint()
-    except Exception:  # noqa: BLE001
-        _logger.exception(
-            "daadit_ai_mistral.post_init_hook: Bo blueprint failed"
-        )
+# v19.0.11.0.0: de post_init-seeds (skills, orchestrator, Bo-blauwdruk)
+# verhuisden naar ``daadit_ai_personas`` — persona-content hoort niet in
+# de provider.
 
 
 def uninstall_hook(env):
