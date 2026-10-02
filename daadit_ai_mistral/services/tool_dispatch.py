@@ -80,6 +80,58 @@ MAX_ROUTER_DEPTH = 2
 # ``end(token, result)`` after it, always, including on failure.
 delegation_hooks = None
 
+# ---------------------------------------------------------------------------
+# Cross-provider extension points (v19.0.11.0.0).
+#
+# This module must never import a sibling provider (daadit_ai_claude,
+# daadit_ai_loes, ...). A bridge module that depends on both sides —
+# ``daadit_ai_bridge`` — registers here instead, following the same
+# pattern as ``delegation_hooks`` above.
+#
+# ``fallback_executor``: callable(api_self, args, kwargs, exc) -> result.
+# Consulted by ``llm_api_patch._request_with_fallback`` when a turn dies
+# with ``MistralUnavailable``. May re-raise ``exc`` (fallback disabled).
+# ``None`` (the default) means the exception propagates unchanged.
+#
+# ``foreign_providers``: registry of sibling providers the router may
+# run a delegated sub-run on. Entry keys:
+#   name      — registry key, replaces an earlier entry with that name
+#   provider  — the LLMApiService provider string ("anthropic", "loes")
+#   is_model  — callable(model_id) -> bool, claims the target's model
+#   patch     — callable installing that provider's LLMApiService patch
+#   dispatch  — that provider's tool_dispatch module when it keeps its
+#               own router threadlocals (Loes), else None (Claude)
+# ---------------------------------------------------------------------------
+fallback_executor = None
+foreign_providers = []
+
+
+def register_foreign_provider(entry):
+    """Register (or replace, matched on ``name``) a sibling provider."""
+    required = {"name", "provider", "is_model", "patch"}
+    missing = required - set(entry)
+    if missing:
+        raise ValueError(
+            "foreign provider entry misses keys: %s" % ", ".join(
+                sorted(missing)
+            )
+        )
+    entry.setdefault("dispatch", None)
+    foreign_providers[:] = [
+        e for e in foreign_providers if e.get("name") != entry["name"]
+    ] + [entry]
+
+
+def foreign_provider_for(model_id):
+    """The registered sibling provider claiming ``model_id``, or None."""
+    for entry in foreign_providers:
+        try:
+            if entry["is_model"](model_id or ""):
+                return entry
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
 # Read-only stock tools. Everything else is a custom action, and those
 # exist precisely to write (create a campaign, draft a post, update a
 # blog). Treating unknown tools as writes is the safe default here:
