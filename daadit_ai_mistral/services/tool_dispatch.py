@@ -2007,6 +2007,28 @@ def _coerce_domain_obj(obj):
     return obj
 
 
+def _rejoin_closed_early(s):
+    """``[A, B]], C, D]`` → ``[A, B, C, D]``.
+
+    One ``]`` too many in a nested prefix domain closes the outer list
+    early; JSON then stops with "Extra data". The pieces read as one
+    list are what was meant: prefix notation ANDs whatever follows.
+    Returns None when the string is not of that shape.
+    """
+    try:
+        head, end = json.JSONDecoder().raw_decode(s)
+    except ValueError:
+        return None
+    rest = s[end:].strip()
+    if not isinstance(head, list) or not rest.startswith(","):
+        return None
+    try:
+        tail = json.loads("[" + rest[1:])
+    except ValueError:
+        return None
+    return head + tail if isinstance(tail, list) else None
+
+
 def _normalize_json_string_param(v):
     """Return a JSON-encoded STRING for the domain/having/custom_domain
     params, which stock parses with ``json.loads`` internally.
@@ -2036,7 +2058,9 @@ def _normalize_json_string_param(v):
             try:
                 obj = ast.literal_eval(s)
             except (ValueError, TypeError, SyntaxError):
-                obj = None
+                obj = _rejoin_closed_early(s)
+        if isinstance(obj, str) and obj.strip() != s:
+            return _normalize_json_string_param(obj)
     if obj is None:
         # Structurally unparseable. Last resort: a bare relative-date
         # expression passed as the whole value.

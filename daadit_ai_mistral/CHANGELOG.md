@@ -7,6 +7,11 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.11.0.2 — 2026-10-02 — een domein met één haakje te veel komt toch door
+
+- Een genest domein dat de buitenste lijst één `]` te vroeg sluit (`[A, B]], C]`, "Extra data") wordt weer één lijst (taak 775).
+- Een domein dat als string in een string aankomt (`"\"[['url', '=like', '%x%']]\""`) wordt uitgepakt.
+
 ## 19.0.11.0.1 — 2026-10-02 — geen beurt meer verloren op een overbodig argument
 
 - Een argument dat de tool niet declareert (`limit` op de veldentool, `fields` op `read_group`) wordt weggelaten in plaats van door Odoo geweigerd met "Missing definition".
