@@ -241,3 +241,52 @@ class TestReadGroupArgRepair(common.TransactionCase):
         )
         self.assertEqual(domain[1][0], "stage_id.fold")
         self.assertTrue(notes)
+
+
+@tagged("post_install", "-at_install", "daadit_ai")
+class TestUndeclaredArgs(common.TransactionCase):
+    """Uit het actielog van 16-9 t/m 1-10: Hilda en Bo verloren beurten op
+    "Missing definition for limit/fields" en op een veldenlijst als één
+    string."""
+
+    def test_undeclared_key_is_left_out(self):
+        action = _FakeAction(["model_name", "domain", "groupby"])
+        out, dropped = td._drop_undeclared_args(action, {
+            "model_name": "account.bank.statement.line",
+            "domain": "[]",
+            "groupby": [],
+            "fields": ["date", "amount"],
+            "limit": 10,
+        })
+        self.assertEqual(dropped, ["fields", "limit"])
+        self.assertEqual(sorted(out), ["domain", "groupby", "model_name"])
+
+    def test_schemaless_action_keeps_everything(self):
+        action = _FakeAction([])
+        action.ai_tool_schema = ""
+        payload = {"limit": 5}
+        out, dropped = td._drop_undeclared_args(action, payload)
+        self.assertIs(out, payload)
+        self.assertEqual(dropped, [])
+
+    def test_python_list_in_one_string_is_split(self):
+        out = td._coerce_args(json.dumps({
+            "model_name": "helpdesk.stage",
+            "fields": ["id', 'name', 'fold"],
+        }))
+        self.assertEqual(out["fields"], ["id", "name", "fold"])
+
+    def test_ordinary_field_names_are_untouched(self):
+        self.assertEqual(
+            td._split_joined_names(["name", "x_studio_planned_date"]),
+            ["name", "x_studio_planned_date"],
+        )
+
+    def test_cut_off_call_says_so(self):
+        res = td.run_tool_call(self.env["ai.agent"], {
+            "function": {
+                "name": "ir_actions_server_schedule_activity",
+                "arguments": '{"model_name": "helpdesk.ticket", "note": "<p>Dit',
+            },
+        })
+        self.assertIn("cut off", res["error"])

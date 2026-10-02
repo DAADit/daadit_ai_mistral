@@ -7,6 +7,12 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.11.0.1 — 2026-10-02 — geen beurt meer verloren op een overbodig argument
+
+- Een argument dat de tool niet declareert (`limit` op de veldentool, `fields` op `read_group`) wordt weggelaten in plaats van door Odoo geweigerd met "Missing definition".
+- Een veldenlijst als één string (`["id', 'name', 'fold"]`) wordt gesplitst.
+- Een afgekapte aanroep ("Unterminated string") zegt er nu bij dat het antwoord te lang was: één aanroep per keer, korte notitie.
+
 ## 19.0.11.0.0 — 2026-10-01 — De split: provider, persona's en bridge uit elkaar
 
 Structuurrelease zonder functionele wijziging voor een database waarop

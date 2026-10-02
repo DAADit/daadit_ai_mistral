@@ -497,6 +497,44 @@ def _remap_arg_names(action, kwargs):
     return (out, renames) if renames else (kwargs, {})
 
 
+def _drop_undeclared_args(action, kwargs):
+    """Leave out arguments the action's schema does not declare.
+
+    Odoo validates a tool call against that schema and refuses any
+    extra key with "Missing definition for <key>"; the model reads that
+    as a broken tool. Returns ``(kwargs, dropped)``.
+    """
+    props = _schema_properties(action)
+    if not props or not isinstance(kwargs, dict):
+        return kwargs, []
+    dropped = sorted(k for k in kwargs if k not in props)
+    if not dropped:
+        return kwargs, []
+    return {k: v for k, v in kwargs.items() if k in props}, dropped
+
+
+def _split_joined_names(values):
+    """``["id', 'name', 'fold"]`` → ``["id", "name", "fold"]``.
+
+    A Python list printed into a single JSON string element; only
+    splits on a quote-comma-quote separator, so a real field name is
+    never touched.
+    """
+    if not isinstance(values, list):
+        return values
+    out = []
+    for value in values:
+        if isinstance(value, str) and re.search(r"['\"]\s*,\s*['\"]", value):
+            out += [
+                part.strip().strip("'\"").strip()
+                for part in re.split(r"['\"]\s*,\s*['\"]", value)
+                if part.strip().strip("'\"").strip()
+            ]
+        else:
+            out.append(value)
+    return out
+
+
 def _dotted_model_name(env, requested):
     """``account_move`` → ``account.move`` when exactly that model exists.
 
@@ -2413,6 +2451,8 @@ def _coerce_args(raw_args):
         # stock's internal json.loads + Odoo's domain parser reject.
         if target_key in _JSON_STRING_PARAMS:
             v = _normalize_json_string_param(v)
+        if target_key in ("fields", "groupby"):
+            v = _split_joined_names(v)
 
         # If aliasing collides with an explicit key already present,
         # prefer the explicit one (don't overwrite).
@@ -2556,8 +2596,13 @@ def run_tool_call(agent, tool_call):
                 f"PARSE_ERROR fn={fn_name} raw={str(raw_args)[:500]} "
                 f"err={exc}",
             )
+        cut_off = (
+            "Your call was cut off before it ended, most likely because "
+            "the answer reached its length limit. Send one tool call at "
+            "a time and keep long text (note, body) short. "
+        ) if "Unterminated string" in str(exc) else ""
         return {"error": (
-            f"Could not parse tool arguments as JSON: {exc}. "
+            f"Could not parse tool arguments as JSON: {exc}. {cut_off}"
             f"Pass arguments as a JSON object whose values are typed "
             f"(arrays as JSON arrays, not strings)."
         )}
@@ -2605,6 +2650,17 @@ def run_tool_call(agent, tool_call):
                 _record_in_ir_logging(
                     env, "INFO", "daadit_ai_mistral.tool_dispatch",
                     f"REMAPPED_ARGS fn={fn_name} renames={renames}",
+                )
+        kwargs, dropped = _drop_undeclared_args(action, kwargs)
+        if dropped:
+            _logger.info(
+                "daadit_ai_mistral.tool_dispatch: %s — left out "
+                "undeclared arguments %s", fn_name, dropped,
+            )
+            if env is not None:
+                _record_in_ir_logging(
+                    env, "INFO", "daadit_ai_mistral.tool_dispatch",
+                    f"DROPPED_ARGS fn={fn_name} dropped={dropped}",
                 )
         # Een ontbrekend zoekdomein is geen ontbrekend gegeven: de
         # dispatcher vult verderop al ``domain="[]"`` in voor deze twee
