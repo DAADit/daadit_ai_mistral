@@ -290,3 +290,36 @@ class TestUndeclaredArgs(common.TransactionCase):
             },
         })
         self.assertIn("cut off", res["error"])
+
+
+@tagged("post_install", "-at_install", "daadit_ai")
+class TestDomainStringRepair(common.TransactionCase):
+    """Both shapes come from the production action log (taak 775)."""
+
+    def test_domain_closed_one_bracket_early_is_rejoined(self):
+        raw = (
+            '["|", ["&", ["a", "!=", false], ["a", "<", "2026-09-29"]], '
+            '["&", ["a", "=", false], ["b", "<", "2026-09-15"]]], '
+            '["stage_id", "not in", [3, 4]], ["active", "=", true]]'
+        )
+        out = json.loads(td._normalize_json_string_param(raw))
+        self.assertEqual(out[0], "|")
+        self.assertIn(["stage_id", "not in", [3, 4]], out)
+        self.assertEqual(out[-1], ["active", "=", True])
+
+    def test_double_encoded_python_literal_is_unwrapped(self):
+        raw = "\"[['url', '=like', '%/prijzen%']]\""
+        self.assertEqual(
+            json.loads(td._normalize_json_string_param(raw)),
+            [["url", "=like", "%/prijzen%"]],
+        )
+
+    def test_unrepairable_domain_is_passed_through(self):
+        raw = '[["id", "in", [REF:visitor_ids]]]'
+        self.assertEqual(td._normalize_json_string_param(raw), raw)
+
+    def test_valid_domain_is_unchanged(self):
+        self.assertEqual(
+            json.loads(td._normalize_json_string_param('[["a", "=", 1]]')),
+            [["a", "=", 1]],
+        )
