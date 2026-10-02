@@ -7,6 +7,12 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.10.3.3 — 2026-10-02 — geen beurt meer verloren op een overbodig argument
+
+- Een argument dat de tool niet declareert (`limit` op de veldentool, `fields` op `read_group`) wordt weggelaten in plaats van door Odoo geweigerd met "Missing definition".
+- Een veldenlijst als één string (`["id', 'name', 'fold"]`) wordt gesplitst.
+- Een afgekapte aanroep ("Unterminated string") zegt er nu bij dat het antwoord te lang was: één aanroep per keer, korte notitie.
+
 ## 19.0.10.3.2 — 2026-10-01 — logregels op een eigen cursor (taak 1488)
 
 - Diagnose- en toolregels in `ir.logging` worden op een eigen cursor
