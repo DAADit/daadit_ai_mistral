@@ -1977,6 +1977,25 @@ def _rejoin_closed_early(s):
     return head + tail if isinstance(tail, list) else None
 
 
+_READ_SCOPE_EMPTY_NOTE = (
+    "Nothing matched inside this agent's read scope for '{model}'. Records "
+    "outside that scope are invisible to you: an empty result does not "
+    "mean they do not exist. Do not quote, reconstruct or propose changes "
+    "to their content; report that you could not read them."
+)
+
+
+def _mark_read_scope_empty(safe, model_name):
+    """An empty read under a read scope says so instead of a bare ``[]``."""
+    note = _READ_SCOPE_EMPTY_NOTE.format(model=model_name)
+    if safe == []:
+        return {"records": [], "daadit_read_scope_note": note}
+    if (isinstance(safe, dict) and safe.get("records") == []
+            and "error" not in safe):
+        safe.setdefault("daadit_read_scope_note", note)
+    return safe
+
+
 def _normalize_json_string_param(v):
     """Return a JSON-encoded STRING for the domain/having/custom_domain
     params, which stock parses with ``json.loads`` internally.
@@ -2959,6 +2978,7 @@ def run_tool_call(agent, tool_call):
     # per-agent read scope (v19.0.4.8.0 — see helper section above).
     # ------------------------------------------------------------------
     _domain_notes = []
+    _scope_applied = False
     if fn_name in _DOMAIN_TOOLS and requested_model and env is not None:
         _dom_raw = kwargs.get("domain")
         _dom = None
@@ -3049,6 +3069,7 @@ def run_tool_call(agent, tool_call):
                     )}
                 if _scope:
                     _dom = _domain_and([_scope, _dom])
+                    _scope_applied = True
                     _logger.info(
                         "daadit_ai_mistral.tool_dispatch: read scope "
                         "enforced for agent=%s on %s (scope=%s)",
@@ -3274,6 +3295,8 @@ def run_tool_call(agent, tool_call):
     # model so it knows the result set may be wider than it asked for.
     if _domain_notes and isinstance(safe, dict):
         safe.setdefault("daadit_domain_notes", _domain_notes)
+    if _scope_applied:
+        safe = _mark_read_scope_empty(safe, requested_model)
     _logger.info(
         "daadit_ai_mistral.tool_dispatch: %s ok (args_keys=%s, "
         "result_type=%s)",

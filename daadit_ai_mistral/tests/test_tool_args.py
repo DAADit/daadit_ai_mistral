@@ -323,3 +323,30 @@ class TestDomainStringRepair(common.TransactionCase):
             json.loads(td._normalize_json_string_param('[["a", "=", 1]]')),
             [["a", "=", 1]],
         )
+
+
+@tagged("post_install", "-at_install", "daadit_ai")
+class TestReadScopeEmpty(common.TransactionCase):
+    """Run 1665: Argus kreeg ``[]`` en verzon daarna de artikeltekst (taak 820)."""
+
+    def test_bare_empty_list_gets_a_note(self):
+        out = td._mark_read_scope_empty([], "knowledge.article")
+        self.assertEqual(out["records"], [])
+        self.assertIn("knowledge.article", out["daadit_read_scope_note"])
+
+    def test_empty_records_dict_gets_a_note(self):
+        out = td._mark_read_scope_empty({"records": []}, "knowledge.article")
+        self.assertIn("daadit_read_scope_note", out)
+
+    def test_non_empty_result_is_unchanged(self):
+        safe = {"records": [{"id": 267}]}
+        self.assertEqual(
+            td._mark_read_scope_empty(safe, "knowledge.article"), safe,
+        )
+
+    def test_error_result_is_unchanged(self):
+        safe = {"records": [], "error": "boom"}
+        self.assertNotIn(
+            "daadit_read_scope_note",
+            td._mark_read_scope_empty(safe, "knowledge.article"),
+        )
