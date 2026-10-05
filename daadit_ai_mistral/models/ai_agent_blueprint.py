@@ -56,7 +56,7 @@ class AIAgentBlueprint(models.Model):
         result = {
             "applied": False, "prompt": False, "models": [],
             "skills": [], "scopes": [], "missing_models": [],
-            "fields": [],
+            "fields": [], "skill_prompts": [],
         }
         applied = self._daadit_bo_blueprint_applied_version()
         if not force and applied >= bo_blueprint.BLUEPRINT_VERSION:
@@ -114,6 +114,14 @@ class AIAgentBlueprint(models.Model):
                 result["skills"].append(skill.code)
         if skill_ids:
             vals["daadit_skill_ids"] = [(4, sid) for sid in skill_ids]
+
+        for xmlid, prompt in bo_blueprint.SKILL_SCHEDULE_PROMPTS.items():
+            skill = self.env.ref(
+                "daadit_ai_mistral.%s" % xmlid, raise_if_not_found=False,
+            )
+            if skill and (skill.schedule_prompt or "").strip() != prompt.strip():
+                skill.sudo().write({"schedule_prompt": prompt.strip()})
+                result["skill_prompts"].append(skill.code)
 
         if vals:
             agent.write(vals)

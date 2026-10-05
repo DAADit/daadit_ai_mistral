@@ -66,7 +66,7 @@
         <field name="required_apps">account</field>
         <field name="required_models">account.move,account.move.line,account.tax</field>
         <field name="capability_codes">search_read,read,fields_get</field>
-        <field name="description">Bereidt controles en aandachtspunten voor; de aangifte wordt nooit door een agent ingediend.</field>
+        <field name="description">Bereidt de btw-aangifte voor: is de periode compleet, kloppen de btw-codes, wat moet er nog recht vóór de deadline, met de cijfers per btw-code; de aangifte wordt nooit door een agent ingediend. De werkwijze komt uit de Bo-blauwdruk.</field>
     </record>
 
     <!-- Finance / de administratie draaiend houden: alleen lezen en melden -->

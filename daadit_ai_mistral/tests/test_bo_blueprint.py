@@ -57,6 +57,15 @@ class TestBoBlueprint(common.TransactionCase):
             bo_blueprint.BLUEPRINT_VERSION,
         )
 
+    def test_werkwijze_btw_komt_uit_de_blauwdruk(self):
+        skill = self.env.ref("daadit_ai_mistral.skill_finance_vat_prep")
+        skill.write({"schedule_prompt": "Oude werkwijze."})
+        with self._alleen_aanwezige_modellen():
+            result = self.Agent._daadit_apply_bo_blueprint()
+        self.assertIn("finance.vat_prep", result["skill_prompts"])
+        self.assertIn("Klaar voor aangifte", skill.schedule_prompt)
+        self.assertIn("Fiscale kalender", self.bo.system_prompt)
+
     def test_handmatige_beperkingen_blijven_staan(self):
         journal = self._model("account.journal")
         self.bo.daadit_blocked_model_ids = [(6, 0, journal.ids)]

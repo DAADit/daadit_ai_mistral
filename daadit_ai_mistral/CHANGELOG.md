@@ -7,6 +7,11 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.10.4.0 — 2026-10-05 — Bo kent de fiscale kalender en bereidt de btw-aangifte echt voor
+
+- **Bo-blauwdruk v2.** De catalogusprompt krijgt het blok *Fiscale kalender*: per ronde weet Bo welke btw- en jaaraangifte voorliggen, de uiterste datum en de fase (rustig → voorbereiden → dringend → laatste dag → te laat), en wat hij in elke fase doet. Indienen doet hij nooit; of er is ingediend weet alleen de klant.
+- **Werkwijze voor `finance.vat_prep`** (`bo_blueprint.SKILL_SCHEDULE_PROMPTS`): periode, volledigheid (concepten, boekdatum na factuurdatum), documenten, btw per code met vergelijking met de vorige periode, niet-afgeletterde bankregels, slotdatums, en een verslag dat begint met "Klaar voor aangifte: ja/nee". De skilldata is noupdate; `_daadit_apply_bo_blueprint()` zet de werkwijze op de skill en meldt dat in `result["skill_prompts"]`.
+
 ## 19.0.10.3.5 — 2026-10-02 — een lege lijst door de leesscope zegt dat ook
 
 - Een zoekopdracht die door de harde leesscope leeg blijft, geeft geen kale `[]` meer terug maar `records: []` met een melding dat records buiten de scope onzichtbaar zijn en niet nagebouwd mogen worden (taak 820, run 1665).

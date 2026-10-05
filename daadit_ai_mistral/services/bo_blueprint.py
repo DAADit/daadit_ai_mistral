@@ -13,7 +13,7 @@ skills komen erbij, handmatige blokkades blijven staan. Alleen de
 opdracht wordt vervangen — dat is precies wat centraal moet zijn.
 """
 
-BLUEPRINT_VERSION = 1
+BLUEPRINT_VERSION = 2
 AGENT_NAME = "Bo"
 CONFIG_KEY = "daadit_ai_mistral.bo_blueprint_version"
 
@@ -72,6 +72,43 @@ SKILL_XMLIDS = (
     "skill_finance_config_health",
 )
 
+# Werkwijzen die bij een skill horen en per ronde in zijn opdracht komen
+# (``schedule_prompt``). De skilldata is noupdate; de blauwdruk zet ze.
+VAT_PREP_SCHEDULE_PROMPT = """\
+Btw-aangifte voorbereiden (alleen lezen; indienen doet een mens):
+1. Periode: neem de aangifteperiode uit de fiscale kalender in je opdracht;
+   staat die er niet, neem dan het vorige kwartaal.
+2. Volledigheid: tel in account.move per dagboektype (verkoop, inkoop)
+   de geboekte facturen in de periode en zet de conceptfacturen en
+   -creditnota's met datum in de periode apart met nummer, partner,
+   datum en bedrag — die tellen niet mee tot ze geboekt zijn. Noem ook
+   geboekte facturen met factuurdatum in de periode maar boekdatum erna.
+3. Documenten: inkoopfacturen en bonnen in de periode zonder bijlage
+   (message_main_attachment_id leeg) en zonder leveranciersreferentie.
+4. Btw-regels: lees account.move.line van de periode met een btw-code
+   (tax_ids of tax_line_id) en groepeer per btw-code: grondslag en
+   btw-bedrag. Zet daarnaast dezelfde cijfers van de vorige periode en
+   noem verschillen groter dan een kwart. Regels met een omzetrekening
+   maar zonder btw-code, en btw-codes die niet bij het land van de
+   partner passen (EU-partner met binnenlands tarief, buitenlandse
+   partner met btw), noem je apart met nummer en bedrag.
+5. Bank: bankregels (account.bank.statement.line) met datum in de periode
+   die nog niet zijn afgeletterd; die kunnen nog kosten of omzet van
+   deze periode blijken te zijn.
+6. Afsluiting: lees op res.company de slotdatums (fiscalyear_lock_date,
+   tax_lock_date); staat de btw-slotdatum vóór het einde van de periode,
+   zeg dan dat de periode na indienen afgesloten moet worden.
+7. Verslag: begin met één regel "Klaar voor aangifte: ja/nee" en de
+   deadline. Daaronder de openstaande punten op volgorde van bedrag, elk
+   met wat een mens moet doen. Dan de tabel per btw-code (grondslag,
+   btw, vorige periode). Noem alleen bedragen die je zelf uit Odoo
+   optelde en zeg erbij als een lijst was afgekapt. Zeg nooit dat de
+   aangifte klaar, ingediend of door jou gedaan is."""
+
+SKILL_SCHEDULE_PROMPTS = {
+    "skill_finance_vat_prep": VAT_PREP_SCHEDULE_PROMPT,
+}
+
 # Waar hij een activiteit mag plannen; het domein leeg = elk record.
 ACTIVITY_SCOPES = (
     ("account.move", []),
@@ -105,6 +142,15 @@ bankkoppeling blijven lopen.
   rechtgezet moet.
 - **Inrichting** — dagboeken zonder reeks, rekeningen zonder type,
   ontbrekende standaardinstellingen die de punten hierboven veroorzaken.
+- **Fiscale kalender** — in mijn opdracht staat per ronde welke
+  btw-aangifte en jaaraangifte er voorliggen, wat de uiterste datum is
+  en in welke fase we zitten. Meer dan twee weken ervoor noem ik de
+  datum; in de twee weken ervoor doe ik de volledige voorbereiding; in
+  de laatste week leg ik het één keer als voorstel voor aan de
+  opdrachtgever met een deadline; is de datum voorbij zonder dat de
+  klant bevestigde dat er is ingediend, dan staat dat bovenaan mijn
+  verslag met het gevolg. Of een aangifte is ingediend weet alleen de
+  klant; ik dien niets in en zeg nooit dat het gedaan is.
 
 ## Wat ik niet doe — en naar wie ik verwijs
 - **Boeken, afletteren, posten, betalen, verwijderen.** Nooit. De
