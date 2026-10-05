@@ -14,10 +14,10 @@ Twee gevallen komen rechtstreeks uit productie:
 * Een agent zonder scoperegels mag niets, ook niet als de prompt hem
   ergens naartoe stuurt.
 """
-from odoo.addons.daadit_ai_mistral.models.ai_agent_activity_scope import (
-    SEED_ACTIVITY_SCOPES,
-)
 from odoo.tests import common, tagged
+
+# v19.0.11.0.0: de drie tests op de SEED_ACTIVITY_SCOPES-tabel verhuisden
+# met die tabel mee naar daadit_ai_personas (tests/test_persona_seeds).
 
 
 @tagged("post_install", "-at_install", "daadit_ai")
@@ -104,53 +104,3 @@ class TestActivityScope(common.TransactionCase):
         self.assertFalse(blocked)
         self.assertIn("project.task", reason)
 
-    def test_every_finance_role_has_exactly_one_postbox(self):
-        """De vier rollen onder Floris leveren elk op één artikel af.
-
-        Een tweede artikel per rol zou betekenen dat niemand weet waar
-        het werk van die dag staat; dat is precies wat de postbus moet
-        voorkomen.
-        """
-        for name in ("Bo", "Dirk", "Marit", "Coen"):
-            lines = SEED_ACTIVITY_SCOPES[name]
-            articles = [
-                domain for model, domain in lines
-                if model == "knowledge.article"
-            ]
-            self.assertEqual(
-                len(articles), 1,
-                "%s hoort precies één postbusartikel te hebben" % name,
-            )
-            self.assertTrue(
-                articles[0],
-                "%s mag niet op elk artikel schrijven" % name,
-            )
-
-    def test_no_finance_role_may_touch_a_booking_line_or_a_payment(self):
-        """Boeken en betalen blijft mensenwerk.
-
-        De agents leveren lijsten en concepten op; zodra een van hen een
-        boekingsregel of een betaling als bestemming krijgt, is de grens
-        tussen voorbereiden en uitvoeren weg.
-        """
-        forbidden = {
-            "account.move.line", "account.payment", "account.full.reconcile",
-            "account.partial.reconcile", "account.bank.statement.line",
-        }
-        for name in ("Bo", "Dirk", "Marit", "Coen"):
-            models_for_role = {model for model, _ in SEED_ACTIVITY_SCOPES[name]}
-            self.assertFalse(
-                models_for_role & forbidden,
-                "%s heeft een bestemming die uitvoert in plaats van "
-                "voorbereidt: %s" % (name, models_for_role & forbidden),
-            )
-
-    def test_seeding_is_idempotent_and_never_widens(self):
-        """De seeding mag een handmatige aanscherping niet terugdraaien."""
-        before = self.lux.daadit_activity_scope_ids.mapped("record_domain")
-        self.Agent._daadit_seed_activity_scopes()
-        self.Agent._daadit_seed_activity_scopes()
-        self.assertEqual(
-            self.lux.daadit_activity_scope_ids.mapped("record_domain"),
-            before,
-        )

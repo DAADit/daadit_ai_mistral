@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Bo krijgt de hele boekhoudset in plaats van alleen grootboekcontrole.
+"""Bo krijgt de boekhoudset (historisch).
 
-Additief, net als de eerste seed: skills die een mens erbij koos blijven
-staan, en een database zonder een agent 'Bo' slaat hem over.
+v19.0.11.0.0: de persona-seeds verhuisden naar ``daadit_ai_personas``.
+Deze migratie draait alleen nog als dat module de methode(n) al op
+``ai.agent`` heeft gezet (personas geinstalleerd); anders is er niets
+te seeden en slaat hij stil over. Upgradepaden van voor de split
+blijven zo werken zonder import van verdwenen code.
 """
 from odoo import SUPERUSER_ID, api
 
@@ -11,4 +14,7 @@ def migrate(cr, version):
     if not version:
         return
     env = api.Environment(cr, SUPERUSER_ID, {})
-    env["ai.agent"]._daadit_seed_skills()
+    agent = env["ai.agent"]
+    for method in ['_daadit_seed_skills']:
+        if hasattr(agent, method):
+            getattr(agent, method)()
