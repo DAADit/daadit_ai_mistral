@@ -7,7 +7,12 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
-## 19.0.11.0.4 — 2026-10-06 — een verkeerd genoemde tool is geen kapotte run
+## 19.0.11.1.0 / 19.0.10.4.0 — 2026-10-07 — de toolaanroepen draaien in daadit_ai_agentic_system
+
+- `services/tool_dispatch.py` is verhuisd naar `daadit_ai_agentic_system`; deze module hangt daar nu van af. `daadit_ai_mistral.services.tool_dispatch` blijft naar de gedeelde dispatcher wijzen.
+- De instellingen `max_tool_result_chars` en `log_tool_results` heten nu `daadit_ai_agentic_system.*`; de bestaande waarde wordt bij installatie overgenomen.
+
+## 19.0.11.0.4 / 19.0.10.3.6 — 2026-10-06 — een verkeerd genoemde tool is geen kapotte run
 
 - Roept een collega het verantwoordingsblok aan als tool (`claims`), dan komt het blok terug met de vraag het in het eindantwoord te zetten, in plaats van `Unknown tool: claims` (Hilda, 15 runs).
 - `ir_actions_server_<x>` waar alleen één eigen tool op `_<x>` eindigt, is die tool: `ir_actions_server_zoeken` bij Bo is "AI: Administratie Zoeken" (`_unique_suffix_action`). Passen er twee, dan blijft het een onbekende tool. Op de 19.0.10-lijn: 19.0.10.3.6.
