@@ -313,6 +313,47 @@ def _action_name_slugs(name):
     return slugs
 
 
+# Het verantwoordingsblok (```claims) hoort in het eindantwoord, maar een
+# model roept het soms aan als tool. Dat is geen fout van de collega: het
+# blok komt terug, met de vraag het in het antwoord te zetten.
+CLAIMS_PSEUDO_TOOLS = ("claims", "verantwoording")
+
+
+def claims_pseudo_tool_result(fn_name, kwargs):
+    """Het antwoord op een ``claims``-aanroep, of ``None`` als het een
+    gewone tool is."""
+    if (fn_name or "").strip().lower() not in CLAIMS_PSEUDO_TOOLS:
+        return None
+    claims = kwargs.get("claims") if isinstance(kwargs, dict) else kwargs
+    if not isinstance(claims, list):
+        claims = []
+    block = "```claims\n%s\n```" % json.dumps(claims, ensure_ascii=False)
+    return {
+        "ok": True,
+        "not_a_tool": True,
+        "note": (
+            "claims is geen tool. Zet dit blok letterlijk aan het eind "
+            "van je eindantwoord; roep het niet nog een keer aan."
+        ),
+        "claims_block": block,
+    }
+
+
+def _unique_suffix_action(candidates, bare):
+    """De enige eigen tool waarvan de naam op ``_<bare>`` eindigt.
+
+    ``ir_actions_server_zoeken`` bij een collega die alleen
+    "AI: Administratie Zoeken" heeft, is die tool. Zijn er twee die
+    passen, dan gokken we niet.
+    """
+    suffix = "_" + bare
+    hits = [
+        act for act in candidates
+        if any(slug.endswith(suffix) for slug in _action_name_slugs(act.name))
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _agent_tool_actions(agent):
     """The server actions this agent may invoke = ``use_in_ai``
     ``tool_ids`` across its topics, as a (sudo) recordset for metadata
@@ -608,6 +649,9 @@ def _resolve_tool_action(agent, fn_name):
                 for act in candidates:
                     if bare in _action_name_slugs(act.name):
                         return act.with_env(agent.env)
+                hit = _unique_suffix_action(candidates, bare)
+                if hit is not None:
+                    return hit.with_env(agent.env)
     except Exception:  # noqa: BLE001
         _logger.exception(
             "daadit_ai_mistral.tool_dispatch: action resolution raised "
@@ -2649,6 +2693,10 @@ def run_tool_call(agent, tool_call):
             f"Pass arguments as a JSON object whose values are typed "
             f"(arrays as JSON arrays, not strings)."
         )}
+
+    pseudo = claims_pseudo_tool_result(fn_name, kwargs)
+    if pseudo is not None:
+        return pseudo
 
     action = _resolve_tool_action(agent, fn_name)
     method_name = _tool_name_to_method(fn_name)
