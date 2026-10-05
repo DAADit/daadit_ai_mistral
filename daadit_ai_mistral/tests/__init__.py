@@ -19,3 +19,4 @@ from . import test_bo_blueprint
 from . import test_fallback_signal
 from . import test_embedding_width
 from . import test_log_cursor
+from . import test_toolnaam_herstel

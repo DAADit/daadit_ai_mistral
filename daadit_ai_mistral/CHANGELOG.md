@@ -7,6 +7,11 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 19.0.10.3.6 — 2026-10-06 — een verkeerd genoemde tool is geen kapotte run
+
+- Roept een collega het verantwoordingsblok aan als tool (`claims`), dan komt het blok terug met de vraag het in het eindantwoord te zetten, in plaats van `Unknown tool: claims` (Hilda, 15 runs).
+- `ir_actions_server_<x>` waar alleen één eigen tool op `_<x>` eindigt, is die tool: `ir_actions_server_zoeken` bij Bo is "AI: Administratie Zoeken" (`_unique_suffix_action`). Passen er twee, dan blijft het een onbekende tool.
+
 ## 19.0.10.3.5 — 2026-10-02 — een lege lijst door de leesscope zegt dat ook
 
 - Een zoekopdracht die door de harde leesscope leeg blijft, geeft geen kale `[]` meer terug maar `records: []` met een melding dat records buiten de scope onzichtbaar zijn en niet nagebouwd mogen worden (taak 820, run 1665).
