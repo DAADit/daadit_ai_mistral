@@ -11,6 +11,18 @@ Sister to ``daadit_mcp_multi_tenant.res.partner.action_mcp_gdpr_erase``
 — the two modules each provide their own button for clarity. If both
 modules are installed the partner form has two buttons; running both
 covers the full DAADit footprint.
+
+De knop op de relatiekaart is op 6 oktober 2026 weggehaald: elke module
+maakte daarvoor zijn eigen ``<header>`` boven de sheet (de standaard
+``res.partner``-form heeft er geen), wat vier gekleurde balken op elke
+contactkaart opleverde. De wissing loopt nu via ``daadit.gdpr.erase``
+in ``daadit_mcp_multi_tenant`` — tandwielmenu op de relatiekaart, alle
+sporen in één venster met de aantallen erbij. Deze methode blijft de
+uitvoering doen en wordt daar op naam aangeroepen; hernoem hem niet.
+
+Let op: de rechtencontrole zat in het ``groups``-attribuut van die
+knop en is met de knop verdwenen. Ze staat nu in de wizard; roep deze
+methode dus niet aan zonder die controle.
 """
 import logging
 
