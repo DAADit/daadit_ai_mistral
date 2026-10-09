@@ -72,6 +72,16 @@ _ASK_AGENT_NAME_KEYS = (
 )
 
 
+def _add_usage(total, response):
+    """Tel het verbruik van één Mistral-aanroep op bij ``total``."""
+    usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
+    for key in ("prompt_tokens", "completion_tokens"):
+        try:
+            total[key] += int(usage.get(key) or 0)
+        except (TypeError, ValueError):
+            pass
+
+
 def pad_embedding_response(response, width):
     """Zero-pad every vector in an /embeddings response to ``width``."""
     try:
@@ -2576,6 +2586,13 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     except Exception:  # noqa: BLE001
         _status_channel_id = False
 
+    # v19.0.10.5.0: tokens over ALLE rondes. Mistral meldt per aanroep
+    # alleen het verbruik van die aanroep; voorheen bewaarden we alleen
+    # dat van de laatste, terwijl elke ronde het hele gesprek opnieuw
+    # stuurt. Een run van 15 rondes werd daardoor ~10x te laag geteld
+    # (helpdesk-runs 2452-2455), en de budgetgrens met hem.
+    usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
+
     while iteration < MAX_ITER:
         # v19.0.4.8.0: hard per-run time budget (Fase 0-gate). Callers
         # that own a whole run (daadit_ai_agent_schedule) set
@@ -2695,6 +2712,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             tool_choice=active_tool_choice,
             extra=chat_extra,
         )
+        _add_usage(usage_total, response)
         choice = (response.get("choices") or [{}])[0]
         msg = (choice.get("message") if isinstance(choice, dict) else None) or {}
         tool_calls = msg.get("tool_calls") or []
@@ -3001,7 +3019,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 client, model, conversation, en_message,
             )
         ]
-        usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
+        usage = dict(usage_total)
         try:
             ch = api_self.env.context.get("discuss_channel")
             channel_id = ch.id if ch and hasattr(ch, "id") else (
@@ -3028,7 +3046,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
             )
         return adapted
 
-    usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
+    usage = dict(usage_total)
 
     # If the loop short-circuited on admin-policy denial, format the
     # user-facing message NOW and bypass Mistral's interpretation

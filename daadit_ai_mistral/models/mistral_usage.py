@@ -30,10 +30,20 @@ _logger = logging.getLogger(__name__)
 
 # Pricing snapshot — USD per 1,000,000 tokens (input, output).
 # Source: mistral.ai pricing page. May lag — override via ICP.
+# v19.0.10.5.0: bijgewerkt naar de modellen waar de -latest-namen nu naar
+# wijzen (docs.mistral.ai, okt 2026): medium-latest = Medium 3.5 (2604),
+# large-latest = Large 3 (2512), small-latest = Small 4 (2603). Voorheen
+# stonden hier de prijzen van Medium 3.1 en Large 2: Medium werd 4x te
+# laag en Large 4x te hoog geteld.
 _PRICING_USD_PER_1M = {
-    "mistral-large-latest":   (2.0, 6.0),
-    "mistral-medium-latest":  (0.4, 2.0),
-    "mistral-small-latest":   (0.2, 0.6),
+    "mistral-large-latest":   (0.5, 1.5),
+    "mistral-large-2512":     (0.5, 1.5),
+    "mistral-medium-latest":  (1.5, 7.5),
+    "mistral-medium-2604":    (1.5, 7.5),
+    "mistral-medium-3-5":     (1.5, 7.5),
+    "mistral-medium-2508":    (0.4, 2.0),
+    "mistral-small-latest":   (0.15, 0.6),
+    "mistral-small-2603":     (0.15, 0.6),
     "codestral-latest":       (0.2, 0.6),
     "pixtral-large-latest":   (2.0, 6.0),
     "ministral-8b-latest":    (0.1, 0.1),

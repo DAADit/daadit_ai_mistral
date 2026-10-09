@@ -20,3 +20,4 @@ from . import test_fallback_signal
 from . import test_embedding_width
 from . import test_log_cursor
 from . import test_toolnaam_herstel
+from . import test_usage_sum
