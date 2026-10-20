@@ -4,7 +4,11 @@
 from . import diagnostics  # noqa: F401  (side-effect import)
 from . import mistral_client
 from . import registry_patches
-from . import tool_dispatch
+# De toolaanroepen voert daadit_ai_agentic_system uit; deze naam blijft
+# daarheen wijzen voor wie hem al importeert.
+import sys as _sys
+from odoo.addons.daadit_ai_agentic_system.services import tool_dispatch
+_sys.modules[__name__ + ".tool_dispatch"] = tool_dispatch
 from . import llm_api_patch
 
 # Best-effort: try to install the LLMApiService patch right now, at import
