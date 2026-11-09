@@ -31,3 +31,40 @@ class TestUsageSum(common.BaseCase):
         table = mistral_usage._PRICING_USD_PER_1M
         self.assertEqual(table["mistral-medium-latest"], (1.5, 7.5))
         self.assertEqual(table["mistral-large-latest"], (0.5, 1.5))
+
+
+@tagged("post_install", "-at_install")
+class TestOnbekendModel(common.TransactionCase):
+    """Een model zonder prijs telt niet als gratis (v19.0.10.5.1)."""
+
+    def _laatste(self, model):
+        return self.env["daadit_ai_mistral.usage"].search(
+            [("model", "=", model)], order="id desc", limit=1)
+
+    def test_onbekend_model_krijgt_het_duurste_tarief(self):
+        self.env["daadit_ai_mistral.usage"].record_usage(
+            model="mistral-bestaat-niet-9", prompt_tokens=1_000_000,
+            completion_tokens=0,
+        )
+        row = self._laatste("mistral-bestaat-niet-9")
+        duurste_in, _uit = mistral_usage._fallback_unit_prices()
+        self.assertTrue(row.price_fallback)
+        self.assertAlmostEqual(row.estimated_cost_usd, duurste_in, places=4)
+        self.assertGreater(row.estimated_cost_usd, 0.0)
+
+    def test_bekend_model_houdt_zijn_eigen_prijs(self):
+        self.env["daadit_ai_mistral.usage"].record_usage(
+            model="mistral-large-latest", prompt_tokens=1_000_000,
+            completion_tokens=0,
+        )
+        row = self._laatste("mistral-large-latest")
+        self.assertFalse(row.price_fallback)
+        self.assertAlmostEqual(row.estimated_cost_usd, 0.5, places=4)
+
+    def test_embedding_met_alleen_een_invoerprijs_is_bekend(self):
+        self.env["daadit_ai_mistral.usage"].record_usage(
+            kind="embedding", model="mistral-embed",
+            prompt_tokens=1_000_000, completion_tokens=0,
+        )
+        row = self._laatste("mistral-embed")
+        self.assertFalse(row.price_fallback)

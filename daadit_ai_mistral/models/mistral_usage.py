@@ -73,6 +73,35 @@ def _get_unit_price(env, model_id, kind):
     return pair[0] if kind == "input" else pair[1]
 
 
+def _fallback_unit_prices():
+    """Het duurste tarief dat we kennen, per richting.
+
+    Voor een model dat niet in de tabel staat. In november 2026 liepen
+    53 regels op ``mistral-large-4-0`` (drie miljoen tokens) op 0,00
+    dollar uit omdat die naam hier ontbrak. Te hoog tellen laat een
+    budgetgrens te vroeg dichtgaan en dat merkt iemand; nul tellen merkt
+    niemand tot de rekening van de provider komt.
+    """
+    return (
+        max(pair[0] for pair in _PRICING_USD_PER_1M.values()),
+        max(pair[1] for pair in _PRICING_USD_PER_1M.values()),
+    )
+
+
+def _resolve_unit_prices(env, model_id):
+    """``(input, output, bekend)`` voor het vastleggen van verbruik.
+
+    ``bekend`` is False als geen van beide richtingen een prijs heeft;
+    dan komen de tarieven uit ``_fallback_unit_prices``.
+    """
+    unit_in = _get_unit_price(env, model_id or "", "input")
+    unit_out = _get_unit_price(env, model_id or "", "output")
+    if unit_in or unit_out:
+        return unit_in, unit_out, True
+    fallback_in, fallback_out = _fallback_unit_prices()
+    return fallback_in, fallback_out, False
+
+
 class MistralUsage(models.Model):
     _name = "daadit_ai_mistral.usage"
     _description = "Mistral API Usage Record"
@@ -160,6 +189,14 @@ class MistralUsage(models.Model):
         compute="_compute_estimated_cost",
         store=True,
     )
+    price_fallback = fields.Boolean(
+        string="Prijs geschat",
+        index=True,
+        help="Het model stond niet in de prijstabel; er is gerekend met "
+             "het duurste tarief dat we kennen. Zet de echte prijs in "
+             "de tabel of als systeemparameter "
+             "(daadit_ai_mistral.price.<model>.input / .output).",
+    )
 
     # ------------------------------------------------------------------
     @api.depends("prompt_tokens", "completion_tokens")
@@ -193,8 +230,14 @@ class MistralUsage(models.Model):
         so we wrap creation in a savepoint and swallow exceptions.
         """
         try:
-            unit_in = _get_unit_price(self.env, model or "", "input")
-            unit_out = _get_unit_price(self.env, model or "", "output")
+            unit_in, unit_out, known = _resolve_unit_prices(
+                self.env, model or "")
+            if not known:
+                _logger.warning(
+                    "daadit_ai_mistral.usage: geen prijs bekend voor model "
+                    "%s; gerekend met het duurste tarief (%s / %s USD per "
+                    "1M). Vul de prijstabel aan.", model, unit_in, unit_out,
+                )
             vals = {
                 "kind": kind,
                 "model": model or "?",
@@ -207,6 +250,7 @@ class MistralUsage(models.Model):
                 "error": (error or "")[:8000] if error else False,
                 "unit_input_usd": unit_in,
                 "unit_output_usd": unit_out,
+                "price_fallback": not known,
                 "depth": depth or 0,
                 "turn_uuid": turn_uuid or False,
             }
