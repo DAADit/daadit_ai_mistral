@@ -119,7 +119,7 @@ class TestAnswerSanitizer(common.TransactionCase):
         self.assertEqual(out, [_EMPTY_AFTER_STRIP])
 
     def test_compact_mode_shortens_long_chat_answer(self):
-        text = ("Regel met details.\n" * 220).strip()
+        text = "\n".join(f"Regel met details {n}." for n in range(220))
         out = _clean_adapted([text], "test", compact=True)
         self.assertLess(len(out[0]), len(text))
         self.assertIn("Verder ingekort voor de chat", out[0])
