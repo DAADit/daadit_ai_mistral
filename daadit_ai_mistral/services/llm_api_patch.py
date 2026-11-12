@@ -1901,6 +1901,26 @@ def _copied_system_text_offset(text, system_messages):
     return None
 
 
+def _repeated_sentences_offset(text):
+    """Preserve the first sentence when the model emits it in a loop."""
+    previous = ""
+    count = 0
+    duplicate_start = 0
+    for match in re.finditer(r"[^.!?\n]+[.!?]+(?=\s|$)", text):
+        sentence = " ".join(_WORD_RE.findall(match.group().casefold()))
+        if not sentence:
+            continue
+        if sentence != previous:
+            previous, count = sentence, 1
+            continue
+        count += 1
+        if count == 2:
+            duplicate_start = match.start()
+        elif count == 3:
+            return duplicate_start
+    return None
+
+
 def _strip_runaway_and_leaks(text, system_messages=(), chat=False):
     """Snij een doorgeslagen staart en een gelekt tool-resultaat van een
     antwoord af.
@@ -1950,6 +1970,9 @@ def _strip_runaway_and_leaks(text, system_messages=(), chat=False):
                 # Keep a legitimate leading "Final answer:" heading.
                 marker = first if text[:first.start()].strip() else second
                 cut = marker.start()
+        repeated = _repeated_sentences_offset(text[:cut])
+        if repeated is not None:
+            cut = repeated
         copied = _copied_system_text_offset(text[:cut], system_messages)
         if copied is not None:
             # Drop the sentence that introduced the copied instructions too.

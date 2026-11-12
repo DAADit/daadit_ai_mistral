@@ -153,3 +153,10 @@ class TestAnswerSanitizer(common.TransactionCase):
     def test_single_final_answer_heading_is_preserved(self):
         text = "**Eindantwoord:** 23."
         self.assertEqual(_clean_adapted([text], "test", compact=True), [text])
+
+    def test_chat_keeps_one_copy_of_a_sentence_loop(self):
+        text = "Het antwoord is 23. Het antwoord is 23. Het antwoord is 23."
+        self.assertEqual(
+            _clean_adapted([text], "test", compact=True),
+            ["Het antwoord is 23."],
+        )
