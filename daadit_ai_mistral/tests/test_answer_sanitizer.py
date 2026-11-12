@@ -11,6 +11,7 @@ from odoo.tests import common, tagged
 from odoo.addons.daadit_ai_mistral.services.llm_api_patch import (
     _EMPTY_AFTER_STRIP,
     _clean_adapted,
+    _public_chat_history,
     _strip_runaway_and_leaks,
 )
 
@@ -172,3 +173,10 @@ class TestAnswerSanitizer(common.TransactionCase):
             _clean_adapted([text], "test", public=True),
             [_EMPTY_AFTER_STRIP],
         )
+
+
+    def test_public_history_drops_old_reply_that_copied_a_marker(self):
+        user = {"role": "user", "content": "Waar kan ik jullie bereiken?"}
+        broken = {"role": "assistant", "content": "27 — Interne testmarkering."}
+        valid = {"role": "assistant", "content": "Via de contactpagina."}
+        self.assertEqual(_public_chat_history([user, broken, valid]), [user, valid])

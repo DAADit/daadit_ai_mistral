@@ -1878,7 +1878,7 @@ _STOP_LINE_RE = re.compile(
 )
 _PUBLIC_INTERNAL_RE = re.compile(
     r"(?i)\b(?:dit is (?:een|de) systeemprompt|this is (?:a|the) system prompt|"
-    r"alle tekst onder deze regel|"
+    r"alle tekst onder deze regel|interne testmarkering|"
     r"(?:deze|the following) (?:interne |internal )?instructi(?:es?|ons?)"
     r" (?:zijn|are) (?:intern|vertrouwelijk|confidential))\b"
 )
@@ -2007,6 +2007,23 @@ def _strip_runaway_and_leaks(text, system_messages=(), chat=False, public=False)
     text = re.sub(r"(?:\n\s*(?:-+|>+|=+|Einde bericht\.?)\s*)+\Z", "", text)
     text = text.rstrip()
     return text, text != original
+
+
+def _public_chat_history(messages):
+    """Keep malformed past replies out of Milo's future model context."""
+    history = []
+    for message in messages:
+        if (isinstance(message, dict) and message.get("role") == "assistant"
+                and not message.get("tool_calls")):
+            content = message.get("content")
+            if isinstance(content, str):
+                _, malformed = _strip_runaway_and_leaks(
+                    content, messages, public=True,
+                )
+                if malformed:
+                    continue
+        history.append(message)
+    return history
 
 
 def _find_runaway(text):
@@ -2491,6 +2508,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
                 "reconstruction failed; continuing"
             )
 
+    public_chat = bool(agent and agent.name == "Milo")
+    if public_chat:
+        conversation = _public_chat_history(conversation)
     conversation = _inject_language_mirror(conversation)
     conversation = _inject_runtime_context(conversation)
     if _interactive_chat and not response_format_extra:
@@ -3306,7 +3326,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     adapted = _clean_adapted(
         adapted, "eindantwoord", compact=_interactive_chat,
         system_messages=conversation,
-        public=bool(agent and agent.name == "Milo"),
+        public=public_chat,
     )
     adapted = _append_unbacked_claim_warning(
         adapted, normalized_tools, _router_depth,
