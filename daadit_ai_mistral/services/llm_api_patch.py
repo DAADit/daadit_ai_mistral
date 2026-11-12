@@ -1876,6 +1876,13 @@ _STOP_LINE_RE = re.compile(
     r"(?im)^[\s>*#—–_-]*(?:stop|einde|end of (?:response|message))"
     r"\s*[.*—–>*_-]*$"
 )
+_PUBLIC_INTERNAL_RE = re.compile(
+    r"(?i)\b(?:dit is (?:een|de) systeemprompt|this is (?:a|the) system prompt|"
+    r"alle tekst onder deze regel|"
+    r"(?:deze|the following) (?:interne |internal )?instructi(?:es?|ons?)"
+    r" (?:zijn|are) (?:intern|vertrouwelijk|confidential))\b"
+)
+_PUBLIC_MARKER_RE = re.compile(r"(?im)^[\s>*#—–_=-]*(?:stop|einde)\b")
 _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
@@ -1921,7 +1928,7 @@ def _repeated_sentences_offset(text):
     return None
 
 
-def _strip_runaway_and_leaks(text, system_messages=(), chat=False):
+def _strip_runaway_and_leaks(text, system_messages=(), chat=False, public=False):
     """Snij een doorgeslagen staart en een gelekt tool-resultaat van een
     antwoord af.
 
@@ -1958,7 +1965,16 @@ def _strip_runaway_and_leaks(text, system_messages=(), chat=False):
     runaway_hit = _find_runaway(text)
     if runaway_hit is not None and runaway_hit < cut:
         cut = runaway_hit
-    if chat:
+    if public:
+        internal = _PUBLIC_INTERNAL_RE.search(text, 0, cut)
+        if internal:
+            line = text.rfind("\n", 0, internal.start())
+            cut = line + 1
+        markers = _PUBLIC_MARKER_RE.finditer(text, 0, cut)
+        first = next(markers, None)
+        if first and next(markers, None):
+            cut = first.start()
+    if chat or public:
         internal = _INTERNAL_LINE_RE.search(text, 0, cut)
         if internal:
             cut = internal.start()
@@ -2107,7 +2123,9 @@ def _append_unbacked_claim_warning(adapted, normalized_tools, router_depth):
     return adapted
 
 
-def _clean_adapted(adapted, where, compact=False, system_messages=()):
+def _clean_adapted(
+    adapted, where, compact=False, system_messages=(), public=False,
+):
     """Pas :func:`_strip_runaway_and_leaks` toe op wat de gebruiker te
     zien krijgt. Werkt zowel op losse strings als op
     ``{role, content}``-dicts, omdat beide vormen door deze module
@@ -2117,7 +2135,7 @@ def _clean_adapted(adapted, where, compact=False, system_messages=()):
     for item in adapted or []:
         if isinstance(item, str):
             cleaned, trimmed = _strip_runaway_and_leaks(
-                item, system_messages, chat=compact,
+                item, system_messages, chat=compact, public=public,
             )
             cleaned = cleaned or (_EMPTY_AFTER_STRIP if trimmed else cleaned)
             if compact and cleaned:
@@ -2125,7 +2143,7 @@ def _clean_adapted(adapted, where, compact=False, system_messages=()):
                 trimmed = trimmed or compacted
         elif isinstance(item, dict) and isinstance(item.get("content"), str):
             cleaned_text, trimmed = _strip_runaway_and_leaks(
-                item["content"], system_messages, chat=compact,
+                item["content"], system_messages, chat=compact, public=public,
             )
             if trimmed and not cleaned_text:
                 cleaned_text = _EMPTY_AFTER_STRIP
@@ -3288,6 +3306,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     adapted = _clean_adapted(
         adapted, "eindantwoord", compact=_interactive_chat,
         system_messages=conversation,
+        public=bool(agent and agent.name == "Milo"),
     )
     adapted = _append_unbacked_claim_warning(
         adapted, normalized_tools, _router_depth,

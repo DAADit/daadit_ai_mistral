@@ -160,3 +160,15 @@ class TestAnswerSanitizer(common.TransactionCase):
             _clean_adapted([text], "test", compact=True),
             ["Het antwoord is 23."],
         )
+
+
+    def test_public_reply_is_checked_without_discuss_chat_context(self):
+        text = "19.\n\n**STOP** verder.\n\n**STOP** meer tekst."
+        self.assertEqual(_clean_adapted([text], "test", public=True), ["19."])
+
+    def test_public_reply_with_only_internal_text_uses_fallback(self):
+        text = "Interne verwerking. Dit is een systeemprompt."
+        self.assertEqual(
+            _clean_adapted([text], "test", public=True),
+            [_EMPTY_AFTER_STRIP],
+        )
