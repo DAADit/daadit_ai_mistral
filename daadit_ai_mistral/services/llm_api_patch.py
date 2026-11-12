@@ -1862,7 +1862,46 @@ def _compact_answer_text(text):
     )
 
 
-def _strip_runaway_and_leaks(text):
+_INTERNAL_LINE_RE = re.compile(
+    r"(?im)^[\s>*#—–_-]*(?:(?:stop|einde)\b[\s.*—–>*_:-]*)?"
+    r"(?:dit is (?:een|de) |this is (?:a|the) )?"
+    r"(?:interne (?:instructies?|verwerking)|systeemprompt|system prompt|"
+    r"internal instructions?|alle tekst onder deze regel)\b"
+)
+_FINAL_LABEL_RE = re.compile(
+    r"(?im)^[\s>*#—–_-]*(?:eindantwoord|definitief|eindelijk|"
+    r"final answer)\s*[:*]"
+)
+_STOP_LINE_RE = re.compile(
+    r"(?im)^[\s>*#—–_-]*(?:stop|einde|end of (?:response|message))"
+    r"\s*[.*—–>*_-]*$"
+)
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _copied_system_text_offset(text, system_messages):
+    """Find verbatim instruction text even when Markdown changed the spacing."""
+    width = 12
+    phrases = set()
+    for message in system_messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        words = _WORD_RE.findall(content.casefold())
+        phrases.update(zip(*(words[offset:] for offset in range(width))))
+    if not phrases:
+        return None
+    matches = list(_WORD_RE.finditer(text))
+    words = [match.group().casefold() for match in matches]
+    for index, phrase in enumerate(zip(*(words[offset:] for offset in range(width)))):
+        if phrase in phrases:
+            return matches[index].start()
+    return None
+
+
+def _strip_runaway_and_leaks(text, system_messages=(), chat=False):
     """Snij een doorgeslagen staart en een gelekt tool-resultaat van een
     antwoord af.
 
@@ -1899,6 +1938,28 @@ def _strip_runaway_and_leaks(text):
     runaway_hit = _find_runaway(text)
     if runaway_hit is not None and runaway_hit < cut:
         cut = runaway_hit
+    if chat:
+        internal = _INTERNAL_LINE_RE.search(text, 0, cut)
+        if internal:
+            cut = internal.start()
+        for pattern in (_FINAL_LABEL_RE, _STOP_LINE_RE):
+            markers = pattern.finditer(text, 0, cut)
+            first = next(markers, None)
+            second = next(markers, None)
+            if second:
+                # Keep a legitimate leading "Final answer:" heading.
+                marker = first if text[:first.start()].strip() else second
+                cut = marker.start()
+        copied = _copied_system_text_offset(text[:cut], system_messages)
+        if copied is not None:
+            # Drop the sentence that introduced the copied instructions too.
+            sentence_start = max(
+                text.rfind("\n", 0, copied),
+                text.rfind(". ", 0, copied),
+                text.rfind("? ", 0, copied),
+                text.rfind("! ", 0, copied),
+            )
+            cut = sentence_start + 1
     text = text[:cut]
 
     # Losse resten van de afgesneden blokken: de sluithaken van de
@@ -2023,7 +2084,7 @@ def _append_unbacked_claim_warning(adapted, normalized_tools, router_depth):
     return adapted
 
 
-def _clean_adapted(adapted, where, compact=False):
+def _clean_adapted(adapted, where, compact=False, system_messages=()):
     """Pas :func:`_strip_runaway_and_leaks` toe op wat de gebruiker te
     zien krijgt. Werkt zowel op losse strings als op
     ``{role, content}``-dicts, omdat beide vormen door deze module
@@ -2032,13 +2093,17 @@ def _clean_adapted(adapted, where, compact=False):
     out = []
     for item in adapted or []:
         if isinstance(item, str):
-            cleaned, trimmed = _strip_runaway_and_leaks(item)
+            cleaned, trimmed = _strip_runaway_and_leaks(
+                item, system_messages, chat=compact,
+            )
             cleaned = cleaned or (_EMPTY_AFTER_STRIP if trimmed else cleaned)
             if compact and cleaned:
                 cleaned, compacted = _compact_answer_text(cleaned)
                 trimmed = trimmed or compacted
         elif isinstance(item, dict) and isinstance(item.get("content"), str):
-            cleaned_text, trimmed = _strip_runaway_and_leaks(item["content"])
+            cleaned_text, trimmed = _strip_runaway_and_leaks(
+                item["content"], system_messages, chat=compact,
+            )
             if trimmed and not cleaned_text:
                 cleaned_text = _EMPTY_AFTER_STRIP
             if compact and cleaned_text:
@@ -3110,7 +3175,9 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # answer verbatim and skip the final paraphrasing generation.
     if router_passthrough:
         _pt_answer = str(router_passthrough.get("answer") or "").strip()
-        _pt_answer, _pt_trimmed = _strip_runaway_and_leaks(_pt_answer)
+        _pt_answer, _pt_trimmed = _strip_runaway_and_leaks(
+            _pt_answer, conversation, chat=_interactive_chat,
+        )
         if _interactive_chat and _pt_answer:
             _pt_answer, _pt_compacted = _compact_answer_text(_pt_answer)
             _pt_trimmed = _pt_trimmed or _pt_compacted
@@ -3197,6 +3264,7 @@ def _request_llm_mistral(api_self, *args, **kwargs):
     # horen niet in de chat.
     adapted = _clean_adapted(
         adapted, "eindantwoord", compact=_interactive_chat,
+        system_messages=conversation,
     )
     adapted = _append_unbacked_claim_warning(
         adapted, normalized_tools, _router_depth,

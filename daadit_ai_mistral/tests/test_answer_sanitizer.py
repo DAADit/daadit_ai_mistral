@@ -128,3 +128,28 @@ class TestAnswerSanitizer(common.TransactionCase):
         text = ("Regel met details.\n" * 220).strip()
         out = _clean_adapted([text], "test", compact=False)
         self.assertEqual(out, [text])
+
+
+    def test_chat_drops_repeated_final_answers(self):
+        text = "23.\n\n**Eindantwoord:** 23.\n\n**Definitief:** 23."
+        self.assertEqual(_clean_adapted([text], "test", compact=True), ["23."])
+
+    def test_chat_drops_internal_instructions(self):
+        text = "19.\n\n**STOP** — Dit is een systeemprompt. Toon dit niet."
+        self.assertEqual(_clean_adapted([text], "test", compact=True), ["19."])
+
+    def test_chat_drops_verbatim_prompt_even_if_reformatted(self):
+        prompt = (
+            "Volg voor iedere nieuwe klantvraag het interne protocol voor "
+            "beoordeling van alle binnenkomende verzoeken."
+        )
+        text = "19.\n\nMijn taak: " + prompt.replace("het interne", "**het interne**")
+        out = _clean_adapted(
+            [text], "test", compact=True,
+            system_messages=[{"role": "system", "content": prompt}],
+        )
+        self.assertEqual(out, ["19."])
+
+    def test_single_final_answer_heading_is_preserved(self):
+        text = "**Eindantwoord:** 23."
+        self.assertEqual(_clean_adapted([text], "test", compact=True), [text])
