@@ -170,7 +170,7 @@ def _tool_name_to_method(tool_name: str) -> str:
     return _AI_TOOL_PREFIX + tool_name
 
 
-# Stock ai_app names a tool after its action's xml-id suffix
+# Stock ai_agentic (ai_app in Odoo 19) names a tool after its action's xml-id suffix
 # (``ir_actions_server_search``) or ``action_<id>`` when the action has
 # no xml-id (custom tools created in the UI).
 _ACTION_ID_RE = re.compile(r"^action_(\d+)$")

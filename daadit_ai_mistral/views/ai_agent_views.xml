@@ -2,7 +2,7 @@
 <odoo>
 
     <!--
-        Inherit the stock ai.agent form (ai_app.ai_agent_view_form) and
+        Inherit the stock ai.agent form (ai_agentic.ai_agent_view_form) and
         append a "Mistral provider settings" notebook tab.
 
         Layout note: Odoo 19's view validator is strict. Embedded <list>
@@ -21,7 +21,7 @@
     <record id="ai_agent_view_form_inherit_daadit_mistral" model="ir.ui.view">
         <field name="name">ai.agent.view.form.inherit.daadit_ai_mistral</field>
         <field name="model">ai.agent</field>
-        <field name="inherit_id" ref="ai_app.ai_agent_view_form"/>
+        <field name="inherit_id" ref="ai_agentic.ai_agent_view_form"/>
         <field name="arch" type="xml">
 
             <xpath expr="//form//sheet" position="inside">

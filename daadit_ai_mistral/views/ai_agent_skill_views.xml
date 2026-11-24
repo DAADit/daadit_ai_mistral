@@ -95,7 +95,7 @@
 
     <menuitem id="menu_daadit_ai_agent_skill"
               name="Agent Skills"
-              parent="ai_app.ai_config_menu"
+              parent="ai_agentic.ai_config_menu"
               action="action_daadit_ai_agent_skill"
               sequence="62"
               groups="base.group_system"/>
@@ -103,7 +103,7 @@
     <record id="ai_agent_view_form_inherit_daadit_skills" model="ir.ui.view">
         <field name="name">ai.agent.view.form.inherit.daadit.skills</field>
         <field name="model">ai.agent</field>
-        <field name="inherit_id" ref="ai_app.ai_agent_view_form"/>
+        <field name="inherit_id" ref="ai_agentic.ai_agent_view_form"/>
         <field name="arch" type="xml">
             <xpath expr="//field[@name='topic_ids']" position="after">
                 <field name="daadit_skill_ids"
@@ -116,7 +116,7 @@
     <record id="ai_agent_view_search_inherit_daadit_skills" model="ir.ui.view">
         <field name="name">ai.agent.view.search.inherit.daadit.skills</field>
         <field name="model">ai.agent</field>
-        <field name="inherit_id" ref="ai_app.ai_agent_view_search"/>
+        <field name="inherit_id" ref="ai_agentic.ai_agent_view_search"/>
         <field name="arch" type="xml">
             <xpath expr="//field[@name='topic_ids']" position="after">
                 <field name="daadit_skill_ids"/>

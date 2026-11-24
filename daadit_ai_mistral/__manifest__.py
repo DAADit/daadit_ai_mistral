@@ -32,7 +32,7 @@ in their respective files. Multiple candidate names are wrapped to survive
 across Odoo versions; verify against the installed Enterprise source on your
 Odoo.sh dev branch before relying on this in production.
 """,
-    "version": "20.0.10.1.1",
+    "version": "20.0.10.1.2",
     "category": "Productivity/Discuss",
     "author": "DAADit",
     "website": "https://daadit.group",
@@ -42,7 +42,7 @@ Odoo.sh dev branch before relying on this in production.
     "depends": [
         "base",
         "ai",
-        "ai_app",
+        "ai_agentic",
         # mail: deze module breidt mail.activity uit. Zonder de
         # afhankelijkheid hangt het ervan af of mail eerder in de
         # laadvolgorde staat, en die volgorde verschuift zodra er een
