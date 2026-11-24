@@ -44,7 +44,7 @@
             model="ir.ui.view">
         <field name="name">ai.agent.view.form.inherit.daadit.activity.scope</field>
         <field name="model">ai.agent</field>
-        <field name="inherit_id" ref="ai_app.ai_agent_view_form"/>
+        <field name="inherit_id" ref="ai_agentic.ai_agent_view_form"/>
         <field name="arch" type="xml">
 
             <xpath expr="//form//sheet" position="inside">

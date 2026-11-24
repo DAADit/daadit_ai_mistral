@@ -686,10 +686,10 @@ class AIAgent(models.Model):
         global_targets = registry_patches.discover_in_loaded_modules(
             module_prefix="odoo.addons.ai",
         )
-        # Also scan ai_app explicitly in case its module name doesn't
-        # nest under ``odoo.addons.ai`` (e.g. ``odoo.addons.ai_app``
+        # Also scan ai_agentic (ai_app in Odoo 19) explicitly in case its module name doesn't
+        # nest under ``odoo.addons.ai`` (e.g. ``odoo.addons.ai_agentic``
         # technically does match, but other 3rd-party prefixes wouldn't).
-        for extra_prefix in ("odoo.addons.ai_app", "odoo.addons.ai_crm",
+        for extra_prefix in ("odoo.addons.ai_agentic", "odoo.addons.ai_crm",
                              "odoo.addons.ai_documents"):
             for spec in registry_patches.discover_in_loaded_modules(
                 module_prefix=extra_prefix,

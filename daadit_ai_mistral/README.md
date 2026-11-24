@@ -60,9 +60,9 @@ through XML-RPC.
    `enterprise_custom_addons/` or wherever your custom addons live.
 2. Commit and push to your dev / staging branch first.
 3. On Odoo.sh, watch the build. Once green, open the database and update the
-   apps list, then install **DAADit AI — Mistral Provider**. The `ai_app`
-   module is pulled in automatically as a dependency, which itself pulls
-   `ai`, `ai_app`, `ai_crm`, `ai_documents`, etc.
+   apps list, then install **DAADit AI — Mistral Provider**. The `ai_agentic`
+   module (`ai_app` in Odoo 19) is pulled in automatically as a dependency,
+   which itself pulls `ai`, `attachment_indexation` and `base_automation`.
 4. Open **Settings → General Settings → AI**, toggle **Use your own Mistral
    AI account**, paste the key from <https://console.mistral.ai/>, save.
 5. Edit (or create) an `ai.agent`, set **LLM Model** to one of the Mistral
