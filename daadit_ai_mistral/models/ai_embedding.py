@@ -56,26 +56,18 @@ class AIEmbedding(models.Model):
     _inherit = "ai.embedding"
 
     # ------------------------------------------------------------------ #
-    # Selection extension                                                #
+    # No selection extension on Odoo 20                                  #
     #                                                                    #
-    # The stock ``ai.embedding.embedding_model`` is a STATIC selection   #
-    # — we append via ``selection_add=``.                                #
-    #                                                                    #
-    # ``ondelete`` can't use ``'set default'`` here because the stock    #
-    # field is ``required=True`` without a ``default=`` value (asserted  #
-    # by Odoo's fields_selection.py at field-setup time). Instead we     #
-    # provide an explicit fallback: if our ``mistral-embed`` option is   #
-    # removed (e.g. module uninstall), existing chunks switch to         #
-    # ``text-embedding-3-small`` — the OpenAI option that's always       #
-    # present in the stock selection. Re-running the embedding cron      #
-    # will regenerate the vectors against whichever provider is then     #
-    # active.                                                            #
+    # Up to Odoo 19 ``ai.embedding.embedding_model`` was a static        #
+    # Selection and this module appended ``mistral-embed`` with          #
+    # ``selection_add``. In Odoo 20 the stock field is a plain Char      #
+    # (verified in ir.model.fields: ttype ``char`` on both ai.embedding  #
+    # and ai.agent). Redeclaring it as a Selection with only             #
+    # ``selection_add`` fails field setup ("selection_add on non-list    #
+    # selection") and would turn a stock Char into a one-value           #
+    # Selection. A Char accepts ``mistral-embed`` as is, so there is     #
+    # nothing to extend.                                                 #
     # ------------------------------------------------------------------ #
-    embedding_model = fields.Selection(
-        selection_add=MISTRAL_EMBEDDING_SELECTION,
-        ondelete={key: "set text-embedding-3-small"
-                  for key, _label in MISTRAL_EMBEDDING_SELECTION},
-    )
 
     # ------------------------------------------------------------------ #
     # Mistral embedding generation                                       #
