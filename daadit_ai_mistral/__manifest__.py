@@ -32,7 +32,7 @@ in their respective files. Multiple candidate names are wrapped to survive
 across Odoo versions; verify against the installed Enterprise source on your
 Odoo.sh dev branch before relying on this in production.
 """,
-    "version": "20.0.10.1.1",
+    "version": "20.0.10.2.0",
     "category": "Productivity/Discuss",
     "author": "DAADit",
     "website": "https://daadit.group",
@@ -42,7 +42,9 @@ Odoo.sh dev branch before relying on this in production.
     "depends": [
         "base",
         "ai",
-        "ai_app",
+        # Odoo 20: ``ai_app`` bestaat niet meer. De views van deze module
+        # staan los (geen overerving van ai_app/ai_agentic), dus ``ai``
+        # volstaat om te installeren.
         # mail: deze module breidt mail.activity uit. Zonder de
         # afhankelijkheid hangt het ervan af of mail eerder in de
         # laadvolgorde staat, en die volgorde verschuift zodra er een
@@ -61,8 +63,10 @@ Odoo.sh dev branch before relying on this in production.
         "data/model_sync_cron.xml",
         "views/res_config_settings_views.xml",
         "views/mistral_usage_views.xml",
-        "views/ai_agent_skill_views.xml",
+        # ai_agent_views.xml eerst: de skill-, leesscope- en
+        # activiteitscope-views erven van de agentform die daarin staat.
         "views/ai_agent_views.xml",
+        "views/ai_agent_skill_views.xml",
         "views/mistral_model_views.xml",
         "views/ai_agent_read_scope_views.xml",
         "views/ai_agent_activity_scope_views.xml",

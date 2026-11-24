@@ -7,6 +7,39 @@ All notable changes to `daadit_ai_mistral`. Versions follow Odoo's
 - **minor** for new fields, views or non-breaking schema changes,
 - **patch** for bugfixes and v-specific compatibility tweaks.
 
+## 20.0.10.2.0 — 2026-11-24 — installeerbaar op Odoo 20 zonder ai_app
+
+De build op Odoo 20 brak op `depends: ai_app`; die module bestaat daar
+niet meer. De views die we ervan erfden zijn dus ook weg, en de XML-id's
+van hun opvolgers in `ai_agentic` zijn niet na te gaan. Daarom erft de
+module niets meer van de AI-app:
+
+- `depends` is nu `base`, `ai`, `mail`.
+- Agentform: eigen losstaande form/list/search voor `ai.agent`
+  (`ai_agent_view_form_daadit_mistral`) onder
+  **Settings → Mistral Agent Settings**. De skill-, leesscope- en
+  activiteitscope-views erven nu van die eigen form. De oude
+  `ai_agent_view_form_inherit_daadit_mistral` is vervallen.
+- Menu **Agent Skills** hangt onder Settings in plaats van onder
+  `ai_app.ai_config_menu`.
+- Instellingen: eigen blok **Mistral AI** op
+  `base.res_config_settings_view_form`. De hulpkaart met stappen voor
+  ChatGPT en Gemini is weg; die verwees naar velden van `ai_app`.
+- `ai.embedding.embedding_model` wordt niet meer als Selection met
+  `selection_add` herverklaard. In Odoo 20 is dat veld een Char; de
+  herverklaring laat de veldopbouw mislukken en zou een stockveld
+  ombouwen tot een Selection met één waarde.
+- `pre_init_hook`/`uninstall_hook` controleren of de kolommen bestaan.
+  Op Odoo 20 heeft stock `ai.agent` geen `llm_model` meer, en de
+  onvoorwaardelijke `UPDATE` zou de installatie afbreken.
+
+Let op: dit maakt de module installeerbaar, niet functioneel geport.
+Odoo 20 kent op `ai.agent` geen `llm_model`, `topic_ids` of
+`response_style` en geen `ai.topic` (tools hangen aan `ai.skill`). Of de
+patches op `_get_provider` en `LLMApiService` nog ergens op aangrijpen,
+moet tegen de Odoo 20-broncode worden nagegaan. De tests zijn niet op
+Odoo 20 gedraaid.
+
 ## 19.0.10.1.0 — 2026-09-16 — Bo's blauwdruk in code
 
 Wat Bo is — opdracht, leesmodellen, skills, activiteitscopes — stond

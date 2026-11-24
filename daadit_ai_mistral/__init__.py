@@ -58,20 +58,29 @@ UPDATE ai_embedding
 
 
 def _reset_mistral_values(env):
-    """Run the SQL fix-ups on whichever tables exist."""
+    """Run the SQL fix-ups on whichever tables/columns exist.
+
+    Odoo 20: stock ``ai.agent`` has no ``llm_model`` column any more —
+    on a fresh install the column only appears once THIS module's
+    field is created, i.e. after ``pre_init_hook``. Running the UPDATE
+    unconditionally aborts the install with ``UndefinedColumn``, so we
+    check the columns, not just the tables.
+    """
     cr = env.cr
     cr.execute("""
-        SELECT table_name FROM information_schema.tables
-         WHERE table_name IN ('ai_agent', 'ai_embedding')
+        SELECT table_name, column_name FROM information_schema.columns
+         WHERE (table_name = 'ai_agent' AND column_name = 'llm_model')
+            OR (table_name = 'ai_embedding'
+                AND column_name = 'embedding_model')
     """)
-    tables = {row[0] for row in cr.fetchall()}
-    if 'ai_agent' in tables:
+    columns = {tuple(row) for row in cr.fetchall()}
+    if ('ai_agent', 'llm_model') in columns:
         cr.execute(_RESET_LLM_SQL)
         _logger.info(
             "daadit_ai_mistral: reset %d ai_agent.llm_model values to gpt-4o",
             cr.rowcount,
         )
-    if 'ai_embedding' in tables:
+    if ('ai_embedding', 'embedding_model') in columns:
         cr.execute(_RESET_EMBED_SQL)
         _logger.info(
             "daadit_ai_mistral: reset %d ai_embedding.embedding_model values "

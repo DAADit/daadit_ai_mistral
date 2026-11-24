@@ -53,6 +53,17 @@ Adds **Mistral AI** as a third LLM provider for Odoo 19 Enterprise's built-in
 
 ## Install
 
+> **Odoo 20 — status of this branch.** The module installs with only the
+> stock `ai` module. That is *installability*, not a functional port:
+> Odoo 20's `ai.agent` has no `llm_model`, `topic_ids` or
+> `response_style`, there is no `ai.topic` (tools hang off `ai.skill`), and
+> there are no provider keys in Settings. The `llm_model` field on an agent
+> is created by this module, the per-agent settings live under
+> **Settings → Mistral Agent Settings**, and the provider patches
+> (`_get_provider`, `LLMApiService`) only take effect if those hooks still
+> exist in Odoo 20. Routing a stock Odoo 20 chat through Mistral needs a
+> separate port against the Odoo 20 `ai` source.
+
 This is a custom Odoo module — install via Odoo.sh or a local Odoo build, not
 through XML-RPC.
 
@@ -60,10 +71,9 @@ through XML-RPC.
    `enterprise_custom_addons/` or wherever your custom addons live.
 2. Commit and push to your dev / staging branch first.
 3. On Odoo.sh, watch the build. Once green, open the database and update the
-   apps list, then install **DAADit AI — Mistral Provider**. The `ai_app`
-   module is pulled in automatically as a dependency, which itself pulls
-   `ai`, `ai_app`, `ai_crm`, `ai_documents`, etc.
-4. Open **Settings → General Settings → AI**, toggle **Use your own Mistral
+   apps list, then install **DAADit AI — Mistral Provider**. On Odoo 20
+   it depends only on the stock `ai` module (`ai_app` no longer exists).
+4. Open **Settings → Mistral AI**, toggle **Use your own Mistral
    AI account**, paste the key from <https://console.mistral.ai/>, save.
 5. Edit (or create) an `ai.agent`, set **LLM Model** to one of the Mistral
    options, save, and try a prompt.

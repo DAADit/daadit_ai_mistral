@@ -95,17 +95,21 @@
 
     <menuitem id="menu_daadit_ai_agent_skill"
               name="Agent Skills"
-              parent="ai_app.ai_config_menu"
+              parent="base.menu_administration"
               action="action_daadit_ai_agent_skill"
-              sequence="62"
+              sequence="199"
               groups="base.group_system"/>
 
+    <!-- Odoo 20: erft van de eigen losstaande agentform (zie
+         ai_agent_views.xml, eerder geladen), niet meer van ai_app. Het
+         anker is het eigen veld llm_model; ``topic_ids`` bestaat op
+         Odoo 20 niet meer. -->
     <record id="ai_agent_view_form_inherit_daadit_skills" model="ir.ui.view">
         <field name="name">ai.agent.view.form.inherit.daadit.skills</field>
         <field name="model">ai.agent</field>
-        <field name="inherit_id" ref="ai_app.ai_agent_view_form"/>
+        <field name="inherit_id" ref="ai_agent_view_form_daadit_mistral"/>
         <field name="arch" type="xml">
-            <xpath expr="//field[@name='topic_ids']" position="after">
+            <xpath expr="//group[@name='daadit_mistral_main']/field[@name='llm_model']" position="after">
                 <field name="daadit_skill_ids"
                        widget="many2many_tags"
                        placeholder="Select the business-facing skills this agent can perform."/>
@@ -116,9 +120,9 @@
     <record id="ai_agent_view_search_inherit_daadit_skills" model="ir.ui.view">
         <field name="name">ai.agent.view.search.inherit.daadit.skills</field>
         <field name="model">ai.agent</field>
-        <field name="inherit_id" ref="ai_app.ai_agent_view_search"/>
+        <field name="inherit_id" ref="ai_agent_view_search_daadit_mistral"/>
         <field name="arch" type="xml">
-            <xpath expr="//field[@name='topic_ids']" position="after">
+            <xpath expr="//field[@name='llm_model']" position="after">
                 <field name="daadit_skill_ids"/>
             </xpath>
         </field>
